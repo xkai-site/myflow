@@ -1,0 +1,72 @@
+[
+  {
+    "id": "gpt-5.6-sol",
+    "name": "GPT-5.6 Sol (ChatGPT Codex 官方, 1M)",
+    "reasoning": true,
+    "input": ["text"],
+    "contextWindow": 1000000,
+    "maxTokens": 65536,
+    "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    }
+  },
+  {
+    "id": "gpt-5.6-terra",
+    "name": "GPT-5.6 Terra (ChatGPT Codex 官方, 1M)",
+    "reasoning": true,
+    "input": ["text"],
+    "contextWindow": 1000000,
+    "maxTokens": 65536,
+    "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    }
+  },
+  {
+    "id": "gpt-5.6-luna",
+    "name": "GPT-5.6 Luna (ChatGPT Codex 官方, 1M)",
+    "reasoning": true,
+    "input": ["text"],
+    "contextWindow": 1000000,
+    "maxTokens": 65536,
+    "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    }
+  },
+  {
+    "id": "gpt-5.5",
+    "name": "GPT-5.5 (ChatGPT Codex 官方)",
+    "reasoning": true,
+    "input": ["text"],
+    "contextWindow": 272000,
+    "maxTokens": 16384,
+    "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    }
+  },
+  {
+    "id": "gpt-5.4",
+    "name": "GPT-5.4 (ChatGPT Codex 官方)",
+    "reasoning": true,
+    "input": ["text"],
+    "contextWindow": 128000,
+    "maxTokens": 16384,
+    "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    }
+  }
+]
