@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "id": "qwen-token-plan",
+      "name": "Qwen Token Plan",
+      "adapter": "dashscope",
+      "baseUrl": "",
+      "apiKey": "",
+      "pollIntervalMs": 15000,
+      "taskTimeoutMs": 900000,
+      "maxOutputBytes": 536870912
+    }
+  ],
+  "models": [
+    {
+      "id": "happyhorse-1.1-t2v",
+      "name": "HappyHorse 1.1 Text to Video",
+      "provider": "qwen-token-plan",
+      "task": "t2v",
+      "prompt": { "maxChars": 5000, "maxCjkChars": 2500 },
+      "inputImages": {
+        "minimum": 0,
+        "maximum": 0,
+        "maxBytes": 20971520,
+        "mimeTypes": ["image/jpeg", "image/png", "image/webp"]
+      },
+      "parameters": [
+        { "key": "resolution", "label": "Resolution", "type": "select", "values": ["480P", "720P", "1080P"], "default": "1080P" },
+        { "key": "ratio", "label": "Aspect ratio", "type": "select", "values": ["16:9", "9:16", "1:1", "4:3", "3:4", "4:5", "5:4", "9:21", "21:9"], "default": "16:9" },
+        { "key": "duration", "label": "Duration (seconds)", "type": "integer", "minimum": 3, "maximum": 15, "step": 1, "default": 5 },
+        { "key": "watermark", "label": "Watermark", "type": "boolean", "default": false, "hidden": true },
+        { "key": "seed", "label": "Seed", "type": "integer", "minimum": 0, "maximum": 2147483647, "optional": true }
+      ]
+    },
+    {
+      "id": "happyhorse-1.1-i2v",
+      "name": "HappyHorse 1.1 Image to Video",
+      "provider": "qwen-token-plan",
+      "task": "i2v",
+      "prompt": { "maxChars": 5000, "maxCjkChars": 2500 },
+      "inputImages": {
+        "minimum": 1,
+        "maximum": 1,
+        "maxBytes": 20971520,
+        "mimeTypes": ["image/jpeg", "image/png", "image/webp"],
+        "minWidth": 300,
+        "minHeight": 300,
+        "minAspectRatio": 0.4,
+        "maxAspectRatio": 2.5
+      },
+      "parameters": [
+        { "key": "resolution", "label": "Resolution", "type": "select", "values": ["480P", "720P", "1080P"], "default": "1080P" },
+        { "key": "duration", "label": "Duration (seconds)", "type": "integer", "minimum": 3, "maximum": 15, "step": 1, "default": 5 },
+        { "key": "watermark", "label": "Watermark", "type": "boolean", "default": false, "hidden": true },
+        { "key": "seed", "label": "Seed", "type": "integer", "minimum": 0, "maximum": 2147483647, "optional": true }
+      ]
+    },
+    {
+      "id": "happyhorse-1.1-r2v",
+      "name": "HappyHorse 1.1 Reference to Video",
+      "provider": "qwen-token-plan",
+      "task": "r2v",
+      "prompt": { "maxChars": 5000, "maxCjkChars": 2500 },
+      "inputImages": {
+        "minimum": 1,
+        "maximum": 9,
+        "maxBytes": 20971520,
+        "mimeTypes": ["image/jpeg", "image/png", "image/webp"],
+        "minShortSide": 400
+      },
+      "referenceLabelTemplate": "[Image {index}]",
+      "parameters": [
+        { "key": "resolution", "label": "Resolution", "type": "select", "values": ["480P", "720P", "1080P"], "default": "1080P" },
+        { "key": "ratio", "label": "Aspect ratio", "type": "select", "values": ["16:9", "9:16", "1:1", "4:3", "3:4", "4:5", "5:4", "9:21", "21:9"], "default": "16:9" },
+        { "key": "duration", "label": "Duration (seconds)", "type": "integer", "minimum": 3, "maximum": 15, "step": 1, "default": 5 },
+        { "key": "watermark", "label": "Watermark", "type": "boolean", "default": false, "hidden": true },
+        { "key": "seed", "label": "Seed", "type": "integer", "minimum": 0, "maximum": 2147483647, "optional": true }
+      ]
+    }
+  ]
+}

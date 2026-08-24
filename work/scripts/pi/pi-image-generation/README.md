@@ -17,11 +17,7 @@
 
 ### OpenAI
 
-安装并登录本地扩展：
-
-```text
-D:/XuKai/Project/myflow/work/scripts/pi/pi-codex-official
-```
+安装并登录同级的 `pi-codex-official` 扩展。
 
 `/image` 通过 Pi 的 `ModelRegistry` 获取 `openai-codex` 当前 OAuth 凭据，沿用其自动刷新和凭据缓存，不读取或复制 OAuth 文件。
 
@@ -50,8 +46,10 @@ ALI 返回的图片 URL 仅短期有效，扩展会立即下载并原子写入�
 
 ## 安装
 
+在扩展目录的上一级执行：
+
 ```bash
-pi install D:/XuKai/Project/myflow/work/scripts/pi/pi-image-generation
+pi install ./pi-image-generation
 pi list
 ```
 

@@ -24,10 +24,10 @@
 pi remove npm:pi-codex-official
 ```
 
-安装当前本地目录：
+在扩展目录的上一级执行：
 
 ```bash
-pi install D:/XuKai/Project/myflow/work/scripts/pi/pi-codex-official
+pi install ./pi-codex-official
 ```
 
 确认安装结果：
