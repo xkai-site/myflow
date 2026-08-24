@@ -1,0 +1,5 @@
+# Pi-generated local images
+.pi/generated-images/
+
+# Accidental Windows device-name artifacts (for example, `> NUL` in Git Bash)
+NUL

@@ -1,0 +1,25 @@
+{
+  "name": "pi-image-generation",
+  "version": "0.1.0",
+  "description": "Pi /image extension for OpenAI Codex OAuth and Qwen Token Plan image generation",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "image-generation",
+    "openai",
+    "codex",
+    "qwen",
+    "wan"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  }
+}
