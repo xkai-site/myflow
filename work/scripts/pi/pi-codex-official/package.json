@@ -1,9 +1,12 @@
 {
   "name": "pi-codex-official",
   "version": "0.1.0",
-  "description": "Pi provider: OpenAI Codex via ChatGPT official (cc-switch managed OAuth refresh token)",
+  "description": "Pi provider: OpenAI Codex via the current CC Switch live ChatGPT OAuth account",
   "type": "module",
   "license": "MIT",
+  "scripts": {
+    "test": "node --test test/*.test.ts"
+  },
   "keywords": ["pi-package", "pi", "extension", "openai", "codex", "chatgpt", "oauth", "cc-switch"],
   "pi": {
     "extensions": ["./extensions/index.ts"]
