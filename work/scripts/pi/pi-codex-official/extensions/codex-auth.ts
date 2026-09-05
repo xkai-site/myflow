@@ -33,8 +33,8 @@ export function codexAuthFile(): string {
 
 function authError(authPath: string, detail: string): Error {
   return new Error(
-    `无法使用 CC Switch 当前 Codex 登录 (${authPath})：${detail}。` +
-      "请在 CC Switch 中重新选择或刷新 OpenAI Official 账号，然后重试。",
+    `无法使用 Codex 本地登录 (${authPath})：${detail}。` +
+      "请通过 Codex 更新登录，或在 CC Switch 中重新选择/刷新 OpenAI Official 账号，然后重试。",
   );
 }
 
@@ -127,7 +127,7 @@ interface LiveCodexOAuthConfig {
 
 export function createLiveCodexOAuthConfig(authPath: string = codexAuthFile()): LiveCodexOAuthConfig {
   return {
-    name: "OpenAI Codex (CC Switch 当前账号)",
+    name: "OpenAI Codex (Codex 本地凭据)",
     isSubscription: true,
     async login(): Promise<OAuthCredentials> {
       return readLiveCodexCredential(authPath);
@@ -138,7 +138,7 @@ export function createLiveCodexOAuthConfig(authPath: string = codexAuthFile()): 
     },
     getApiKey(_credentials) {
       // Pi 的 credential 只用于满足 OAuth 生命周期。实际请求始终重新读取
-      // CC Switch 投影出的 live auth，因此账号切换无需 /login 或重启 Pi。
+      // Codex live auth，因此账号切换无需 /login 或重启 Pi。
       return readLiveCodexCredential(authPath).access;
     },
   };

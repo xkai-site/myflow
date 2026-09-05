@@ -3,7 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
-import { createLiveCodexOAuthConfig, readLiveCodexCredential } from "../extensions/codex-auth.ts";
+import { codexAuthFile, createLiveCodexOAuthConfig, readLiveCodexCredential } from "../extensions/codex-auth.ts";
+import { codexModelsFile } from "../extensions/codex-models.ts";
 
 const NOW = 2_000_000_000_000;
 const OPENAI_AUTH_CLAIM = "https://api.openai.com/auth";
@@ -124,6 +125,29 @@ test("rejects malformed JWTs and missing required claims", (t) => {
   const missingClaims = `${encode({ alg: "none" })}.${encode({ exp: Math.floor((NOW + 3_600_000) / 1000) })}.sig`;
   writeAuth(authPath, "account-a", { accessToken: missingClaims });
   assert.throws(() => readLiveCodexCredential(authPath, NOW), /JWT 缺少/);
+});
+
+test("Codex auth and model cache always share the same home", (t) => {
+  const previous = process.env.CODEX_HOME;
+  t.after(() => {
+    if (previous === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previous;
+  });
+  for (const home of [undefined, "", "   ", "relative-codex", path.dirname(fixture(t))]) {
+    if (home === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = home;
+    const expected = home?.trim() ? path.resolve(home.trim()) : path.join(os.homedir(), ".codex");
+    assert.equal(codexAuthFile(), path.join(expected, "auth.json"));
+    assert.equal(codexModelsFile(), path.join(expected, "models_cache.json"));
+  }
+});
+
+test("login label and recovery instructions describe Codex credentials, not a required CC Switch", (t) => {
+  const authPath = fixture(t);
+  const oauth = createLiveCodexOAuthConfig(authPath);
+  assert.equal(oauth.name, "OpenAI Codex (Codex 本地凭据)");
+  assert.equal(oauth.isSubscription, true);
+  assert.throws(() => readLiveCodexCredential(authPath, NOW), /通过 Codex 更新登录，或在 CC Switch/);
 });
 
 test("rejects account identity mismatches", (t) => {

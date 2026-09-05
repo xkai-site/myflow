@@ -1,11 +1,16 @@
 {
   "name": "pi-codex-official",
   "version": "0.1.0",
-  "description": "Pi provider: OpenAI Codex via the current CC Switch live ChatGPT OAuth account",
+  "description": "Pi provider: reuse Codex local ChatGPT OAuth credentials and model cache",
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "test": "node --test test/*.test.ts"
+    "test": "node --test test/*.test.ts",
+    "test:host": "node test/host-lifecycle.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
   },
   "keywords": ["pi-package", "pi", "extension", "openai", "codex", "chatgpt", "oauth", "cc-switch"],
   "pi": {
