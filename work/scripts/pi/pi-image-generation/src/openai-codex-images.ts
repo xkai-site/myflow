@@ -1,5 +1,6 @@
 import { decodeGeneratedImage } from "./image-files.ts";
-import { mergeHeaders, providerError, readJsonResponse } from "./http.ts";
+import { requireImageEndpoint } from "./credentials.ts";
+import { mergeHeaders, requestImageJson } from "./http.ts";
 import type { GeneratedImage, ImageTransportOptions, ImageTransportResult } from "./types.ts";
 
 const JWT_CLAIM_PATH = "https://api.openai.com/auth";
@@ -38,7 +39,7 @@ export function extractChatGptAccountId(accessToken: string): string {
 export function buildOpenAICodexRequest(options: ImageTransportOptions): OpenAICodexRequest {
 	const accountId = extractChatGptAccountId(options.apiKey);
 	const isEdit = options.images.length > 0;
-	const baseUrl = normalizeCodexBaseUrl(options.baseUrl);
+	const baseUrl = requireImageEndpoint(options.baseUrl, "openai-codex-images");
 	const body: Record<string, unknown> = {
 		prompt: options.prompt,
 		background: "auto",
@@ -68,14 +69,18 @@ export function buildOpenAICodexRequest(options: ImageTransportOptions): OpenAIC
 
 export async function generateOpenAICodexImages(options: ImageTransportOptions): Promise<ImageTransportResult> {
 	const request = buildOpenAICodexRequest(options);
-	const response = await (options.fetch ?? globalThis.fetch)(request.url, {
+	const payload = await requestImageJson(request.url, {
 		method: "POST",
+		redirect: "error",
 		headers: request.headers,
 		body: JSON.stringify(request.body),
 		signal: options.signal,
+	}, MAX_RESPONSE_BYTES, {
+		fetch: options.fetch, operation: options.images.length ? "edit" : "generate",
+		secrets: [options.apiKey, options.prompt, ...options.images.map((image) => image.data)],
+		onDiagnostic: options.onDiagnostic, model: options.model,
+		settings: { size: String(request.body.size), quality: String(request.body.quality), referenceCount: options.images.length },
 	});
-	const payload = await readJsonResponse(response, MAX_RESPONSE_BYTES);
-	if (!response.ok) throw providerError(response, payload);
 	if (!payload || typeof payload !== "object") throw new Error("OpenAI Codex returned an invalid image response");
 	const object = payload as Record<string, unknown>;
 	if (!Array.isArray(object.data) || object.data.length === 0) {
@@ -96,20 +101,4 @@ export async function generateOpenAICodexImages(options: ImageTransportOptions):
 		texts,
 		responseId: typeof object.id === "string" ? object.id : undefined,
 	};
-}
-
-function normalizeCodexBaseUrl(baseUrl: string): string {
-	let url: URL;
-	try {
-		url = new URL(baseUrl);
-	} catch {
-		throw new Error("OpenAI Codex provider has an invalid base URL");
-	}
-	if (url.protocol !== "https:") throw new Error("OpenAI Codex image endpoint must use HTTPS");
-	let pathname = url.pathname.replace(/\/+$/, "");
-	if (!pathname.endsWith("/codex")) pathname += "/codex";
-	url.pathname = pathname;
-	url.search = "";
-	url.hash = "";
-	return url.toString().replace(/\/$/, "");
 }

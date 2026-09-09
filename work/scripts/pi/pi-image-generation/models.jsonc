@@ -1,0 +1,141 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "id": "openai", "name": "OpenAI Codex", "adapter": "openai-codex-images",
+      "auth": { "type": "provider", "providerId": "openai-codex" },
+      "defaultModel": "openai"
+    },
+    {
+      "id": "qwen", "name": "Qwen Token Plan CN", "adapter": "ali-wan-images",
+      "auth": { "type": "api-key", "env": "PI_IMAGE_QWEN_API_KEY", "fallbackProviderId": "qwen-token-plan-cn" },
+      "defaultModel": "wan"
+    }
+  ],
+  "models": [
+    {
+      // Keep key stable when upgrading id.
+      "key": "openai", "id": "gpt-image-2", "name": "GPT Image 2", "provider": "openai",
+      "tasks": ["generate", "edit"],
+      "prompt": { "maxChars": 32000 },
+      "inputImages": { "maximum": 5, "maxBytes": 52428800, "mimeTypes": ["image/png", "image/jpeg", "image/webp", "image/bmp"] },
+      "size": {
+        "generate": {
+          "default": "auto",
+          "options": [
+            { "value": "auto", "label": "Automatic" },
+            { "value": "1024x1024", "label": "Square" },
+            { "value": "1536x1024", "label": "Landscape" },
+            { "value": "1024x1536", "label": "Portrait" }
+          ],
+          "custom": { "separator": "x", "minPixels": 655360, "maxPixels": 8294400, "maxSide": 3840, "maxRatio": 3, "multipleOf": 16 }
+        }
+      },
+      "quality": {
+        "default": "auto",
+        "options": [
+          { "value": "auto", "label": "Automatic" },
+          { "value": "low", "label": "Low — fastest" },
+          { "value": "medium", "label": "Medium — balanced" },
+          { "value": "high", "label": "High — highest detail" }
+        ]
+      }
+    },
+    {
+      "key": "wan", "id": "wan2.7-image", "name": "Wan 2.7 Image", "provider": "qwen",
+      "tasks": ["generate", "edit"],
+      "prompt": { "maxChars": 5000 },
+      "inputImages": { "maximum": 9, "maxBytes": 20971520, "mimeTypes": ["image/png", "image/jpeg", "image/webp", "image/bmp"] },
+      "size": {
+        "generate": {
+          "default": "2K",
+          "options": [{ "value": "1K", "label": "1K" }, { "value": "2K", "label": "2K" }],
+          "custom": { "separator": "*", "minPixels": 589824, "maxPixels": 4194304, "maxRatio": 8, "multipleOf": 1 }
+        }
+      }
+    },
+    {
+      "key": "wan-pro", "id": "wan2.7-image-pro", "name": "Wan 2.7 Image Pro", "provider": "qwen",
+      "tasks": ["generate", "edit"],
+      "prompt": { "maxChars": 5000 },
+      "inputImages": { "maximum": 9, "maxBytes": 20971520, "mimeTypes": ["image/png", "image/jpeg", "image/webp", "image/bmp"] },
+      "size": {
+        "generate": {
+          "default": "2K",
+          "options": [{ "value": "1K", "label": "1K" }, { "value": "2K", "label": "2K" }, { "value": "4K", "label": "4K" }],
+          "custom": { "separator": "*", "minPixels": 589824, "maxPixels": 16777216, "maxRatio": 8, "multipleOf": 1 }
+        },
+        // Editing has a lower size limit.
+        "edit": {
+          "default": "2K",
+          "options": [{ "value": "1K", "label": "1K" }, { "value": "2K", "label": "2K" }],
+          "custom": { "separator": "*", "minPixels": 589824, "maxPixels": 4194304, "maxRatio": 8, "multipleOf": 1 }
+        }
+      }
+    },
+    {
+      // Public Image API support is NOT proof of Codex OAuth endpoint compatibility.
+      // Keep these definitions, but require explicit opt-in after backend verification.
+      // https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst
+      "key": "openai-sunburst", "id": "gpt-image-2.5-sunburst", "name": "GPT Image 2.5 Sunburst", "provider": "openai",
+      "enabled": true,
+      "tasks": ["generate", "edit"],
+      "prompt": { "maxChars": 32000 },
+      "inputImages": { "maximum": 5, "maxBytes": 52428800, "mimeTypes": ["image/png", "image/jpeg", "image/webp", "image/bmp"] },
+      "size": {
+        "generate": {
+          "default": "auto",
+          "options": [
+            { "value": "auto", "label": "Automatic" },
+            { "value": "1024x1024", "label": "Square" },
+            { "value": "1536x1024", "label": "Landscape" },
+            { "value": "1024x1536", "label": "Portrait" }
+          ],
+          "custom": { "separator": "x", "minPixels": 655360, "maxPixels": 8294400, "maxSide": 3840, "maxRatio": 3, "multipleOf": 16 }
+        }
+      },
+      "quality": {
+        "default": "auto",
+        "options": [
+          { "value": "auto", "label": "Automatic" },
+          { "value": "low", "label": "Low — fastest" },
+          { "value": "medium", "label": "Medium — balanced" },
+          { "value": "high", "label": "High — high detail" },
+          { "value": "xhigh", "label": "Extra high — finer detail" },
+          { "value": "max", "label": "Max — highest detail" }
+        ]
+      }
+    },
+    {
+      // https://developers.openai.com/api/docs/models/gpt-image-2.5-flare
+      "key": "openai-flare", "id": "gpt-image-2.5-flare", "name": "GPT Image 2.5 Flare", "provider": "openai",
+      "enabled": true,
+      "tasks": ["generate", "edit"],
+      "prompt": { "maxChars": 32000 },
+      "inputImages": { "maximum": 5, "maxBytes": 52428800, "mimeTypes": ["image/png", "image/jpeg", "image/webp", "image/bmp"] },
+      "size": {
+        "generate": {
+          "default": "auto",
+          "options": [
+            { "value": "auto", "label": "Automatic" },
+            { "value": "1024x1024", "label": "Square" },
+            { "value": "1536x1024", "label": "Landscape" },
+            { "value": "1024x1536", "label": "Portrait" }
+          ],
+          "custom": { "separator": "x", "minPixels": 655360, "maxPixels": 8294400, "maxSide": 3840, "maxRatio": 3, "multipleOf": 16 }
+        }
+      },
+      "quality": {
+        "default": "auto",
+        "options": [
+          { "value": "auto", "label": "Automatic" },
+          { "value": "low", "label": "Low — fastest" },
+          { "value": "medium", "label": "Medium — balanced" },
+          { "value": "high", "label": "High — high detail" },
+          { "value": "xhigh", "label": "Extra high — finer detail" },
+          { "value": "max", "label": "Max — highest detail" }
+        ]
+      }
+    }
+  ]
+}

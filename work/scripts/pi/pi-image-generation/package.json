@@ -4,6 +4,15 @@
   "description": "Pi /image extension for OpenAI Codex OAuth and Qwen Token Plan image generation",
   "type": "module",
   "license": "MIT",
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "test:host": "node test/host-lifecycle.mjs",
+    "test:baseline": "node test/compare-baseline.mjs"
+  },
+  "dependencies": {
+    "jsonc-parser": "3.3.1",
+    "proper-lockfile": "4.1.2"
+  },
   "keywords": [
     "pi-package",
     "pi",

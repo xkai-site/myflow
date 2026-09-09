@@ -1,6 +1,13 @@
 # Pi-generated local media
 **/.pi/generated-images/
 **/.pi/generated-videos/
+**/.pi/image-generation-logs/
 
 # Accidental Windows device-name artifacts (for example, `> NUL` in Git Bash)
 NUL
+
+/乐元素笔试/1/res.md
+
+/乐元素笔试/4/res.md
+
+/乐元素笔试/workflow.md

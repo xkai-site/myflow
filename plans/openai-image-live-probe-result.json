@@ -1,0 +1,11 @@
+{
+  "mode": "plugin-live",
+  "model": "gpt-image-2",
+  "size": "auto",
+  "quality": "auto",
+  "references": 0,
+  "status": "failed",
+  "error": "生成请求失败 · chatgpt.com · 响应读取\nHTTP 429\nProvider request failed (HTTP 429): The usage limit has been reached\n请求受限：检查额度和限流状态，稍后再试。\n诊断日志（当前项目）：.pi\\image-generation-logs\\error-5db73ba5-7b06-4923-b547-47f19cb39436.json",
+  "calls": 1,
+  "elapsedMs": 1792
+}

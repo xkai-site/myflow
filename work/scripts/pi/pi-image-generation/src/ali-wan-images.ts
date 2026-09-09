@@ -1,5 +1,6 @@
 import { detectImage } from "./image-files.ts";
-import { downloadImage, mergeHeaders, providerError, readJsonResponse } from "./http.ts";
+import { requireImageEndpoint } from "./credentials.ts";
+import { downloadImage, mergeHeaders, requestImageJson } from "./http.ts";
 import type { GeneratedImage, ImageTransportOptions, ImageTransportResult } from "./types.ts";
 
 const MAX_JSON_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -17,7 +18,7 @@ export function buildAliWanRequest(options: ImageTransportOptions): AliWanReques
 	}));
 	content.push({ text: options.prompt });
 	return {
-		url: `${normalizeTokenPlanBaseUrl(options.baseUrl)}/services/aigc/multimodal-generation/generation`,
+		url: `${requireImageEndpoint(options.baseUrl, "ali-wan-images")}/services/aigc/multimodal-generation/generation`,
 		headers: mergeHeaders(options.headers, {
 			Authorization: `Bearer ${options.apiKey}`,
 			Accept: "application/json",
@@ -41,14 +42,17 @@ export function buildAliWanRequest(options: ImageTransportOptions): AliWanReques
 
 export async function generateAliWanImages(options: ImageTransportOptions): Promise<ImageTransportResult> {
 	const request = buildAliWanRequest(options);
-	const response = await (options.fetch ?? globalThis.fetch)(request.url, {
+	const secrets = [options.apiKey, options.prompt, ...options.images.map((image) => image.data), ...Object.values(options.headers ?? {}).filter((value): value is string => value !== null)];
+	const payload = await requestImageJson(request.url, {
 		method: "POST",
+		redirect: "error",
 		headers: request.headers,
 		body: JSON.stringify(request.body),
 		signal: options.signal,
+	}, MAX_JSON_RESPONSE_BYTES, {
+		fetch: options.fetch, operation: options.images.length ? "edit" : "generate",
+		secrets, onDiagnostic: options.onDiagnostic, model: options.model,
 	});
-	const payload = await readJsonResponse(response, MAX_JSON_RESPONSE_BYTES);
-	if (!response.ok) throw providerError(response, payload);
 	const { imageUrls, texts, responseId } = parseAliWanResponse(payload);
 	if (imageUrls.length === 0) throw new Error("ALI Token Plan returned no image URLs");
 
@@ -59,6 +63,7 @@ export async function generateAliWanImages(options: ImageTransportOptions): Prom
 			signal: options.signal,
 			fetch: options.fetch,
 			maxBytes: MAX_IMAGE_BYTES,
+			secrets, onDiagnostic: options.onDiagnostic, model: options.model,
 		});
 		const detected = detectImage(downloaded.bytes);
 		if (!detected) throw new Error("ALI Token Plan returned an unsupported image format");
@@ -102,20 +107,6 @@ export function parseAliWanResponse(payload: unknown): {
 		texts,
 		responseId: typeof root.request_id === "string" ? root.request_id : undefined,
 	};
-}
-
-function normalizeTokenPlanBaseUrl(baseUrl: string): string {
-	let url: URL;
-	try {
-		url = new URL(baseUrl);
-	} catch {
-		throw new Error("Qwen Token Plan provider has an invalid base URL");
-	}
-	if (url.protocol !== "https:") throw new Error("Qwen Token Plan image endpoint must use HTTPS");
-	url.pathname = "/api/v1";
-	url.search = "";
-	url.hash = "";
-	return url.toString().replace(/\/$/, "");
 }
 
 function normalizeMimeType(mimeType: string): string {

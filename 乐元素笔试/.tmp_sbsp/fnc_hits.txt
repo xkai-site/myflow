@@ -1,0 +1,210 @@
+79:        3.5 A European SPS Development Roadmap ............................................................................................................... 44
+96:Table 3-1 Typical Satellite Mass Breakdown for 1.44 GW syste m .............................................................................................. 20
+100:Table 3-5 Development Cost Estimates ........................................................................................................................................... 30
+102:Table 3-7 LCOE and VALCOE 2040, by energy source (2022 prices, /MWh) .......................................................................... 33
+113:System ( millions rounded to nearest million) ............................................................................................................................. 55
+125:Figure 3-5 Operating and Capital Expenditure for the Averaged Five European Countries with a 1.44 GW FOAK SBSP
+127:Figure 3-6 Predicted LCOE for the Averaged Five European Countries with a 1.44 GW FOAK SBSP Syste m ..................... 28
+128:Figure 3-7 LCOE Sensitivity to Chosen Hurdle Rate (5% - mustard, 10% - purple, 15% - blue and 20% - red) for the
+130:Figure 3-8 LCOE Sensitivity to Space Lift Costs Varying from Low (red - 454 /kg), Median (blue ­ 1,877 /kg) and High
+138:Figure 3-9 LCOE and VALCOE, by energy source (2022 prices, /MWh)................................................................................... 34
+298:                      (TRL) and considering development difficulty.
+315:                 in Annex A.1. Annex A.2 details the approach to estimating development costs.
+411:    generation types, considering both the levelised cost of electricity (LCOE) and the more holistic value-added LCOE
+412:    (VALCOE). The difference between VALCOE and LCOE was integral to the benchmarking of SBSP as a marginal
+482:                Discount rate for LCOE: a discount rate is used to account for the costs of capital and risks in the
+485:2 Europe is defined by the `seven continents' definition of Europe, comprising an area of 10.18 million km2 or 2% of
+513:LCOE         The funder / owner / operator of the first of a kind will ultimately be the arbitrator of all
+529:             The LCOE estimate relies on many assumptions which cannot be verified this far in advance. The
+601: Economic analysis of SBSP has tended to focus rather narrowly on the LCOE, rather than the wider holistic benefits
+612: There is limited information (2 references) on the sensitivity of LCOE to parameters such as the cost of money,
+662:    to TRL 8.
+782:microwave beam at the centre of the rectenna on the ground is 245 W/m2. Each system generates 1.44 GW of
+790:Table 3-1 Typical Satellite Mass Breakdown for 1.44 GW system
+822:rectenna on the ground is 245 W/m2. Each system generates 1.44 GW of electrical power into the grid.
+829:Table 3-1 Typical Satellite Mass Breakdown for 1.44 GW system
+904:distributed and collected, culminating in 1.44 GW power into the grid. A detailed breakdown of the power flow
+934:Technology Readiness Levels (TRLs) provide a scale to measure the current maturity of the technologies required to
+935:realise a system. The TRL scale we have used is based on ISO 16290 and described in Annex A.6. The development
+940:in Table 3-2. The combination of TRL and DDD can be used to highlight the development priorities for the system,
+941:concentrating first on the elements with lower TRL and higher DDD.
+945:                Subsystem element             TRL  Development Degree
+981:                Subsystem element                               TRL  Development Degree
+1012:The combination of TRL and development degree of difficulty discussed in section 3.2.3 can be used to identify
+1024:    demonstrate some increase in the beaming distances by using a high-altitude platform station (HAPS) to
+1025:    demonstrate WPT from the upper atmosphere, ultimately it will be necessary to put a demonstration system into
+1026:    orbit to demonstrate WPT over meaningful distances for SBSP.
+1120:electricity (LCOE) value using an industry standard formula (see TN3 [3]). The cost elements are shown in Table 3-3.
+1144:Figure 3-5 shows operational and capital expenditure for a 1.44 GW FOAK SBSP system. Opex over the 30-year
+1154:Figure 3-5 Operating and Capital Expenditure for the Averaged Five European Countries with a 1.44 GW FOAK SBSP
+1199:3.3.2 Levelised Cost of Electricity (LCOE)
+1201:A European-wide average LCOE was computed for a 1.44 GW FOAK system using average elevation and land cost data,
+1202:and a 20% hurdle rate. Figure 3-6 plots the cumulative distribution function for the LCOE which shows an expected
+1204:Figure 3-6 Predicted LCOE for the Averaged Five European Countries with a 1.44 GW FOAK SBSP System
+1208:the investors who finance the construction and operation of the system will expect. Therefore, the LCOE has been
+1211:Figure 3-7 LCOE Sensitivity to Chosen Hurdle Rate (5% - mustard, 10% - purple, 15% - blue and 20% - red) for the
+1219:As indicated in Table 3-4, Spacelift cost is the largest cost element of Capex and hence LCOE. Wh ilst the cost analyses
+1220:presented above use a distribution of spacelift costs, a sensitivity analysis explored the variation of LCOE if the
+1221:spacelift costs are fixed. To provide a comparison the analysis examines the LCOE with spacelift cost (euro) per kg t o
+1230:The results of the sensitivity tests (Figure 3-8) demonstrate that spacelift costs significantly affect the LCOE, and that
+1231:fixing the spacelift cost reduces the variance in LCOE across the probability range from 10% to 90%. If the spacelift
+1233:between NASA and SpaceX (~400/kg), then the LCOE of SBSP is highly competitive compared to other electricity
+1236:Figure 3-8 LCOE Sensitivity to Space Lift Costs Varying from Low (red - 454 /kg), Median (blue ­ 1,877 /kg) and High
+1239:Further sensitivity analysis was carried out on the mean of the structural mass ratio, which concluded that the LCOE is
+1243:3.3.3 Development Costs
+1245:Development costs for the four phases presented in the detailed roadmap (section 3.5) were estimated by adopting a
+1255:Table 3-5 Development Cost Estimates
+1259:            Ground based WPT          40 MW scale            500 MW demonstrator      Full scale production
+1260:            trials.                   demonstrator in polar  in an operational orbit  prototype in an
+1276:Benchmarking these development costs is a challenge. While a significant proportion of the costs are associated with
+1282:billion dollars over 10 years to design, build and deploy the 2,300 mass-produced Starlink satellite constellation.
+1399:(LCOE). The LCOE estimates the average price at which the electricity generated must be sold to br eak even on the
+1400:investment. LCOE enables comparisons between different technologies with different lifetimes, generation capacities,
+1408:LCOE has some drawbacks: it does not incorporate the `social cost of carbon' and other negative externalities; fails to
+1412:VALCOE, the `value adjusted' accompaniment to LCOE, aims to address some of LCO E's shortcomings. It achieves this
+1419:Table 3-7 LCOE and VALCOE 2040, by energy source (2022 prices, /MWh)
+1421:Macro group   Subgroup   Generation technology            LCOE   VALCOE
+1460:[T]: Trinomics (2020), Final Report Cost of Energy (LCOE), EC DG Energy
+1463:to Nuclear, and therefore the total value adjustment assumed for SBSP is 0 ­ meaning the VALCOE equals the LCOE.
+1474:to nuclear in terms of value adjustment parameters, and so no value adjustment is made to SBSP's LCOE as is the case
+1476:for LCOE and VALCOE for each energy producing source :
+1480:Figure 3-9 LCOE and VALCOE, by energy source (2022 prices, /MWh)
+1486:300                                                                                  Note: indicates VALCOE
+1504:[T]: Trinomics (2020), Final Report Cost of Energy (LCOE), EC DG Energy
+1508:biomass, and less competitive versus the remaining power generation technologies on LCOE and VALCOE terms. SBSP
+1510:moving from LCOE to VALCOE comparisons. On the other hand, SBSP becomes relatively less competitive versus fossil
+1511:fuels when moving from comparisons on a VALCOE rather than LCOE basis.
+1517:A risk-adjusted discount rate or `hurdle rate' of 20% is used when evaluating the LCOE of SBSP. This is based on
+1519:make SBSP more competitive in VALCOE terms by up to 50% when using a 10% discount rate.
+1522:in the LCOE. The choice of economically optimal levels of taxes and/or subsidies for SBSP are impossible to determine
+1537:government intervention, price as captured by the VALCOE, would therefore be the determinant of the make -up of
+1547:an LCOE basis (albeit weaker on a VALCOE basis). SBSP, however, is a firm and dispatchable source of electricity that
+1549:different argument for the use of SBSP. Likewise, VALCOE or LCOE estimate fails to account for the social cost of
+1550:carbon. This cost exceeds the carbon pricing used in VALCOE and LCOE estimates and suggests that fossil fuel energy
+1551:sources impose much larger costs on society than is implied by comparisons of VALCOE and LCOE. Finally, nuclear
+1597:Given an average annual yield of around 11.3 TWh6 of gross electricity generation to the grid from a single 1.44 GW
+1678:                 ­ Public acceptance is a key challenge for the SBSP programme and efforts to demonstrate the low risk
+1684:considering the total launch requirement of a single 1.44 GW SBSP system under a conservative assumption of
+1687:              The total spacelift mass that is needed to put a 1.44 GW SBSP system into orbit is 2,491 metric tons. This
+1697:single 1.44 GW SBSP system into orbit. Given current available Starship capacity (see Annex A.9), this would suggest
+1946:expenditure, followed by operation & maintenance, and research & development costs.
+1956:Table 3-11 NPV of SBSP benefits: Summary                NPV ( billions)
+1999:Base case scenario                                                billions           209.8
+2001:Lower social discount rate - 2.5%                                 billions           261.8
+2003:Higher social discount rate - 3.5%                                billions           215.4
+2005:Higher fossil fuel costs                                          billions
+2007:Lower social cost of carbon - 300/tonne of CO2                    billions
+2009:Higher social cost of carbon - 400/tonne of CO2                   billions
+2011:Business-As-Usual scenario                                        billions
+2013:Slower SBSP ramp-up ­ US and European launch capability scenario  billions
+2016:Double SBSP costs (CAPEX, OPEX, development)                      billions
+2018:Double SBSP costs and slower ramp up (US and European launch      billions
+2021:Double SBSP costs and slower ramp up (US and European launch      billions
+2051:Furthermore, development costs of enabling technologies and services (not least European low-cost heavy-lift launch
+2060:              Update technological feasibility studies and demonstrate technological advancement in key areas;
+2092:              Forward-looking LCOE and VALCOE estimates rely on many assumptions. Although these are sourced
+2108:3.5 A European SPS Development Roadmap
+2114:(development testing, initial in-orbit demonstrations, full system in-orbit demonstrations, production level scale-up)
+2116:in-orbit demonstrators and technology progression.
+2140:the cell. In parallel with these demonstration trials, the systems that will be trialled in the subsequent stages will be
+2143:Phase 2 ­ Initial in-orbit demonstrations
+2144:The second phase centres around in-orbit demonstrations. This will involve a solar power satellite and associated
+2151:satellites will need to demonstrate. It will use conventional self-deployment mechanisms to erect the satellite in orbit.
+2157:Phase 3 ­ Full system in-orbit demonstration
+2159:The third phase brings all the key elements of the system together into an in-orbit demonstrator that includes all the
+2177:Section 3.2.3. It shows the required TRL development for each sub-system. A high-level description of the primary
+2192:                                     Satellite collect                       TRL5                                       TRL8           TRL9
+2194:                                     Satellite convert                       TRL6                        TRL7           TRL9
+2196:                    Satellite        Satellite transmit                      TRL4            TRL5        TRL6           TRL7           TRL9
+2198:                                     Satellite structure                     TRL3            TRL3        TRL5           TRL8           TRL9
+2200:                                     Satellite thermal management            TRL6                        TRL6           TRL9
+2202:Core Power Systems                   Satellite control system                TRL4                        TRL5           TRL7           TRL9
+2204:                                     Satellite station keeping               TRL3                        TRL4           TRL7           TRL9
+2206:                                     Satellite communications                TRL6                        TRL7           TRL9
+2208:                                     Ground receive                          TRL4            TRL6                       TRL9
+2210:                                     Ground convert                          TRL7                                       TRL9
+2212:                    Ground Stations  Ground distribute                       TRL7                                       TRL9
+2214:                                     Ground grid connection                  TRL8                                       TRL8  TRL9
+2216:                                     Ground structure                        TRL7                                       TRL9
+2218:                                     Ground control system                   TRL6                        TRL8           TRL9
+2220:                                     Ground Operations: Power Control Interface TRL8                                    TRL8  TRL9
+2222:                                     Satellite operation: Mission Control Interface TRL5                 TRL8           TRL9
+2224:                                     Ground communications                   TRL4            TRL5        TRL7           TRL8           TRL9
+2226:                                     Spacelift                               TRL7                              TRL8           TRL9
+2228:                    Satellite        Satellite component/module manufacture  TRL6                        TRL8  TRL9
+2230:Enabling Systems                     In-orbit assembly                       TRL3                  TRL4  TRL6  TRL8     TRL9
+2232:                                     In-Orbit maintenance                    TRL3                  TRL4  TRL6  TRL8     TRL9
+2234:                                     Decommission satellite                  TRL2                                                      TRL7
+2236:                                     Rectenna manufacture                    TRL4                                       TRL8           TRL9
+2238:                    Ground           Power station construction              TRL8                                                      TRL9
+2240:                                     Operation Station construction          TRL8                                                      TRL9
+2242:                                     Maintenance of Ground Stations          TRL7                                                      TRL8
+2244:                                     Decommission Ground Stations            TRL8                                                      TRL8
+2252:the development programme, the demonstration satellites increase in size and the power beaming distance increases.
+2262:convert and transmit functionality of the core modules will have been demonstrated. Development Phase 3 will allow
+2267:mirror system used on the demonstration satellite in Development Phase 2 will be self -deploying without the use of
+2271:orbit demonstrations as part of Development Phase 3. Throughout the development phases appropriate use will be
+2298:indicators (KPI). As the roadmap matures, targeted values should be developed to monitor progress. Several KPIs are
+2303:                 Monitoring the true value of financial metrics referred to in elsewhere in the report, such as LCOE and
+2329:theoretical maximum demand for SBSP as a function of SBSP's Value -Adjusted Levelised Cost of Electricity (VALCOE),
+2336:years. Further, as demonstrated in TN4 and referred to above, land availability should not be a significant constraint,
+2451:groups. NIMBYism could pose a substantial threat to the location of rectennas. The success of the demonstration
+2476:                 prohibitive in the short-term. Government involvement to de-risk SBSP technology and demonstrate a
+2489:capacity), but this can only happen if it is preceded by efforts to de -risk the technology and demonstrate that it is both
+2491:sector resources to deliver a successful pilot and early demonstrator programme as soon as possible. Since a large
+2501:              Large upfront capital expenditure (CAPEX) in the rough order of magnitude (ROM) of  billions.
+2577:Price Efficiency          High costs  Low costs   High development costs,
+2618:development of an FOAK SBSP 1.44 GW system, there is a high risk that the internal rate of return does not exceed a
+2627:demonstrates the optimum proportion of government funding for the development costs which would help the
+2630:could be procured (displacement). When development costs are covered by a central government grant, it becomes
+2640:SBSP to the public sector could reach 6 billion and with 4 billion co-leveraged from the private sector. The main
+2646:the private sector is less assuming a successful demonstrator programme. Therefore, the total cost costs of to the
+2647:public sector across the four phases is circa. 3 billion with a requirement of co-leveraged private investor funds of
+2654:circa. 7 billion. Therefore, a reduction in perceived risk and high cost of capital has a significant effect on the
+2660:                        TRL6      TRL7             TRL8       TRL9
+2671:                        TRL6             TRL7      TRL8       TRL9
+2683:the investment risk of SBSP). Table 3-17 demonstrates the calculated strike prices for each government budget
+2684:constraint. As the public funding share of development costs increases, the strike price falls such that the private
+2688:System ( millions rounded to nearest million)
+2771:                          the yield calculation and therefore the LCOE.
+2808:Cost of finance           A 20% discount rate is used for discounting in the calculation of LCOE. The discount rate is
+2821:R&D costs    The CAPEX, OPEX and LCOE cost calculations assume that the necessary research,
+2831:             The development costs for each module are spread throughout the programme to allow
+2843:A.2 Approach to estimating development costs
+2857: Apportion the hardware development costs of each system element over the relevant phases of the developme nt
+2866:                                 Rate of Development Spend against Technical Maturity Level (TRL)
+2920: RD 5       A Path Forward for Space Solar Power: SPS-ALPHA Demonstrations to Operations (2017)
+2921: RD 6       SPS-ALPHA Mark-III and an Achievable Roadmap to Space Solar Power (2021)
+2925: RD 10      Net Zero by 2050: A Roadmap for the Global Energy Sector (2021)
+2929: RD 13      Roadmap 2050: A Practical Guide to a Prosperous, Low-Carbon Europe (2010)
+2950:AD 7        EC (2011) European Energy Roadmap 2050
+2970:AD 27       Roadmap 2050: A practical guide to a prosperous, low carbon Europe. Vol 1: Technical and Economic
+2981:AD 31       Net Zero by 2050: A Roadmap for the Global Energy Sector. (2021)
+3058:area of 10.18 million km2 or 2% of the Earth's surface, and 50 sovereign states. Coverage is assumed on the European
+3083:source, where the LCOE of SBSP vs alternatives is lower), and to society at large as a result of the spillovers associated
+3120: Discount rate for LCOE calculation: a discount rate to account for the costs of capital and risks in the project is
+3125:    LCOE calculation should be a risk-adjusted rate as investors would need to be compensated for the additional
+3132:    and the possibility of future technical demonstrations which may reduce the per ceived technical risk of the
+3145: TRL        ISO standard 16290:2013 Definition Explanation
+3168:            demonstrating the critical functions   relevant environment. This is either exposed to the analogous
+3176:            Model (physical prototype)             System prototype demonstration in a space environment.
+3177:            demonstrating the element
+3183:            qualified")                            demonstration (ground or space). Full Scale.
+3286:                 an increasingly larger scale as the size of the demonstration        Controlling interference
+3303:                 requirements will be needed. The structure of the demonstration      Constraints / Issues
+3308:                 design of the demonstration satellite launched in Development        performance.
+3321:                 performance of the core modules. The trials on the demonstration
+3325:                                                                                      terrestrial test facilities
+3342:                 for the Phase 2 demonstration satellite and the full functionality
+3343:                 tested on the Development Phase 3 demonstration satellite.           The physical size of the
+3358:                 demonstration satellite in Development Phase 3. The trials on the    operational life of the
+3379:                     demonstration satellite. The capability of the system will be          Deployment of
+3390:                     demonstration satellite. The basic arrangement of a rectenna           Start: Year 3
+3458:                      the development missions will use existing facilities. The        Constraints / Issues
+3552:                    assemble the demonstrator in Development Phase 3. The               Constraints / Issues
+3569:                                                                                      terrestrial test facilities
+3582:                     An outline scheme for decommissioning the demonstration          The physical size of the
+3618:                     both these stations will be needed for the demonstration in       Nil
+3660:This issue can be understood by considering the total launch requirement of a single 1.44 GW SBSP system under a
+3663:       The total spacelift mass that is needed to put a 1.44 GW SBSP system into orbit is 2,491 metric tons. This is
+3673:single 1.44 GW SBSP system into orbit.

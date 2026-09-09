@@ -1,0 +1,371 @@
+31:electricity, and delivery to the grid or to batteries for storage. Experts in both the aerospace and
+80:gigawatts (GW) of power to the electric grid to be comparable to very large terrestrial solar power
+85:Each SBSP design's size (which is dominated by the area of its solar panels) and mass is significant.
+86:To provide context, consider two examples of space systems with significant mass and solar panel
+87:area: an aggregated mass, the International Space Station (ISS); and a distributed mass, a
+88:constellation of 4,000 Starlink v2.0 satellites4. The solar panel area is 11.5km2 for RD1 and 19km2 for
+89:RD2. The RD1 solar panel area is more than 3,000 times and 27 times greater than that of the ISS
+90:and Starlink constellation, respectively. The mass is 5.9Mkg for RD1 and 10Mkg for RD2. The RD1
+100:offer us an example of the kind of upmass that is already approved for this and other existing satellite
+102:delivered the most mass into orbit. Assuming a mass of 1250kg and solar array area of 105 m2 per Starlink v2
+104:massive single monolithic system in Earth orbit (ISS), and the most massive single distributed system (Starlink
+108:mass is more than 14 times greater and 1.2 times greater than that of the ISS and Starlink
+136:to estimate emissions, which assumes a relationship between cost, efficiency, and emissions that
+140:emissions of producing goods and services by mass (like kilograms of steel), area (like square meters
+152:NREL's 2050 cost projections and NREL's 2021 GHG emissions for nuclear fission, geothermal,
+153:hydroelectric, utility-scale solar photovoltaics with storage, and land wind without storage. We use
+155:storage for comparison because it has the lowest cost and lowest emission intensity of all electricity
+182:Comparable: We assume solar cell efficiency at the current state of the practice for GEO satellites
+184:transfer method leveraging refueling launches to reach GEO at the current state of the practice.8
+195:launches are required to deliver 5.9Mkg of mass for RD1 and 3,960 are needed to deliver 10Mkg of
+196:mass for RD2. Most of these launches (12 of every 13) serve only to refuel payloads in LEO for
+201:mass is involved; five RD2 systems are needed to generate roughly the same amount of power as
+211:7 Due to the size and mass of the representative SBSP designs, for purposes of this study, we used available data
+218:https://www.bls.gov/regions/midwest/data/averageenergyprices_selectedareas_table.htm.
+240:curves, hardware lifetime, solar cell efficiency, and orbital transfer methods. Lower launch costs or
+241:use of electric propulsion to transfer mass from LEO to GEO each resulted in the most significant
+250:gCO2eq./kWh for RD2) to values less than nuclear and wind-without-storage technologies.
+267:    · efficient manufacturing at scale: learning curves of 85% and below
+287:areas, though some areas receive significantly more funding: In-space servicing, assembly and
+297:         and maintaining awareness of SBSP advances around world. NASA could fund these areas
+388:       4.2.3 Solar Cell Efficiency ...................................................................................................................................21
+422:       5.5.3 Mass Manufacturing .................................................................................................................................30
+453:       Solar Cell Efficiency ............................................................................................................................................75
+550:nuclear fission, geothermal, hydroelectric, utility-scale solar photovoltaics with storage, and land
+551:wind without storage. The study includes nuclear power even though it is not usually grouped with
+561:existing concepts with updated technology assumptions on mass, efficiency, and launch capacity.
+564:Renewable Energy Laboratory (NREL). GHG emissions were estimated using a hybrid mass- and
+590:and deliver electricity to the grid for consumption or to batteries for storage.
+621:years. We include a 15% block buy discount because of the very large number of launches required
+626:conduct two Falcon 9 launches in a week, so we assume this launch cadence for the Assemble
+644:would not require as many refueling launches as would reaching cislunar space. Blue Origins Fed'n, LLC; Dynetics,
+656:                                                       100                                 Scale of launches may offer discount.
+663: Launches per year
+664:                               12 refuel launches in LEO           Blue Origin Fed'n, LLC; Dynetics, Inc.-A Leidos Co., supra..
+669:                                                         104            Assuming two launches per week. Falcon 9 currently
+670: Solar cell efficiency                                                                                 launching about 1.5x/week.
+673: Initial system upmass (kg),     90% for debris vehicles                                               manufacturing sector data.
+675: Ground rectenna                          $1B for servicer          The Aerospace Corporation estimates based on satellite
+685:                                        6km diameter (RD1)
+686:                               4km diameter, 5 sites (RD2)           The Aerospace Corporation assessed costs of analogs:
+710:    3. Estimate the lifecycle emissions intensity using a hybrid mass and spend-based Economic
+724:efficiency, and reduced emissions, though it is possible to reduce costs without mitigating GHG
+740:gigawatt (GW) capacity. The total estimated cost for each system is: RD1, $276B; and RD2, $434B.
+748:requires five ground rectennas where RD1 requires one. Dispose is unique in that it is the only
+757:attributable to the thousands of launches required, again highlighting launch's disproportionate
+767:emissions are comparable. This remains true even when storage requirements to achieve a similar
+769:Energy storage must be considered for solar and wind because they cannot deliver power
+787:The combined on-orbit mass of the five RD2 satellites necessary to deliver 2 GW of power is nearly
+789:overall cost. The primary mass-based cost drivers are related to launch and disposal. The ground
+790:system costs for RD2 are also greater as it requires five ground rectennas to receive the same 2 GW
+791:of power. The same holds true for GHG emissions, as the increased number of launches leads to
+795:Our baseline assessment assumes lower costs and better capability in some areas compared to
+802:70/MWh ­ than our baseline numbers. Refer to the Methodology section or Appendix B for a full
+819:The baseline analysis assumes Starship launches 100 MT to LEO and is refueled on orbit to continue
+820:to GEO for system assembly. A Starship carrying 100 MT requires 12 refueling launches in LEO to
+823:capable of launching 21 MT direct to GEO. When launching directly to GEO, the number of launches
+828:of launches is offset by the need to manufacture more vehicles because Starship vehicles launched
+830:vehicles, for example, the 2,321 LEO launches required in the baseline assessment scenario could
+836:Launches for assembly and maintenance are the biggest driver of SBSP system costs. Baseline
+842:decrease is higher for the planar array concept because requires more launches to deploy and
+849:cost saving approach. In this sensitivity analysis, 1720kg of propulsion system mass is allocated per
+850:10,000kg of payload mass. We increased total hardware costs by 17.2% to account for the
+852:reusability while eliminating refueling launches, lowering LCOE 63% for RD1 and 69% for RD2.
+856:launches and fewer launch vehicles manufactured. The emissions decrease is about 54% for RD1
+857:and 63% for RD2, potentially bringing those systems in line with terrestrial wind without storage.
+863:halves the number of maintenance launches, decreasing the cost of both systems by 26%. GHG
+865:reduction in rocket manufacturing and launches.
+884:because the EIO-LCA model assumes a relationship between cost, efficiency, and reduced
+896:LCA model assumes a relationship between cost, efficiency, and emissions.
+898:4.2.3 Solar Cell Efficiency
+900:Increasing the efficiency of solar cells decreases the size and mass of a space solar power system
+902:development and assembly costs. The LCOE reduction achieved by increasing solar cell efficiency
+904:efficiency of terrestrial research cells tracked by NREL today (NREL, 2023).
+906:The size and mass reduction leads to less manufacturing and fewer launches, cutting each system's
+908:consider the mass changes that would occur from use of different photovoltaic technologies. For
+920:    · Solar cell efficiency increased from 35% to 50%
+930:         adding 17.2% more mass and cost to SBSP system hardware
+958:$50M/launch, solar cells achieve 50% efficiency, costs for a commercial servicer decrease to
+967:    · Solar cell efficiency: According to NASA's assessment (NASA, 2022), the state of the practice
+968:         of solar cell efficiency in space today is 33%, while the state of the art is 70% (based on
+970:         practice solar cell efficiency on Earth today is about 20%, laboratory solar cells can reach
+971:         efficiencies of 50% (Center for Sustainable Systems, 2022) (NREL, 2023). For comparison,
+972:         the highest recorded solar cell efficiency in 2011 was 27.6% (Radiative efficiency of state-of-
+976:    design review would be needed to assess lifecycle effects on mass, cost, and emissions.
+987:    suggest feasibility at scales required, though the mass and configuration may require
+997:ground. Given the large number of launches required, we would expect the measurable impacts of
+998:these systems to rise as we learn more. Manufacturing at scale for these massive systems and
+999:thousands of launches of rockets using methane-oxygen fuels produce the most GHG emissions.
+1003:    1. Reducing the number of launches by using EP for orbital transfer, deploying the system at a
+1005:         launch) would reduce launch related emissions. Fewer launches also would reduce the
+1015:    4. Any technologies that reduce the mass of an SBSP system would reduce both the launches
+1021:capability advances in three key areas: 1) ISAM, 2) autonomous distributed systems, and 3) power
+1026:Across all technology areas, the single most distinguishing factor is the sheer scale of operations,
+1027:mass, and coordination required to deploy systems larger and more massive than anything built in
+1028:space before, except perhaps the combined mass and area of very large satellite constellations.
+1041:significantly slower and more expensive, especially when assembling a solar panel collection area
+1072:with the sheer scale of the manufacturing effort as well as the number of launches required. They
+1073:could be mitigated through manufacturing and launch efficiencies, or both.
+1083:36% from 2013 to 2022. Our baseline assessment assumes launches begin around 2040 to assemble
+1085:­ launches would cost $615/kg in 2040, or $61.5M for the 100 MT each Starship delivers to LEO.
+1093:scale. Mass production has driven down the cost of mega-constellations, making the services
+1099:Despite significant advances in mass manufacturing of satellites, learning curves and costs have not
+1107:two dedicated SBSP launches per week, or 104 per year. For comparison, global launches in 2022
+1113:baseline assumption of 104 launches per year, Starship would require five to 10 times its current
+1139:and what technologies will be available to allocate popular frequency ranges to SBSP operations.
+1171:assessment servicer price and mass are derived from NASA's On-orbit Servicing Assembly and
+1224:launches, in turn decreasing overall system cost as well as GHG emissions. EP for orbital transfers is
+1227:so much mass from LEO to GEO and this may require EP capabilities that do not exist today.
+1232:are sized for satellites that have two orders of magnitude less mass than could be launched by a
+1243:for the Air Force under its Small Business Innovation Research program. Given existing mass
+1247:5.5.3 Mass Manufacturing
+1249:Advances in mass manufacturing would benefit SBSP, certainly the multi-million-module designs
+1250:examined in this study. Mass manufacturing, as seen with Starlink and OneWeb satellites, may
+1258:Advances in materials could lead to significant mass reductions, whether from the material itself or
+1266:designs currently being studied may lead to lower costs or higher efficiency. These opportunities
+1271:efficiency into this study's cost and climate model would provide a more complete picture of SBSP
+1345:launch, space hardware manufacturing, disposal of massive satellites, and in-space assembly of
+1349:decreasing the cost of access to space, improving solar cell efficiency, and improving manufacturing
+1374:    launches for assembly and refueling introduce orbital debris concerns at a time when many
+1392:7. Efficiencies of Scale ­ Our analysis looked at the costs to get to the first full-scale system in
+1393:    place, but did not consider whether efficiencies would be realized over time as additional
+1417:This design uses flat panels, with solar cells facing away from the Earth and radiofrequency (RF)
+1422:would increase the capacity factor; however, landmass on the Earth does not allow for even
+1440:Transmit    Solar panel surface area (m2)                11,473,000.00                      25,982.50      Mankins, Sasaki
+1444:Receive     Incident solar energy (MW)                   15,689.33                                 0.35   Rodenbeck et al.
+1449:            Solar Cell Efficiency                        0.35                                      0.98
+1452:                         Efficiency                                                                       Rodenbeck et al.
+1455:                         Efficiency                                                                0.78    Mankins, Sasaki
+1457:            Antenna Emission Efficiency                  0.9                                           4
+1459:            Atmospheric Travel Efficiency                0.98                                       0.9   Rodenbeck et al.
+1461:            Beam Collection Efficiency                   0.95                                       0.6
+1463:            RF frequency (GHz)                           2.45
+1469:            Rectenna Array Reception                               0.78
+1470:                                Efficiency                             6
+1472:            Diameter ground rectenna                                 0.9
+1476:                                Efficiency
+1481:                Power delivered (MW)
+1524:         system, with a mass of 7,500 MT, is capable of delivering 2 GW to one ground-based site.
+1530:         60% of the year. The Sasaki concept proposes that each system, with a mass of 20,000 MT,
+1533:         less mass is possible.
+1537:modular in nature; however, they have different module mass and size assumptions for each
+1539:hardware units. The mass of one of these modular hardware units is derived by the ratio of each
+1540:SBSP subsystem's mass to the total SBSP system mass (power, structure, attitude and
+1542:and thermal). Other spacecraft hardware assessed was not divided into modular units, and include
+1563:environmental implications for select economic activity is derived. We use a mix of mass- and
+1564:spend-based assessments, preferring mass wherever possible. The International Aerospace
+1566:more). A key limitation of the EIO-LCA method is the assumed relationship between cost, efficiency,
+1567:and GHG emissions; wherever possible, we used mass-based measures.
+1589:these six functions, then calculated fiscal    the lifecycle cost to    ConOps phase. This       mix of mass- and spend-
+1609:         microwave radiation at ground station rectenna, convert microwave radiation to electricity,
+1616:Tethered-SPS, 2006), and Pellegrino (Pellegrino, 2022), 3) efficiency losses provided by an
+1624:authoritative assessments of efficiency losses at each step, estimated by (Rodenbeck, et al., 2020).
+1631:radiofrequency, and capacity factor). The practice of scaling total system mass to solar cell
+1632:efficiency comes from earlier literature (Mankins, SPS-ALPHA: The First Practical Solar Power
+1634:from Mankins and Sasaki, we calculated the total solar panel surface area. We then applied the
+1636:distance, and beam frequency from Mankins and Sasaki, Aerospace inferred the diameter of the
+1637:ground rectenna receptor for each system. Changes to the angle of incident solar energy over the
+1641:The following is a summary of major losses of efficiency for each functional step:
+1642:    · Collect: solar cell efficiency (35%)
+1645:    · Receive: rectenna array reception (78%)
+1648:Taking the scaling factor for each system and inefficiencies into account, and incorporating each
+1669:               Solar panel surface area (m2)      11,473,000.00           1,367.50               Calculated
+1672:                 Incident solar energy (MW)            15,689.33                                 Calculated
+1680:                      Solar Cell Efficiency                 0.35                                 0.9  Rodenbeck et al.
+1682:Convert in            DC to DC Conversion Efficiency            0.9                              0.9  Rodenbeck et al.
+1684:                      DC to RF Conversion Efficiency            0.7                             0.95  Rodenbeck et al.
+1686:                      Antenna Emission Efficiency               0.9
+1688:                      Atmospheric Travel Efficiency         0.98
+1690:                      Beam Collection Efficiency            0.95
+1692:                      RF frequency (GHz)                    2.45
+1704:Convert on Ground     Rectenna Array Reception                              0.78
+1705:Deliver                                   Efficiency                                             4       Inferred from
+1707:                      Diameter ground rectenna (km)                         6                  0.6    Rodenbeck et al.
+1710:                      DC to DC Conversion Efficiency                        0.9
+1715:                      Power delivered (MW)                  2028.791344
+1771:Thermal management                     passive                          passive                   Aerospace
+1772:Power Mass per Module (kg)                 2.00                             2.50                  Aerospace
+1773:Structure Mass per Module (kg)             1.00                             1.25                  Aerospace
+1778:System Mass per Module (kg)                     0.00               0.00                          Aerospace
+1779:Propulsion Mass per Module (kg)                 0.20               0.25                          Aerospace
+1780:Telemetry Tracking and Command Mass
+1782:Command and Data Handling Mass per
+1784:Thermal Mass per Module (kg)
+1785:Module Mass (kg)                     4.00                5.00                    Aerospace
+1787:SBSP In-space Mass (kg)              1,463,000.00        2,000,000.00            Inferred from Mankins,
+1845:Estimating costs for manufacturing SBSP module hardware: Aerospace derived mass by taking the
+1846:total system mass and averaging out components by the number of modules. This "bottoms-up"
+1849:and thermal. As previously mentioned, Aerospace used a combination of cost models for hardware
+1853:array for efficient terrestrial manufacturing.)
+1856:factor to calculate the number of modules needed for 2 GW of output. Using the module mass and
+1857:the number of modules needed, we estimated the total in-space mass, accounting for technology
+1864:We used Aerospace's learning curve estimate of 75% to account for efficiencies over time due to
+1949:Servicer mass (kg)                                 17
+1967:                                                                                                                          mass
+2013:Refuel launches required per               $65.2B                      assumed autonomous and had flat
+2016:Total Develop Upmass (kg)
+2017:Disposable launches total                                                 each phase's mission operations
+2019:hardware launches
+2021:Refuel launches Assemble                                                            ship_users_guide_v1.pdf
+2050:                                                                             launches needed to refuel all
+2063:capacity (launches per annum)                 8            At present, Starship-capable launch
+2084:launches, servicer manufacturing costs, and mission operations and data analysis costs for each
+2088:the total launches needed to deliver the SBSP systems to their operational orbit, which includes
+2089:launches to refuel in LEO. Aerospace conducted a trade study to find the most desirable launch
+2090:vehicle from a mass- and volume-to-orbit standpoint. After evaluating multiple heavy-lift launch
+2094:refuel in LEO. To find the number of launches for initial assembly, we divide the total upmass (the
+2095:total in-space mass, normalized to 2 GW, plus the total servicer mass) by Starship's payload capacity
+2097:number of launches to refuel in LEO, we assume that for every payload of original hardware
+2098:delivered to LEO, it will require 12 additional Starship launches to refuel for transfer to GEO (Blue
+2099:Origin Fed'n, LLC; Dynetics, Inc.-A Leidos Co., 2021). After finding the total number of launches for
+2118:Starship, we use 355 s, 14.7 MN, a payload mass of 100 MT, fuel mass of 120 MT, and dry mass of
+2122:   mass/final mass)
+2124:   Transit time = (initial mass / thrust) * deltaV / specific impulse
+2128:   servicers in GEO this month - number of servicers in GEO last month) * servicer mass) / module
+2129:   mass + number of modules in GEO last month
+2134:the efficiency of the servicer fleet by minimizing servicer idle time. We use Aerospace's assessment
+2168:RF frequency (GHz)                                               2.45
+2169:Diameter ground rectenna (km)                                       6       5.8            Aerospace
+2192:                                                                                                           rectennas.
+2219:The cost due to spacecraft shielding is the cost of the additional mass needed to protect from
+2220:orbital debris. Aerospace used the same mass increase for both systems (0.74%), supported by the
+2245:Total Maintain Upmass (kg)                           34                            30    Mankins, Sasaki
+2246:Disposable launches total
+2247:Total Starship Maintain launches       11,799,200.00                 20,084,000.00                  Sasaki
+2248:Refuel launches Maintain total                      562                           957
+2265:Cost of Maintenance Launches ($)                $157.15B          $248.85B
+2286:cost, using Starship, for all maintenance launches. Maintenance launches include launch of
+2287:maintenance servicers and modules. Based on the upmass for the total number of maintenance
+2288:modules, we find the total number of Starship launches needed to launch to LEO. We assume 12
+2289:refueling launches to transfer to GEO are needed for each launch and apply a 15% block buy
+2294:the same number of servicers, launches, and time to assemble for each refurbishment cycle.
+2320:ADR Vehicle Mass (kg)                                         180.00              180.00             Aerospace
+2337:management, operations, and ground systems costs, as well as associated launches.
+2345:Aerospace considers mass estimates using the MEV in addition to in-house costing methodologies.
+2350:space mass using the scaling factor, the ADR transfer vehicle payload capacity, and duration of ADR
+2366:ADR vehicles are determined based off the updated number of vehicles needed, the servicer mass
+2368:Users Guide), and the number of refuel launches to transfer from LEO to GEO. We also apply a 15%
+2453:Renewable Energy  Lifetime              Output  Capacity  Hours  CapEx     FOM     Variable  Fuel Cost ($/  Heat Rate  CRF (default   Levelized    Levelized         Simple      $/MWh      $/MWh      $/MWh    Notes
+2466:                                                                                                                                                                                                                Li-ion 50 MW
+2473:Storage 2050
+2481:Geothermal 2050   30                            0.9 8760 $5,080.00        $99.00   $-        $-             0 0.051019259             $0.21        $0.26        $0.05 $214.00 $260.00                  $45.43 Hydro / Flash
+2562:                                                   LCOE ($/kWh)                LCOE ($/MWh)
+2571: PV Utility + Storage 2050                                              0.05                       54.31
+2575: Geothermal 2050
+2603:implications for economic activities and their dependencies are derived. We use a mix of mass and
+2604:spend-based assessments, preferring mass wherever possible. Carnegie Melon University and DoD
+2607:maintain databases with the gCO2eq. of various mass, spend, and area NAICS categories.
+2616:PV area in m2
+2622:* Total Starship launches
+2626:Number of launches * launch vehicle emissions                        MT 2,683 CO2 + 1.7 NO (*298 for CO2eq.)
+2627:Launcher metal mass (kg) * Total Starships manufactured                       1.7 /kg Steel, unspecified process
+2629:Structure composite mass (kg) * Total Starships manufactured         495.06/kg Composite-based manufactured products
+2631:Harness Mass (kg) * Total Starships Manufactured                     5.84/kg Copper unspecified process
+2633:{[Electronics mass (kg) + electronics structure mass                 606.12 /m2, printed circuit board; printed circuits
+2636:Launcher metal mass (kg) * Total Starships manufactured
+2638:Structure composite mass (kg) * Total servicers manufactured
+2640:Harness Mass (kg) * Total servicers Manufactured
+2642:{[Electronics mass (kg) + electronics structure mass
+2646:Rectenna cost ($)                                                                                                  (kgCO2eq./kg)
+2650:                                                                                                                         rectenna
+2660:Concrete building surface area (m2)
+2662:Total rectenna support structure mass (kg)
+2676:PV area in m2                        11,473,000.00                 19,000,000.00   0.27      (Liang & You, 2023)
+2716:Launcher metal mass (kg)       3,189,600.00      3,189,600.00           MT 2683
+2717:Structure composite mass                                               CO2 + 1.7
+2719:Harness mass (kg)                                                     for CO2eq.)
+2721:Electronics mass (kg)          61,200.00                   61,200.00  1.7 Steel, unspecified process
+2723:Electronics Structure mass          6,800.00               6,800.00   495.06              Composite-based
+2725:Electronics area (m2)
+2726:Assemble Starship launches          5,950.00               5,950.00   5.84 Copper unspecified process
+2730:launches (kg)
+2732:launches ($)
+2746:metal mass (kg)                        448,800.00
+2749:composite mass (kg)                    504,900.00    672,350.00
+2752:harness mass (kg)
+2755:electronics mass (kg)                         17.00  443,999.31
+2758:Electronics Structure mass                    85.49
+2762:Electronics area (m2)                     3,391.17                               professional, scientific, and
+2774:Servicer metal mass (kg)
+2777:mass (kg)                                                 2,992.21
+2779:Servicer harness mass (kg)
+2781:Servicer electronics mass (kg)
+2784:mass (kg)
+2787:metal mass (kg)
+2793:structure composite mass
+2797:harness mass (kg)
+2800:electronics mass (kg)            6,029.22              5,319.90
+2803:Structure mass (kg)
+2806:electronics area (m2)
+2823:Rectenna cost ($)
+2824:Percent of mass added to    $3,119,000,000.00 $8,270,000,000.00   182.89                 /kUSD, Wireless
+2825:support rectenna (%)                                                        communication equipment
+2826:Total rectenna support
+2827:structure mass (kg)         $623,800,000.00 $1,654,000,000.00
+2837:area (m2)                                                                       concrete and assuming
+2867:Maintain Launches                               Maintain
+2870:launches (kg)
+2872:launches ($)
+2874:metal mass (kg)
+2883:composite mass (kg)              445,400.00
+2886:harness mass (kg)                              761,600.00
+2889:electronics mass (kg)
+2892:Electronics Structure mass     5,988,362,832.50 10,205,555,018.74
+2896:Electronics area (m2)          6,782.34             5,984.41
+2904:mass (kg)                       8,787,676.84        10,639.79
+2907:structure composite mass
+2911:harness mass (kg)
+2914:electronics mass (kg)
+2917:Structure mass (kg)
+2920:electronics area (m2)
+2925:Total Maintain PV area (m2)
+2959:Total Dispose servicer metal mass (kg)
+2961:Total Dispose servicer structure composite mass (kg)                   11,769.35   19,948.04
+2963:Total Dispose servicer harness mass (kg)                                5,044.01    8,549.16
+2964:Total Dispose servicer electronics mass (kg)                            8,406.68   14,248.60
+2965:Total Dispose electronics Structure mass (kg)                          41,192.71   69,818.15
+2966:Total Dispose servicer electronics area (m2)                           17,654.02   29,922.07
+2972:ADR Launches
+2974:Total Prop needed Dispose launches (kg)                                               2                  3
+2975:Total Prop cost Dispose launches ($)
+2976:Total Dispose launcher metal mass (kg)                                16,390,786.60      27,864,337.22
+2977:Total Dispose structure composite mass (kg)                           $3,278,157.32      $5,572,867.44
+2978:Total Dispose launcher harness mass (kg)
+2979:Total Dispose launcher electronics mass (kg)                             122,400.00         183,600.00
+2980:Total Dispose launcher Electronics Structure mass (kg)                     13,600.00          20,400.00
+2981:Total Dispose launcher Electronics area (m2)                               11,900.00          17,850.00
+3003:as nuclear power. Wind power without storage is included for comparison as the lowest cost and
+3031:Geothermal                                     4                   37                  230
+3042:considered; these relate to launch, manufacturing, and solar cell efficiency. After varying individual
+3057:         has announced that Starship launches might reduce to $10,000,000 per launch in the 2024-
+3059:         these expectations and assuming launches in 2040, we consider medium and low scenarios
+3069:         launches and reusability, and reducing payload capacity to 21 MT.
+3075:         to the reduced number of launches, GHG emissions decrease just 8% and 9%, respectively,
+3080:    · Summary of modification(s): We added 17.2% of system mass and manufacturing cost
+3081:         based on propulsion mass per module, and removed launches to refuel in LEO. This
+3085:    · Rationale: Though using EP adds upmass, it can significantly reduce the number of launches
+3094:         chemical propulsion. The additional mass of the propulsion units did not appreciably change
+3142:Solar Cell Efficiency
+3144:Sensitivity Analysis 1 - Solar Cell Efficiency (15% Increase)
+3145:    · Summary of modification(s): Efficiency of solar cells is increased by 15 percentage points,
+3147:    · Rationale: NASA noted that the state of the practice for solar cell efficiency is 33%, while the
+3148:         state of the art is 70% (NASA, 2022). The best research cell efficiency currently tracked by
+3150:    · Result: The improvement in solar cell efficiency leads to a reduction in mass to deliver the
+3151:         same 2 GW of power, and therefore less manufacturing and fewer launches, resulting in
+3162:              o Efficiency of solar cells is increased by 15%.
+3165:              o 1,720kg of EP (fuel + hardware) for every 10,000kg of system mass for orbital
+3183:              o Operations costs are increased from a flat fee to $500k per 2,800kg of system mass
+3234:Solar Cell Efficiency   RD2 Lower Manufacturing Learning          0.8      35.8
+3236:Multiple Variables      RD1 Efficient Solar Cells                 0.5      20.4
+3238:                        RD2 Efficient Solar Cells                 1.2      29.6
+3340:kW / MW / GW     Kilowatt / Megawatt / Gigawatt
+3341:kWh / MWh        Kilowatt-hour / Megawatt-hour
+3377:RF               Radio frequency
+3425:BryceTech. (2023). 2022 Orbital Launches Year in Review. Retrieved from
+3428:         documents/Orbital_Launches_Year_in_Review_2022.pdf
+3446:         Launches Will Cost Less Than $10 Million Within 2-3 Years. Retrieved from Business Insider:
+3604:NREL. (2023). Best Research-Cell Efficiency Chart. Retrieved from https://www.nrel.gov/pv/cell-
+3606:         efficiency.html
+3610:NREL. (n.d.). Best Research Cell Efficiency Chart. Retrieved from https://www.nrel.gov/pv/cell-
+3612:         efficiency.html
+3625:Radiative efficiency of state-of-the-art photovoltaic cells. (2012, June). Progress in Photovoltaics,

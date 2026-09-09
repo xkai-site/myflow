@@ -1,0 +1,77 @@
+# Findings
+## GPT Image 2.5 test assumption correction
+- User explicitly enabled both models and requested removing obsolete rejection assertions. Removed model.enabled===false and enabled Flare-as-default rejection; added positive acceptance of both as defaults.
+- Command and host transport tests now use actual config, not a clone forcibly setting every enabled flag. Generic disabled-model tests use a synthetic disabled-test-model fixture and cannot pass vacuously when all real models are enabled.
+- Host wizard previously assumed one auto-selected OpenAI model and prohibited Sunburst/Flare labels. It now verifies both can be selected and advance to size selection without any auth/generation call.
+- Full verification: 36 unit tests + host suite + 30 baseline request comparisons passed. Production source/config unchanged in this follow-up.
+## User-approved live probe
+- Actual adapter with current Codex credentials and host dispatcher sent exactly one GPT Image 2 POST. HTTP 429 `The usage limit has been reached` returned in 1766 ms (1792 ms total). No image or retry. This establishes current usage-limit blocking, NOT the earlier UND_ERR_SOCKET root cause.
+- Result: plans/openai-image-live-probe-result.json; log error-5db73ba5-7b06-4923-b547-47f19cb39436.json. No credential contents printed/stored.
+- Codex CLI 0.153.4 image_generation enabled, generated protocol has no direct image RPC. Official-client comparison not executed; stop further paid probes until usage limits are resolved.
+## Current official-interface investigation
+- Newly supplied error-4f3a23b9-202e-4690-be49-a754c6cf1399.json is GPT Image 2 (not Flare): 60143 ms, chatgpt.com, UND_ERR_SOCKET, no HTTP response. Disabling 2.5 cannot explain or resolve this failure.
+- Existing worktree/planning history is dirty and retained. Search summaries require verification against fetched official documents before conclusions.
+- Fetched official generation guide, tool guide and generate reference: GPT Image 2 and both 2.5 models allow existing prompt/background:auto/n:1/quality/size fields. 2.5 adds xhigh/max; GPT Image 2 must omit input_fidelity (adapter already does). GPT Image returns base64 without response_format. Nonstreaming is allowed; complex requests can take up to two minutes.
+- Current models.jsonc has both 2.5 entries enabled:true (differs from earlier notes); preserve user configuration. Adapter hard-pins Codex ChatGPT endpoint and OAuth JWT/account header, NOT public API-key Images API. Need upstream Codex evidence before calling this endpoint incorrect.
+- Official openai/codex codex-api/src/endpoint/images.rs confirms JSON POST images/generations and images/edits, including images:[{image_url:data URL}] for edits. Therefore Codex path/JSON format is not inherently wrong; public edit reference now ALSO supports JSON image references, so claiming multipart is mandatory would be incorrect. Upstream exposes x-codex-imagegen-request-id, currently not preserved in plugin diagnostics (secondary gap, cannot explain absent headers).
+- Official Codex ext/image-generation/src/tool.rs currently pins gpt-image-2 and background/quality/size auto, omits n; shared schema accepts optional n. Its backend.rs sends x-codex-image-turn-id (plugin absent) plus originator. Plugin sends n:1 and its own originator/User-Agent; these differences are candidates for controlled compatibility comparison, not proven causes. Current upstream ImageQuality enum only has low/medium/high/auto, so public 2.5 xhigh/max support still cannot certify this Codex route.
+- Re-ran pinned baseline comparison: all 30 scenarios passed for original GPT Image 2 URL/method/headers/serialized body; no credential access or real generation. Existing redirect:error difference would yield a redirect error if encountered, not by itself demonstrate this socket closure.
+- Current child shell has HTTP(S)_PROXY configured to loopback HTTP port 7897, Node 22.23.1 / bundled Undici 6.27.0. Pi dist/core/http-dispatcher.js installs npm Undici EnvHttpProxyAgent globally and installs matching fetch; main.js calls it on startup and after settings load. Therefore no basis for claiming the plugin ignores proxy env. User httpIdleTimeoutMs is unset (default 300000), httpProxy is set; only allowlisted settings were inspected, no credentials.
+- Credential-free GET probes using that same host dispatcher (not the already-running Pi process) got ChatGPT image route 403 Cloudflare HTML in 440 ms, public /v1/models 401 JSON in 565 ms. This establishes proxy/TLS/HTTP reachability now, not image authorization or live POST compatibility. No prompt, Authorization, image POST or retries were sent.
+- Transport uses global fetch, JSON/nonstreaming, no per-request dispatcher and no retries. RPC timeout is 300000 ms; the 60143 ms socket close is not that timeout. UI connect phase means fetch has not returned headers, not proof TCP was never established.
+- Current npm test: 29/31. model-config.test.ts assumes both 2.5 models disabled and rejects Flare as default; user config currently enables both, causing two failures unrelated to socket I/O. No configuration rollback or test change performed.
+- Final report: plans/openai-image-request-investigation.md. Investigation only; live root cause cannot be assigned without authenticated controlled comparison. No mandatory request-body correction established.
+## Regression investigation against the working commit
+- Read only the user-named diagnostic file: gpt-image-2.5-flare, 60307 ms, UND_ERR_SOCKET / other side closed, no response headers. About 60 seconds is not the plugin's RPC timeout (300 seconds); TUI still uses the user's cancellation signal. Server/proxy/request compatibility cannot be distinguished from this log alone.
+- HEAD e08e3f9 contains the same image plugin code as 4df3ccd805ef32616ccbc8ee635649b3be1f1e46. That version only sends gpt-image-2 for OpenAI.
+- Re-fetched official Flare/Sunburst pages: public Image API/Responses model support is documented, but no proof that chatgpt.com/backend-api/codex/images accepts them under this OAuth account. Earlier mock tests checked parameters, not backend compatibility; default rollout was insufficiently gated.
+- New repository-only `test/compare-baseline.mjs` executes actual pinned old and current extensions with identical synthetic auth/input, captures all fetch calls, and compares URL/method/headers/serialized body and exactly one auth resolution. Initial run caught missing direct-adapter quality:auto fallback; restored it. This difference does NOT by itself explain the Flare failure, because command configuration already resolves quality.
+- After correction, all 30 cases match the working legacy request contract. Deliberate redirect:error security change remains and is explicitly asserted separately; no unsafe redirect restoration, proxy rewrite, TLS bypass, timeout increase or generation retries.
+- Generic optional enabled flag retains both new model definitions but disables them by default. Menus/runtime exclude disabled entries, CLI retains key recognition and rejects locally, defaultModel must be enabled. Explicit opt-in only changes local permission, not backend support.
+- Actual closure root cause remains unproven. Need user-confirmed live comparison on the legacy model before claiming full network/service recovery; no paid probes were run.
+## Network diagnostics follow-up
+- Bare fetch calls in both adapters and image downloader can throw Node TypeError('fetch failed') with useful nested `cause` / AggregateError details.
+- runtime.generateWithTransport and generateAndSave reduce failures to `.message`, permanently discarding cause/code/stack; no diagnostic file is written.
+- HTTP error parsing currently loses status when a message exists; JSON parse can also mask an HTML 403/502 response. Download-stage failures are indistinguishable from generation failures.
+- User's actual network root cause is not yet known. Do not infer bad credentials from fetch failed; preserve transport details and avoid automatic POST retries/paid probes.
+- Added shared transport wrapper around fetch AND body consumption. Distinguishes generate/edit/download and connect/response; records bounded recursive cause/AggregateError chain, code/syscall, duration, host-only endpoint, model, status and allowlisted request ID.
+- Per-failure logs: current project's `.pi/image-generation-logs/error-<uuid>.json`; unique atomic private files, symlink directory checks, best-effort write failure notice. No successes/cancellations logged, deadlines are logged. Logger is closed over per-generation runtime and never enters SDK metadata or requests.
+- Redact known keys/header values/prompt/reference base64 before truncation; also encoded secrets, JWT/Bearer strings, URLs and terminal controls. Do not serialize stack, socket, headers, body, process environment or arbitrary error properties. No retries, TLS bypass or proxy-setting changes.
+- Validation complete: 30 offline tests + host suite. Host proves both providers preserve UND_ERR_CONNECT_TIMEOUT across SDK error flattening; RPC handler preserves ENOTFOUND/DNS guidance and a readable log reference under 800 chars, without recording the synthetic prompt/token. Only one fetch and one log per failed request.
+- Logs cover transport and response-consumption failures, not pre-request validation or later image-format/local-save failures. Redaction is defensive/best-effort for arbitrary upstream messages: README instructs review before sharing, never send auth.json. Logs are small per-failure files and manually cleaned, not rotated.
+## Image-first browser preview
+- `src/gallery.ts` is the static local browser page. Current UI exposes a long local-file/developer explanation, filenames, provider/model strings; every image is constrained to 320px tall.
+- Fresh Vercel Web Interface Guidelines fetched. Relevant: intrinsic image dimensions, eager/high-priority first image, lazy below-fold images, accessible links/focus, safe areas, responsive content and intentional theme.
+- Keep script-free CSP, encoded relative paths, atomic persistence and no auto-opening browser. Metadata belongs in documentation, not the image canvas.
+- Implemented quiet dark canvas, viewport-height single image, two-column desktop/one-column narrow-screen gallery, object-fit contain, always-visible original links without image overlays. Width/height attributes reserve the viewing box (not claimed intrinsic metadata); CSS contain preserves originals. No JS or animations.
+- Original links retain encoded relative filenames; visible filenames/model/provider/prompt are omitted. Existing generated HTML is immutable; README notes only new galleries receive the design.
+- Browser-tested nine viewport/layout combinations with synthetic landscape/portrait/square/panoramic PNGs. No overflow; images decode with contain sizing; single-image actions fit viewport. Inspected desktop/mobile screenshots.
+- Chromium ignores the download attribute for local file URLs and navigates to the image instead (confirmed with focused navigation probe). Removed misleading download action instead of adding JS/loosening CSP. Images are already saved; original view supports native browser save.
+- Final guideline fixes: `work/scripts/pi/pi-image-generation/src/gallery.ts:46` — reserved image geometry, first-image high priority, lazy remaining images, labeled native links; `:79` — visible keyboard focus; `:87` — responsive unclipped canvas; `:116` — skip navigation and minimal header. No animation/JS/form patterns introduced.
+- Final Chromium rerun passed including both original entry points, special-character local filenames, keyboard skip and forced colors, with network offline and no console/page errors. Safari/Firefox and physical notched-device behavior not tested.
+- Initial broad search hit Windows `nul` again; all further searches scoped to plugin.
+## Duplicate-link follow-up
+- Same gallery URL appeared in both durable image-entry renderer and Saved notification. This is duplicate presentation in publishOutcome, not a second generation call in that function.
+- TUI now keeps link only on first image entry. Non-TUI notification retains plain URL. Saved counts/paths, gallery creation and RPC behavior unchanged.
+
+## Latest OpenAI image model follow-up
+- Current catalog has GPT Image 2 and two Wan models; provider default uses stable key `openai`.
+- Official API model page confirms `gpt-image-2.5-sunburst` (snapshot 2026-09-08); tool guide also names `gpt-image-2.5-flare`. Both add `xhigh`/`max` quality with default `auto`.
+- Sources: https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst and https://developers.openai.com/api/docs/guides/tools-image-generation .
+- Official image-generation guide confirms both 2.5 models support generation/editing and the same dimension rules already configured for GPT Image 2: multiples of 16, ratio <=3, edge <=3840, 655360..8294400 pixels. Above 2560x1440 is experimental.
+- Append keys `openai-sunburst` / `openai-flare`; leave all existing entries/provider defaults untouched. Retain conservative local prompt/input limits rather than claim expanded backend support.
+- Existing adapter already passes arbitrary model/quality through. It uses the Codex subscription backend, not public API; official API support does not establish account/backend availability.
+- Preserve substantial uncommitted changes, existing model entries and account settings.
+## Follow-up: real hyperlinks
+- Root cause confirmed: both entry and notification were plain Text URLs, with no OSC 8 or link styling.
+- Host pi-tui exports hyperlink(text, url), getCapabilities(), getOsc8LinkAtColumn() and ANSI-safe Text wrapping. Pi detects Windows Terminal via WT_SESSION; traditional Windows console defaults hyperlinks=false.
+- Use host hyperlink API only when detected supported; underline + theme mdLink color, retain visible full URI. TUI notification gets same formatting; RPC remains escape-free. HTML/file opening uses terminal + OS file association, not a plugin-launched browser.
+- SDK Text preserves OSC 8 across wraps; verify target per visible cell and closure at end so link does not bleed to surrounding text.
+
+- Existing extension already uses registerEntryRenderer + appendEntry for TUI image display.
+- publishOutcome currently appends each image then notifies Saved paths.
+- Repository has substantial pre-existing edits in this plugin; do not revert them.
+- Browser preview must be opt-in; no process launch or local web server.
+- Reuse existing ensureSafeOutputDirectory checks for .pi/generated-images; write unique HTML atomically and keep saved images intact on gallery failure.
+- Persist optional galleryPath on first image entry to preserve link after session reload; older entries remain compatible. URI conversion uses Node pathToFileURL.
+- Gallery uses escaped metadata and encoded relative image filenames, static CSS, no JS/external resources. Test single/multiple images, special characters, symlinks, failure fallback and host rendering.

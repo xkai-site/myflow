@@ -1,10 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { GeneratedImage, ImageProviderChoice, InputImage, SavedImage } from "./types.ts";
-
-const OPENAI_MAX_INPUT_BYTES = 50 * 1024 * 1024;
-const WAN_MAX_INPUT_BYTES = 20 * 1024 * 1024;
+import type { GeneratedImage, InputImage, SavedImage } from "./types.ts";
+import type { ImageLimits } from "./model-config.ts";
 const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 const ALLOWED_INPUT_MIME = new Set(["image/png", "image/jpeg", "image/webp", "image/bmp"]);
 
@@ -35,8 +33,9 @@ export function parseReferenceImagePaths(input: string): string[] {
 export async function loadInputImages(
 	cwd: string,
 	filePaths: readonly string[],
-	provider: ImageProviderChoice,
+	limits: ImageLimits,
 ): Promise<InputImage[]> {
+	if (filePaths.length > limits.maximum) throw new Error(`Model accepts at most ${limits.maximum} reference images`);
 	const images: InputImage[] = [];
 	for (const [index, filePath] of filePaths.entries()) {
 		const absolutePath = path.isAbsolute(filePath) ? path.normalize(filePath) : path.resolve(cwd, filePath);
@@ -50,7 +49,7 @@ export async function loadInputImages(
 			throw error;
 		}
 		if (!fileStats.isFile()) throw new Error(`Reference image ${index + 1} is not a file: ${filePath}`);
-		const maxBytes = provider === "openai" ? OPENAI_MAX_INPUT_BYTES : WAN_MAX_INPUT_BYTES;
+		const maxBytes = limits.maxBytes;
 		if (fileStats.size > maxBytes) {
 			throw new Error(`Reference image ${index + 1} exceeds the ${Math.floor(maxBytes / 1024 / 1024)} MB limit`);
 		}
@@ -59,14 +58,15 @@ export async function loadInputImages(
 		if (!detected) throw new Error(`Reference image ${index + 1} has an unsupported file signature`);
 		images.push({ data: bytes.toString("base64"), mimeType: detected.mimeType });
 	}
-	validateInputImages(images, provider);
+	validateInputImages(images, limits);
 	return images;
 }
 
-export function validateInputImages(images: readonly InputImage[], provider: ImageProviderChoice): void {
-	const maxBytes = provider === "openai" ? OPENAI_MAX_INPUT_BYTES : WAN_MAX_INPUT_BYTES;
+export function validateInputImages(images: readonly InputImage[], limits: ImageLimits): void {
+	if (images.length > limits.maximum) throw new Error(`Model accepts at most ${limits.maximum} reference images`);
+	const maxBytes = limits.maxBytes;
 	for (const [index, image] of images.entries()) {
-		if (!ALLOWED_INPUT_MIME.has(normalizeMimeType(image.mimeType))) {
+		if (!ALLOWED_INPUT_MIME.has(normalizeMimeType(image.mimeType)) || !limits.mimeTypes.includes(normalizeMimeType(image.mimeType))) {
 			throw new Error(`Reference image ${index + 1} has unsupported MIME type: ${image.mimeType}`);
 		}
 		const decoded = decodeImage(image.data, maxBytes);
@@ -117,7 +117,7 @@ export function detectImage(bytes: Uint8Array): Omit<DecodedImage, "bytes"> | un
 
 export async function saveGeneratedImages(
 	cwd: string,
-	provider: ImageProviderChoice,
+	provider: string,
 	model: string,
 	images: readonly GeneratedImage[],
 	signal?: AbortSignal,
@@ -170,6 +170,7 @@ export function isGeneratedImagePath(filePath: string): boolean {
 }
 
 function decodeImage(data: string, maxBytes: number): DecodedImage {
+	if (data.length > Math.ceil(maxBytes / 3) * 4) throw new Error("Image payload exceeds the size limit");
 	if (!isCanonicalBase64(data)) throw new Error("Image payload is not valid base64");
 	const bytes = Buffer.from(data, "base64");
 	if (bytes.length === 0) throw new Error("Image payload is empty");
@@ -199,7 +200,7 @@ function safeSlug(value: string): string {
 	return slug || "image";
 }
 
-async function ensureSafeOutputDirectory(cwd: string, outputDirectory: string): Promise<void> {
+export async function ensureSafeOutputDirectory(cwd: string, outputDirectory: string): Promise<void> {
 	const projectRoot = path.resolve(cwd);
 	const relative = path.relative(projectRoot, outputDirectory);
 	if (relative.startsWith("..") || path.isAbsolute(relative)) {

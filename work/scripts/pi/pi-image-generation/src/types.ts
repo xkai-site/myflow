@@ -1,36 +1,26 @@
-export type ImageProviderChoice = "openai" | "wan" | "wan-pro";
-export type OpenAIImageQuality = "auto" | "low" | "medium" | "high";
+import type { ImageModelConfig, ImageProviderConfig } from "./model-config.ts";
+import type { DiagnosticWriter } from "./diagnostics.ts";
 
 export interface ParsedImageCommand {
-	provider?: ImageProviderChoice;
+	modelKey?: string;
 	prompt: string;
 	size?: string;
-	quality?: OpenAIImageQuality;
+	quality?: string;
 	help: boolean;
 }
 
-export interface ResolvedImageCommand extends Omit<ParsedImageCommand, "provider" | "size"> {
-	provider: ImageProviderChoice;
+export interface ResolvedImageCommand extends ParsedImageCommand {
+	modelKey: string;
+	provider: string;
+	model: string;
 	size: string;
-	model: "gpt-image-2" | "wan2.7-image" | "wan2.7-image-pro";
+	modelConfig: ImageModelConfig;
+	providerConfig: ImageProviderConfig;
 }
 
-export interface InputImage {
-	data: string;
-	mimeType: string;
-}
-
-export interface GeneratedImage {
-	data: string;
-	mimeType: string;
-}
-
-export interface ImageTransportResult {
-	images: GeneratedImage[];
-	texts: string[];
-	responseId?: string;
-}
-
+export interface InputImage { data: string; mimeType: string }
+export interface GeneratedImage { data: string; mimeType: string }
+export interface ImageTransportResult { images: GeneratedImage[]; texts: string[]; responseId?: string }
 export interface ImageTransportOptions {
 	apiKey: string;
 	baseUrl: string;
@@ -38,29 +28,21 @@ export interface ImageTransportOptions {
 	images: readonly InputImage[];
 	model: string;
 	size: string;
-	quality?: OpenAIImageQuality;
+	quality?: string;
 	headers?: Record<string, string | null>;
 	signal?: AbortSignal;
 	fetch?: typeof globalThis.fetch;
+	onDiagnostic?: DiagnosticWriter;
 }
-
-export interface SavedImage {
-	path: string;
-	mimeType: string;
-	bytes: number;
-}
-
+export interface SavedImage { path: string; mimeType: string; bytes: number }
 export interface GeneratedImageEntryData {
-	provider: ImageProviderChoice;
+	provider: string;
 	model: string;
 	prompt: string;
 	path: string;
 	mimeType: string;
 	bytes: number;
 	createdAt: number;
+	galleryPath?: string;
 }
-
-export interface GenerationOutcome {
-	entries: GeneratedImageEntryData[];
-	texts: string[];
-}
+export interface GenerationOutcome { entries: GeneratedImageEntryData[]; texts: string[] }
