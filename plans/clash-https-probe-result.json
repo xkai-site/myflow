@@ -1,0 +1,79 @@
+{
+  "passed": false,
+  "error": "生成请求失败 · 127.0.0.1:23333 · 等待响应头（连接/发送/服务端处理）\n未收到 HTTP 响应 · ECONNRESET\nClient network socket disconnected before secure TLS connection was established\n连接失败或中断：检查代理是否运行、防火墙和网络连通性；请先确认服务端结果再重试。\n诊断日志（当前项目）：in-memory-only",
+  "node": "v22.23.1",
+  "undici": "8.9.0",
+  "hostDefaultTimeoutMs": 300000,
+  "delayMs": 70000,
+  "calls": 0,
+  "proxyConnects": 1,
+  "throughLocal7897": true,
+  "authorizedTls": false,
+  "methods": [
+    "POST",
+    "CONNECT"
+  ],
+  "diagnostic": {
+    "version": 1,
+    "id": "b9b20044-4136-427e-a401-178a518028b5",
+    "timestamp": "2026-09-09T17:16:27.397Z",
+    "outcome": "error",
+    "network": {
+      "observation": "undici",
+      "events": [
+        {
+          "stage": "request-start",
+          "elapsedMs": 4
+        },
+        {
+          "stage": "request-created",
+          "elapsedMs": 11
+        },
+        {
+          "stage": "request-created",
+          "elapsedMs": 12
+        },
+        {
+          "stage": "socket-assigned-headers-sending",
+          "elapsedMs": 20
+        },
+        {
+          "stage": "request-body-sent",
+          "elapsedMs": 21
+        },
+        {
+          "stage": "wire-request-error",
+          "elapsedMs": 31
+        },
+        {
+          "stage": "request-failed",
+          "elapsedMs": 34
+        }
+      ],
+      "socket": {
+        "encrypted": false
+      }
+    },
+    "operation": "generate",
+    "phase": "connect",
+    "host": "127.0.0.1:23333",
+    "method": "POST",
+    "elapsedMs": 36,
+    "causes": [
+      {
+        "at": "error",
+        "name": "TypeError",
+        "message": "fetch failed"
+      },
+      {
+        "at": "error.cause",
+        "name": "Error",
+        "message": "Client network socket disconnected before secure TLS connection was established",
+        "code": "ECONNRESET"
+      }
+    ],
+    "hint": "连接失败或中断：检查代理是否运行、防火墙和网络连通性；请先确认服务端结果再重试。"
+  },
+  "limitations": "Independent Node process -> actual local Clash7897 -> local HTTPS. Does not validate remote proxy nodes, OpenAI, or running Pi heap.",
+  "temporaryCertificateAndKeyRemoved": true
+}

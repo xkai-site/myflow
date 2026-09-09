@@ -1,4 +1,16 @@
 # Progress
+## Current c13c87fc investigation (no code changes)
+- Read exact diagnostic, aggregate14 logs, inspect current adapter/HTTP trace/validation/cancellation and installed host dispatcher, re-read existing >70s local fixture results. No tests or external requests run this turn.
+- Fresh Clash correlation identifies a chatgpt.com connection660ms after start via 美国LA-优化2-GPT; no close reason for that connection at failure time. Cannot uniquely join because diagnostic intentionally omits socket port. Existing output filenames include both new models, so blanket unsupported-model diagnosis is unjustified.
+- Report prioritizes approximately60s actual-route cutoff exposed by slow nonstreaming generation, explicitly unproven closer/cause; no claim that prompt length, dimensions, quota or model incompatibility is established. Next live comparisons require approval and resolved usage limits; no automatic retry/TLS/proxy changes.
+- Preserved all pre-existing modified/untracked files; only these three planning records changed. An initial source search used nonexistent adapters/transport glob, then corrected to actual flat src files; no execution failure or code modification.
+## Actual Clash HTTPS local probe
+- Added opt-in test/clash-https-probe.mjs, generated ephemeral certificate/key in OS temp, spawned child with scoped CA trust, ran installed host dispatcher to loopback HTTPS via actual7897, cleaned certificate/key. No production edits or external requests.
+- BLOCKED: Clash IPCIDR(127.0.0.1/32) REJECT at01:16:27+08 (line8294), ECONNRESET36ms beforeTLS, zero HTTP requests received. Cannot conclude anything about70-second proxy/TLS wait; do not equate with production UND_ERR_SOCKET60s. No retry or rule modification. Evidence saved plans/clash-https-probe-result.json.
+## Host dispatcher local-only verification
+- Inspected installed dispatcher/main/settings/Undici implementation and safe allowlisted settings/environment. npm Undici8.9.0, defaults300000ms; no new60s limit identified. Disk timeout unset, project settings absent, inherited proxy local7897.
+- Added explicit slow probe test/host-dispatcher-probe.mjs outside normal npm test. Two independent child processes tested actual host EnvHttpProxyAgent + matching fetch: direct70108ms and synthetic CONNECT tunnel70147ms, both HTTP200. Each one POST, tunnel one CONNECT; no external requests/credentials/TLS changes. Safe JSON evidence saved in plans/host-dispatcher-{direct,tunnel}-result.json.
+- No production source/model/Pi/Clash settings edits. Planning records and local-only test/results only. Current Pi heap, real Clash and HTTPS/backend still unverified; not claiming socket root cause or fix.
 ## Remove obsolete model rejection tests
 - Updated test/model-config.test.ts, test/command.test.ts and test/host-lifecycle.mjs only (plus planning records); did not change enabled model settings or production code.
 - Removed forced-disabled/forbidden-default assumptions for both 2.5 models. Added positive default-selection and TUI selection coverage; retained generic disabled behavior with independent synthetic fixtures.

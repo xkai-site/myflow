@@ -1,0 +1,91 @@
+{
+  "passed": true,
+  "mode": "--tunnel",
+  "node": "v22.23.1",
+  "undici": "8.9.0",
+  "hostDefaultTimeoutMs": 300000,
+  "delayMs": 70000,
+  "calls": 1,
+  "tunnels": 1,
+  "serverBodyMs": 92,
+  "serverResponseMs": 70106,
+  "observedRequests": [
+    {
+      "method": "POST",
+      "headersTimeout": null,
+      "bodyTimeout": null
+    },
+    {
+      "method": "CONNECT",
+      "headersTimeout": null,
+      "bodyTimeout": null
+    }
+  ],
+  "diagnostic": {
+    "version": 1,
+    "id": "7db92f75-a7d1-47c4-bc80-4093f5329a2a",
+    "timestamp": "2026-09-09T17:10:42.518Z",
+    "outcome": "success",
+    "operation": "generate",
+    "phase": "response",
+    "host": "127.0.0.1:58088",
+    "method": "POST",
+    "elapsedMs": 70147,
+    "status": 200,
+    "network": {
+      "observation": "undici",
+      "events": [
+        {
+          "stage": "request-start",
+          "elapsedMs": 7
+        },
+        {
+          "stage": "request-created",
+          "elapsedMs": 23
+        },
+        {
+          "stage": "request-created",
+          "elapsedMs": 26
+        },
+        {
+          "stage": "socket-assigned-headers-sending",
+          "elapsedMs": 50
+        },
+        {
+          "stage": "request-body-sent",
+          "elapsedMs": 52
+        },
+        {
+          "stage": "socket-assigned-headers-sending",
+          "elapsedMs": 80
+        },
+        {
+          "stage": "request-body-sent",
+          "elapsedMs": 87
+        },
+        {
+          "stage": "wire-response-headers",
+          "elapsedMs": 70125
+        },
+        {
+          "stage": "wire-response-complete",
+          "elapsedMs": 70129
+        },
+        {
+          "stage": "fetch-response-headers",
+          "elapsedMs": 70139
+        },
+        {
+          "stage": "response-consumed",
+          "elapsedMs": 70144
+        }
+      ],
+      "socket": {
+        "encrypted": false
+      }
+    },
+    "causes": [],
+    "hint": "HTTP 响应读取完成；不代表后续图片解析/保存成功。"
+  },
+  "limitations": "Independent Node process; loopback HTTP only, not running Pi heap, real Clash, TLS or OpenAI."
+}

@@ -1,5 +1,11 @@
 # Image generation preview link
 
+## Current: read-only investigation of c13c87fc Sunburst disconnect
+- [complete] Verify exact log, all14 sanitized request timelines and current request/transport implementation:11 peer-closes at60–61.4s across three models;3 separate429s.
+- [complete] Correlate available proxy evidence:02:29:57 ChatGPT route through LA node; no attributable close evidence. Historical saved-image filenames exist for both new models; no controlled size/length measurements.
+- [complete] Prepare findings and bounded next steps; no code/config changes, tests, credential reads or live generation. Only existing planning notes updated.
+- Preserve all existing dirty files; only append investigation notes to existing planning records.
+
 ## Scope
 Keep existing image saving/TUI preview. Add an optional-to-open local HTML gallery link after success, supporting every image in an outcome without changing request count. Preserve pre-existing working-tree changes.
 
@@ -75,7 +81,19 @@ Keep existing image saving/TUI preview. Add an optional-to-open local HTML galle
 - [complete] Generic enabled:false CLI/runtime behavior now uses synthetic test-only models, avoiding empty-loop passes. TUI tests select each real 2.5 model and advance to size selection, then cancel before authentication.
 - [complete] 36/36 unit tests, host suite and 30 baseline differential cases passed. git diff --check passed (existing CRLF notices). Only three test files and planning records changed; runtime/model configuration, live-probe and timeline work preserved. No paid requests.
 
+## Follow-up: host dispatcher investigation
+- [complete] Inspect installed host dispatcher, setting resolution and Undici proxy tunnel timeout behavior; no credentials read or production configuration changed.
+- [complete] Installed host dispatcher + matching Undici8.9.0 fetch passed both 70-second loopback tests: direct70108ms and local CONNECT tunnel70147ms. One POST each; tunneled case additionally has one CONNECT (not a retry). No external requests.
+- [complete] Save reproducible explicit slow probe test/host-dispatcher-probe.mjs and sanitized plans/host-dispatcher-{direct,tunnel}-result.json. Independent child-process HTTP evidence only; running Pi memory, TLS, actual Clash and OpenAI remain outside coverage.
+
+## Follow-up: actual Clash + local HTTPS
+- [complete] Generated ephemeral localhost TLS certificate and attempted local HTTPS through actual Clash7897 with installed host dispatcher; trust scoped to child, no verification bypass or system changes.
+- [blocked] Clash rule IPCIDR(127.0.0.1/32) REJECT refused fixture at 2026-09-10 01:16:27 +08:00 (log line8294). ECONNRESET after36ms before TLS, zero server POSTs; 70-second wait not exercised. Not the production60s failure. Do not change rule or redirect target without approval.
+- [complete] Actual connection to local7897 observed, one CONNECT, temporary certificate/key removed. Result plans/clash-https-probe-result.json; opt-in script test/clash-https-probe.mjs. No external requests or production changes.
+- User confirms running Pi settings UI shows HTTP idle timeout 5min.
+
 ## Errors
+- Host follow-up planning read initially used offset100 beyond99-line EOF; corrected to64 without modifying content.
 - Current npm test failed 2/31: model-config.test.ts:33 expects enabled:false; :89 expects enabled Flare to be rejected as default. Existing tests and user-enabled config disagree; no runtime request failure was reproduced by these tests. Documented without altering configuration.
 - Current research: Codex guessed legacy core handler/provider/default_client source paths returned 404 (upstream reorganized); search for new paths. GitHub issue fetch hit anonymous API rate limit; no authentication changes made. Broad host rg matched minified bundles and truncated; use bounded/scoped reads instead.
 - Baseline differential first run failed because direct adapter no longer included quality:auto when omitted; restored legacy default, rerun passed all 30 scenarios. Normal configured command already supplied quality; do not misidentify this as the demonstrated cause of Flare disconnection.

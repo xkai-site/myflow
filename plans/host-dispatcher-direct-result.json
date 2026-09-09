@@ -1,0 +1,74 @@
+{
+  "passed": true,
+  "mode": "--direct",
+  "node": "v22.23.1",
+  "undici": "8.9.0",
+  "hostDefaultTimeoutMs": 300000,
+  "delayMs": 70000,
+  "calls": 1,
+  "tunnels": 0,
+  "serverBodyMs": 74,
+  "serverResponseMs": 70082,
+  "observedRequests": [
+    {
+      "method": "POST",
+      "headersTimeout": null,
+      "bodyTimeout": null
+    }
+  ],
+  "diagnostic": {
+    "version": 1,
+    "id": "f3d65329-1f02-4c27-b1a0-735badfcdbbc",
+    "timestamp": "2026-09-09T17:10:42.510Z",
+    "outcome": "success",
+    "operation": "generate",
+    "phase": "response",
+    "host": "127.0.0.1:58087",
+    "method": "POST",
+    "elapsedMs": 70108,
+    "status": 200,
+    "network": {
+      "observation": "undici",
+      "events": [
+        {
+          "stage": "request-start",
+          "elapsedMs": 7
+        },
+        {
+          "stage": "request-created",
+          "elapsedMs": 26
+        },
+        {
+          "stage": "socket-assigned-headers-sending",
+          "elapsedMs": 56
+        },
+        {
+          "stage": "request-body-sent",
+          "elapsedMs": 64
+        },
+        {
+          "stage": "wire-response-headers",
+          "elapsedMs": 70098
+        },
+        {
+          "stage": "wire-response-complete",
+          "elapsedMs": 70101
+        },
+        {
+          "stage": "fetch-response-headers",
+          "elapsedMs": 70105
+        },
+        {
+          "stage": "response-consumed",
+          "elapsedMs": 70106
+        }
+      ],
+      "socket": {
+        "encrypted": false
+      }
+    },
+    "causes": [],
+    "hint": "HTTP 响应读取完成；不代表后续图片解析/保存成功。"
+  },
+  "limitations": "Independent Node process; loopback HTTP only, not running Pi heap, real Clash, TLS or OpenAI."
+}
