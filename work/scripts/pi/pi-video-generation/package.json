@@ -4,6 +4,9 @@
   "description": "Pi /video extension with configurable video-generation providers and models",
   "type": "module",
   "license": "MIT",
+  "scripts": {
+    "test": "node test/output-preview.mjs"
+  },
   "keywords": [
     "pi-package",
     "pi",

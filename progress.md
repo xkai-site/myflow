@@ -1,4 +1,10 @@
 # Progress
+## Video output parity
+- Added package-local formatVideoLink using the image plugin's file URL/theme/OSC 8 pattern; no cross-package runtime dependency.
+- Video entry renderer now displays durable original MP4 links and guards malformed/relative paths. Shared publisher retains TUI Saved notice without duplicate URL and adds plain URL for RPC; generate/resume call sites unchanged.
+- Added offline host-backed output regression and npm test script; documented manual opening, historical entries and limitations.
+- Video output regression passed with explicit installed SDK URL. Tests deny network, use temporary synthetic files and verify unchanged file contents/listing; no credentials, paid requests or actual player launch.
+- Image regression: 31/31 unit tests and host-backed lifecycle suite passed. git diff --check passed with LF/CRLF notices only. Full video submit/resume integration and actual terminal clicks remain outside this presentation-only validation.
 ## Direct-image link simplification
 - Inspected source, types, documentation and host tests. Starting state: only unrelated untracked plans/openai-image-async-client-research.md; retain it.
 - Removed src/gallery.ts and test/gallery.test.ts; removed galleryPath from current types. Renderer/publisher use formatImageLink per image with no preview-file writes; old metadata is ignored. Kept image preview and Saved notifications.

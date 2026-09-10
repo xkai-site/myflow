@@ -1,4 +1,8 @@
 # Findings
+## Video output parity
+- Video already persists generated-video entries, but renders only filename/model/task metadata; success notification exposes a plain filesystem path.
+- Image uses encoded pathToFileURL links, theme underline/mdLink and host OSC 8 capability detection, with one persistent TUI link and plain URLs in non-TUI notifications.
+- All video generate/resume success paths share publishOutcome; presentation-only change can cover both without touching generation/download/configuration.
 ## Direct-image link simplification
 - User approved removing HTML output; opening via terminal/OS default application is acceptable, no browser guarantee.
 - Current gallery.ts embeds static HTML/CSS; publishOutcome writes a gallery even for one image. Existing preview-link.ts already handles encoded file URLs and OSC 8.

@@ -1,5 +1,11 @@
 # Image generation preview link
 
+## Current: video output parity with images
+- [complete] Inspect image/video publication, renderer and installed Pi APIs (README, extensions, TUI, session-format, themes and entry-renderer example read).
+- [complete] Add persistent per-video original-file links with TUI/RPC fallback; document behavior.
+- [complete] Video host-backed output regression, 31 image unit tests and image host suite passed. git diff --check passed (LF/CRLF notices only). No paid generation, credential reads or actual terminal/player clicks; full video generation/resume integration not exercised.
+- Starting repository state: clean. Preserve existing planning history.
+
 ## Current: simplify to direct original-image links
 - [complete] Removed HTML generation and gallery metadata; render a direct file URL for every image, including historical entries.
 - [complete] Updated documentation and offline host regressions (single/batch, RPC, OSC 8, reload, no HTML writes, historical files preserved, missing/corrupt preview fallback).
@@ -98,6 +104,7 @@ Keep existing image saving/TUI preview. Add an optional-to-open local HTML galle
 - User confirms running Pi settings UI shows HTTP idle timeout 5min.
 
 ## Errors
+- Video inspection initially assumed index.ts/test at package root and docs/session.md; actual entry is extensions/index.ts, no existing video test directory, and docs/session-format.md is the referenced document. Corrected paths; no execution/production failure.
 - Host follow-up planning read initially used offset100 beyond99-line EOF; corrected to64 without modifying content.
 - Current npm test failed 2/31: model-config.test.ts:33 expects enabled:false; :89 expects enabled Flare to be rejected as default. Existing tests and user-enabled config disagree; no runtime request failure was reproduced by these tests. Documented without altering configuration.
 - Current research: Codex guessed legacy core handler/provider/default_client source paths returned 404 (upstream reorganized); search for new paths. GitHub issue fetch hit anonymous API rate limit; no authentication changes made. Broad host rg matched minified bundles and truncated; use bounded/scoped reads instead.

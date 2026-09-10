@@ -1,4 +1,5 @@
 import { fileURLToPath } from "node:url";
+import path from "node:path";
 import {
 	BorderedLoader,
 	getAgentDir,
@@ -11,6 +12,7 @@ import { parseVideoCommand, resolveParameters, resolveVideoRequest, usageText, v
 import { getVideoConfigPath, isProviderConfigured, readVideoConfig } from "../src/config.ts";
 import { ensureVideoConfig, runVideoConfigUi } from "../src/config-ui.ts";
 import { sanitizeError } from "../src/http.ts";
+import { formatVideoLink } from "../src/preview-link.ts";
 import { cancelPersistedVideoTask, submitAndPersistVideoTask } from "../src/submission.ts";
 import { findStoredTask, listStoredTasks, removeStoredTask, upsertStoredTask } from "../src/task-store.ts";
 import type {
@@ -56,7 +58,7 @@ export default function videoGenerationExtension(pi: ExtensionAPI) {
 	pi.registerEntryRenderer<GeneratedVideoEntryData>(ENTRY_TYPE, (entry, _options, theme) => {
 		const data = entry.data;
 		const container = new Container();
-		if (!data || !isGeneratedVideoPath(data.path)) {
+		if (!data || typeof data.path !== "string" || !path.isAbsolute(data.path) || !isGeneratedVideoPath(data.path)) {
 			container.addChild(new Text(theme.fg("error", "Generated video entry has an invalid path"), 0, 0));
 			return container;
 		}
@@ -71,6 +73,12 @@ export default function videoGenerationExtension(pi: ExtensionAPI) {
 				0,
 			),
 		);
+		// Derive links from persisted paths, including historical entries, without reading MP4 bytes.
+		// Recompute styles and terminal capabilities after theme changes or reload.
+		container.addChild({
+			render: (width) => new Text(`Open original video (Ctrl+click in supported terminals; otherwise copy URL):\n${formatVideoLink(data.path, theme)}`, 0, 0).render(width),
+			invalidate() {},
+		});
 		return container;
 	});
 
@@ -489,9 +497,12 @@ function findRawModel(parsed: ParsedVideoCommand, config: VideoGenerationConfig)
 	return models[0];
 }
 
-function publishOutcome(pi: ExtensionAPI, ctx: ExtensionContext, outcome: GenerationOutcome): void {
+export function publishOutcome(pi: ExtensionAPI, ctx: ExtensionContext, outcome: GenerationOutcome): void {
 	pi.appendEntry(ENTRY_TYPE, outcome.entry);
-	ctx.ui.notify(`Saved video: ${outcome.entry.path}`, "info");
+	// TUI already has a durable link; RPC consumers need a plain file URL.
+	const link = ctx.mode !== "tui"
+		? `\n\nOpen original video (open manually):\n${formatVideoLink(outcome.entry.path)}` : "";
+	ctx.ui.notify(`Saved video: ${outcome.entry.path}${link}`, "info");
 }
 
 function notifyCancelled(ctx: ExtensionContext, message: string): void {
