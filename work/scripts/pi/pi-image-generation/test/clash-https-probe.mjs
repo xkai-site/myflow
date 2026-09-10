@@ -6,7 +6,7 @@ import { createServer } from 'node:https';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { channel } from 'node:diagnostics_channel';
@@ -48,7 +48,8 @@ if (process.argv[2] === '--confirm-local-clash-test') {
 }
 
 async function runChild(dir) {
-  const hostUrl = 'file:///D:/Nodejs/node_modules/@earendil-works/pi-coding-agent/dist/core/http-dispatcher.js';
+  const sdkUrl = pathToFileURL(createRequire(import.meta.url).resolve('@earendil-works/pi-coding-agent')).href;
+  const hostUrl = new URL('./core/http-dispatcher.js', sdkUrl).href;
   const requireHost = createRequire(hostUrl);
   const undici = requireHost('undici');
   const { configureHttpDispatcher } = await import(hostUrl);

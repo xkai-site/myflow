@@ -4,12 +4,14 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { connect } from 'node:net';
 import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 import { channel } from 'node:diagnostics_channel';
 import { requestImageJson } from '../src/http.ts';
 
 const mode = process.argv[2];
 if (!['--direct', '--tunnel'].includes(mode)) throw new Error('Choose --direct or --tunnel; each waits 70 seconds locally.');
-const hostUrl = process.argv[3] ?? 'file:///D:/Nodejs/node_modules/@earendil-works/pi-coding-agent/dist/core/http-dispatcher.js';
+const sdkUrl = pathToFileURL(createRequire(import.meta.url).resolve('@earendil-works/pi-coding-agent')).href;
+const hostUrl = process.argv[3] ?? new URL('./core/http-dispatcher.js', sdkUrl).href;
 if (!hostUrl.startsWith('file:')) throw new Error('Host module must be a local file URL');
 // These changes are confined to this standalone child process, never persisted.
 for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NO_PROXY', 'no_proxy']) delete process.env[key];

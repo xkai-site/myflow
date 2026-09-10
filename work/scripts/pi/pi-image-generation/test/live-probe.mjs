@@ -1,10 +1,11 @@
 // Explicit opt-in, one paid image POST maximum. Never prints credentials/payloads.
 import { createRequire } from 'node:module';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 if (process.argv[2] !== '--confirm-one-paid-request') throw new Error('Explicit confirmation required');
-const sdk = 'file:///D:/Nodejs/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
+const localRequire = createRequire(import.meta.url);
+const sdk = pathToFileURL(localRequire.resolve('@earendil-works/pi-coding-agent')).href;
 const require = createRequire(sdk);
 const { createJiti } = require('jiti');
 const jiti = createJiti(import.meta.url, { moduleCache: false, fsCache: false });
