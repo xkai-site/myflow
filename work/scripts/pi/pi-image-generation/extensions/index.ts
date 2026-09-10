@@ -8,8 +8,7 @@ import { detectImage, isGeneratedImagePath, loadInputImages, parseReferenceImage
 import { sanitizeError } from "../src/http.ts";
 import { readImageConfig, sizeForTask, type ChoicePolicy, type ImageConfig, type ImageModelConfig, type ImageProviderConfig } from "../src/model-config.ts";
 import { generateAndSave } from "../src/runtime.ts";
-import { saveImageGallery } from "../src/gallery.ts";
-import { formatGalleryLink } from "../src/preview-link.ts";
+import { formatImageLink } from "../src/preview-link.ts";
 import { getAccountStatus, resolveImageAuth } from "../src/credentials.ts";
 import { runAccountSettings } from "../src/account-settings.ts";
 import type { GeneratedImageEntryData, GenerationOutcome, ResolvedImageCommand } from "../src/types.ts";
@@ -26,18 +25,17 @@ export default async function imageGenerationExtension(pi: ExtensionAPI) {
 	pi.registerEntryRenderer<GeneratedImageEntryData>(ENTRY_TYPE, (entry, _options, theme) => {
 		const data = entry.data;
 		const container = new Container();
-		if (!data || !isGeneratedImagePath(data.path)) {
+		if (!data || typeof data.path !== "string" || !path.isAbsolute(data.path) || !isGeneratedImagePath(data.path)) {
 			container.addChild(new Text(theme.fg("error", "Generated image entry has an invalid path"), 0, 0));
 			return container;
 		}
 		container.addChild(new Text(theme.fg("success", `${data.provider}/${data.model}`) + "\n" + theme.fg("dim", data.path), 0, 0));
-		if (data.galleryPath && path.isAbsolute(data.galleryPath) && isGeneratedImagePath(data.galleryPath) && data.galleryPath.endsWith(".html")) {
-			// Resolve theme/capabilities on every render, including after /reload or a theme change.
-			container.addChild({
-				render: (width) => new Text(`Browser preview (Ctrl+click in supported terminals; otherwise copy URL):\n${formatGalleryLink(data.galleryPath!, theme)}`, 0, 0).render(width),
-				invalidate() {},
-			});
-		}
+		// Derive the original-image link from saved metadata, including historical entries.
+		// Resolve theme/capabilities on every render, including after /reload or a theme change.
+		container.addChild({
+			render: (width) => new Text(`Open original image (Ctrl+click in supported terminals; otherwise copy URL):\n${formatImageLink(data.path, theme)}`, 0, 0).render(width),
+			invalidate() {},
+		});
 		try {
 			const bytes = readFileSync(data.path);
 			const detected = detectImage(bytes);
@@ -180,16 +178,9 @@ async function selectPolicy(ctx: ExtensionContext, title: string, policy: Choice
 }
 function notifyCancelled(ctx: ExtensionContext): void { ctx.ui.notify("Image generation cancelled", "info"); }
 export async function publishOutcome(pi: ExtensionAPI, ctx: ExtensionContext, outcome: GenerationOutcome): Promise<void> {
-	let galleryPath: string | undefined;
-	let galleryError: string | undefined;
-	try { galleryPath = await saveImageGallery(ctx.cwd, outcome.entries); }
-	catch (error) { galleryError = sanitizeError((error as Error).message); }
-	for (const [index, entry] of outcome.entries.entries()) {
-		pi.appendEntry(ENTRY_TYPE, index === 0 && galleryPath ? { ...entry, galleryPath } : entry);
-	}
-	// TUI already renders the durable link in the first image entry. Only non-TUI
-	// consumers need the URL in the notification as they do not render entries.
-	const preview = galleryPath && ctx.mode !== "tui" ? `\n\nBrowser preview (open manually):\n${formatGalleryLink(galleryPath)}` : "";
-	ctx.ui.notify(`Saved ${outcome.entries.length} image(s):\n${outcome.entries.map((entry) => entry.path).join("\n")}${preview}`, "info");
-	if (galleryError) ctx.ui.notify(`Images saved, but browser preview unavailable: ${galleryError}`, "warning");
+	for (const entry of outcome.entries) pi.appendEntry(ENTRY_TYPE, entry);
+	// TUI already renders a durable link per image. Non-TUI consumers need plain URLs.
+	const links = ctx.mode !== "tui" && outcome.entries.length
+		? `\n\nOpen original image(s) (open manually):\n${outcome.entries.map((entry) => formatImageLink(entry.path)).join("\n")}` : "";
+	ctx.ui.notify(`Saved ${outcome.entries.length} image(s):\n${outcome.entries.map((entry) => entry.path).join("\n")}${links}`, "info");
 }

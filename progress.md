@@ -1,4 +1,9 @@
 # Progress
+## Direct-image link simplification
+- Inspected source, types, documentation and host tests. Starting state: only unrelated untracked plans/openai-image-async-client-research.md; retain it.
+- Removed src/gallery.ts and test/gallery.test.ts; removed galleryPath from current types. Renderer/publisher use formatImageLink per image with no preview-file writes; old metadata is ignored. Kept image preview and Saved notifications.
+- Updated README and host regressions: direct targets, URI encoding/control escapes, narrow wrapping, theme/capability refresh, single/batch deduplication, RPC URLs, serialized historical entries, missing/corrupt preview fallback, invalid path guard and original/HTML fixture preservation.
+- Validation: 31/31 unit tests, explicit-SDK host suite and 30/30 baseline request comparisons passed. git diff --check passed (LF/CRLF notices only). No real credentials, paid requests, terminal mouse clicks, new dependencies, staged files or commits.
 ## Current c13c87fc investigation (no code changes)
 - Read exact diagnostic, aggregate14 logs, inspect current adapter/HTTP trace/validation/cancellation and installed host dispatcher, re-read existing >70s local fixture results. No tests or external requests run this turn.
 - Fresh Clash correlation identifies a chatgpt.com connection660ms after start via 美国LA-优化2-GPT; no close reason for that connection at failure time. Cannot uniquely join because diagnostic intentionally omits socket port. Existing output filenames include both new models, so blanket unsupported-model diagnosis is unjustified.

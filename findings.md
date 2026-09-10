@@ -1,4 +1,9 @@
 # Findings
+## Direct-image link simplification
+- User approved removing HTML output; opening via terminal/OS default application is acceptable, no browser guarantee.
+- Current gallery.ts embeds static HTML/CSS; publishOutcome writes a gallery even for one image. Existing preview-link.ts already handles encoded file URLs and OSC 8.
+- Replaced gallery links with per-image links derived from persisted path; old galleryPath fields are ignored without migrating history. Preserved TUI image preview, Saved paths and plain RPC URLs.
+- Existing Pi entry-renderer pattern and host Text/OSC 8 handling support this without new APIs/dependencies. Read extensions/TUI/session-format/theme docs and renderer examples. Host tests verify publication does not write files even with an unusable cwd and preserves historical HTML/image contents.
 ## Current c13c87fc read-only diagnosis
 - Exact log begins 2026-09-09T18:29:56.737Z (UTC+8 02:29:56.737), fails at approximately 02:30:57.737 after61000ms. Sunburst, auto/auto, zero reference images. TLS socket assigned at2912ms; final bodySent2919ms; peer-close60990ms; no response headers. Sending completed locally, not proof backend accepted/finished generation.
 - All14 available logs:11 UND_ERR_SOCKET, spanning Image2/Flare/Sunburst, clustered60143–61405ms;3 HTTP429. No success logs available. Cannot statistically establish prompt-length/size dependence because prompt lengths and successful comparisons are absent.

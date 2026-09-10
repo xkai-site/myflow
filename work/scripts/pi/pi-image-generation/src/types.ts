@@ -43,6 +43,5 @@ export interface GeneratedImageEntryData {
 	mimeType: string;
 	bytes: number;
 	createdAt: number;
-	galleryPath?: string;
 }
 export interface GenerationOutcome { entries: GeneratedImageEntryData[]; texts: string[] }

@@ -1,5 +1,10 @@
 # Image generation preview link
 
+## Current: simplify to direct original-image links
+- [complete] Removed HTML generation and gallery metadata; render a direct file URL for every image, including historical entries.
+- [complete] Updated documentation and offline host regressions (single/batch, RPC, OSC 8, reload, no HTML writes, historical files preserved, missing/corrupt preview fallback).
+- [complete] 31 unit tests, SDK-host suite and 30 pinned-baseline scenarios passed. git diff --check passed (LF/CRLF warnings only). Existing images/HTML and unrelated untracked research preserved; no paid requests or actual terminal clicks.
+
 ## Current: read-only investigation of c13c87fc Sunburst disconnect
 - [complete] Verify exact log, all14 sanitized request timelines and current request/transport implementation:11 peer-closes at60–61.4s across three models;3 separate429s.
 - [complete] Correlate available proxy evidence:02:29:57 ChatGPT route through LA node; no attributable close evidence. Historical saved-image filenames exist for both new models; no controlled size/length measurements.
