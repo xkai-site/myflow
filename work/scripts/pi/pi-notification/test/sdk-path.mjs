@@ -136,6 +136,24 @@ export function resolvePiLaunch({ env = process.env } = {}) {
 }
 
 /** 把入口路径转成可 `await import()` 的 URL。 */
+/**
+ * 解析 pi 安装内的兄弟包（如 `@earendil-works/pi-tui`）的 dist 入口。
+ *
+ * 直接 `import("@earendil-works/pi-tui")` 在本 plugin 目录下跑不通（package 没有 node_modules），
+ * 但在 pi/SDK 加载器里能解析——本函数就是给需要**脱离宿主直接驱动组件**的脚本补上这条路。
+ */
+export function resolvePiPackageEntry(pkg, { sdkEntry = resolveSdkEntry() } = {}) {
+  const packageDir = pkg.split("/");
+  const candidates = [
+    path.join(path.dirname(sdkEntry), "..", "node_modules", ...packageDir, "dist", "index.js"),
+    path.join(path.dirname(sdkEntry), "..", "..", ...packageDir, "dist", "index.js"),
+  ];
+  for (const candidate of candidates) {
+    if (isFile(candidate)) return candidate;
+  }
+  throw new Error(`无法定位 ${pkg}（已查找：${candidates.join(", ")}）`);
+}
+
 export function sdkUrl(entry) {
   return pathToFileURL(entry).href;
 }

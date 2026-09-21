@@ -1,21 +1,23 @@
 /**
- * 配置（设计 §10 / §13 第 5、6、7 项）。
+ * 配置（设计 §10 / §13 第 5 、6 项；UX 方案 §值模型）。
  *
- * 内置默认值 + 用户级读写 + 校验 + 降级 + 项目级合并（仅信任项目）。
+ * 三层值：**出厂默认 → 用户级默认（稀疏文件） → 本对话选择（overlay，见 settings.ts）**。
+ * 本模块只负责前两层 + 降级，不读项目级配置（已删除该层）。
+ *
  * 写盘先校验，再同目录临时文件（0o600）+ 原子 rename；失败不覆盖原文件。
  *
- * 两条关键安全/健壮性规则：
+ * 两条关键健壮性规则：
  *  1. **损坏配置不静默全关**（§13 第 5 项）：解析或校验失败时降级为「仅 terminal + 仅 error +
- *     只开 run_failed」，并留下可查的原因（`/notify status` 会显示），而不是把通知悄悄关掉。
+ *     只开 run_failed」，并留下可查的原因（状态总览会显示），而不是把通知悄悄关掉。
  *     理由：用户写错一个逗号就再也收不到失败通知，是这个插件最糟糕的失败模式。
- *  2. **项目级配置不得定义渠道**（§13 第 7 项）：`.pi/pi-notification/config.json` 只在项目被
- *     信任时读取，且其中的 `providers` 会被忽略并告警——渠道将来会承载 URL/密钥，
- *     不能让一个被 clone 下来的仓库决定把通知发到哪里。
+ *  2. **稀疏写盘**：Ctrl+S 只写被保存的那一项（`writeUserDefault`），不把其余字段钉死在今天的默认值上。
  */
 
 import { closeSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+
+import { isPlainObject, mergePatch, type ConfigPatch } from "./patch.ts";
 
 import type {
   NotificationConfig,
@@ -60,11 +62,11 @@ export interface ConfigProblem {
 
 export interface ConfigLoadResult {
   config: NotificationConfig;
-  /** 实际生效的来源，用于 `/notify status` 与排障 */
+  /** 实际生效的来源，用于状态总览与排障 */
   sources: string[];
   /** 解析/校验中的致命问题（会导致降级） */
   errors: ConfigProblem[];
-  /** 非致命问题（例如未知字段、被忽略的项目级 providers） */
+  /** 非致命问题（例如未知字段） */
   warnings: ConfigProblem[];
   /** true 表示已降级为安全子集 */
   degraded: boolean;
@@ -73,22 +75,11 @@ export interface ConfigLoadResult {
 export interface ReadConfigOptions {
   /** 用户级目录（`getAgentDir()`） */
   agentDir: string;
-  /** 项目根（`ctx.cwd`）；未信任时传 undefined */
-  cwd?: string;
-  /** 项目级配置目录名（官方 `CONFIG_DIR_NAME`，通常为 `.pi`）；由调用方注入，本模块不依赖 SDK */
-  configDirName: string;
-  /** 仅当项目被信任时才允许合并项目级配置 */
-  projectTrusted: boolean;
 }
 
-/** 用户级配置文件路径（`~/.pi/agent/pi-notification/config.json`）。 */
+/** 用户级配置文件路径（`~/.pi/agent/pi-notification/config.json`）。存的是**稀疏用户默认**。 */
 export function userConfigPath(agentDir: string): string {
   return path.join(agentDir, "pi-notification", "config.json");
-}
-
-/** 项目级配置文件路径（`<cwd>/.pi/pi-notification/config.json`）。 */
-export function projectConfigPath(cwd: string, configDirName: string): string {
-  return path.join(cwd, configDirName, "pi-notification", "config.json");
 }
 
 /**
@@ -176,10 +167,6 @@ export function degradedConfig(): NotificationConfig {
 // 校验：逐字段严格检查（风格参考 pi-image-generation 的 model-config）
 // ---------------------------------------------------------------------------
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function checkBoolean(
   raw: Record<string, unknown>,
   key: string,
@@ -231,7 +218,12 @@ function checkChannels(value: unknown, fieldPath: string, errors: ConfigProblem[
   return [...new Set(value as string[])];
 }
 
-function checkRules(value: unknown, errors: ConfigProblem[], warnings: ConfigProblem[]): Partial<Record<string, RuleConfig>> | undefined {
+function checkRules(
+  value: unknown,
+  baseRules: NotificationConfig["rules"],
+  errors: ConfigProblem[],
+  warnings: ConfigProblem[],
+): Partial<Record<string, RuleConfig>> | undefined {
   if (value === undefined) return undefined;
   if (!isPlainObject(value)) {
     errors.push({ path: "rules", message: "必须是对象" });
@@ -249,8 +241,9 @@ function checkRules(value: unknown, errors: ConfigProblem[], warnings: ConfigPro
       errors.push({ path: fieldPath, message: "必须是对象" });
       continue;
     }
-    const defaults = defaultConfig().rules as unknown as Record<string, RuleConfig>;
-    const rule: RuleConfig = structuredClone(defaults[key]);
+    // 从 **base** 继承，不是从出厂默认继承：单项保存/三层合并时，同规则的其它字段必须原样保留。
+    const base = baseRules as unknown as Record<string, RuleConfig>;
+    const rule: RuleConfig = structuredClone(base[key]);
     const target = rule as unknown as Record<string, unknown>;
     checkBoolean(ruleRaw, "enabled", target, `${fieldPath}.enabled`, errors);
     const level = checkLevel(ruleRaw.level, `${fieldPath}.level`, errors);
@@ -363,7 +356,7 @@ export function mergeConfig(base: NotificationConfig, raw: unknown, source: stri
   const minLevel = checkLevel(raw.minLevel, "minLevel", errors);
   if (minLevel) config.minLevel = minLevel;
 
-  const rules = checkRules(raw.rules, errors, warnings);
+  const rules = checkRules(raw.rules, base.rules, errors, warnings);
   if (rules) {
     for (const key of RULE_KEYS) {
       const override = rules[key];
@@ -440,7 +433,7 @@ export function mergeConfig(base: NotificationConfig, raw: unknown, source: stri
 }
 
 // ---------------------------------------------------------------------------
-// 读盘
+// 读盘（出厂默认 → 用户级默认）
 // ---------------------------------------------------------------------------
 
 function readJsonFile(file: string): { ok: true; value: unknown } | { ok: false; missing: boolean; message: string } {
@@ -459,10 +452,10 @@ function readJsonFile(file: string): { ok: true; value: unknown } | { ok: false;
 }
 
 /**
- * 载入有效配置。
+ * 载入有效配置：内置默认值 → 用户级默认值（稀疏）。
  *
- * 顺序：默认值 → 用户级 → （可选）项目级。
  * 任何一层出现致命错误都会**整份降级**为安全子集（不静默全关），并保留原因。
+ * 本对话覆盖不在这里 —— 由 `settings.ts` 的 `applyOverlay()` 叠在结果之上。
  */
 export function loadConfig(options: ReadConfigOptions): ConfigLoadResult {
   const errors: ConfigProblem[] = [];
@@ -484,26 +477,6 @@ export function loadConfig(options: ReadConfigOptions): ConfigLoadResult {
     sources.push(`${userPath}（读取失败）`);
   }
 
-  if (options.projectTrusted && options.cwd) {
-    const projectPath = projectConfigPath(options.cwd, options.configDirName);
-    const projectRaw = readJsonFile(projectPath);
-    if (projectRaw.ok) {
-      // §13 第 7 项：项目级不得定义渠道（渠道将来承载 URL/密钥）
-      if (isPlainObject(projectRaw.value) && projectRaw.value.providers !== undefined) {
-        warnings.push({ path: `${projectPath}: providers`, message: "项目级配置不允许定义渠道，已忽略" });
-        delete (projectRaw.value as Record<string, unknown>).providers;
-      }
-      const merged = mergeConfig(config, projectRaw.value, projectPath);
-      errors.push(...merged.errors);
-      warnings.push(...merged.warnings);
-      config = merged.config;
-      sources.push(projectPath);
-    } else if (!projectRaw.missing) {
-      errors.push({ path: projectPath, message: projectRaw.message });
-      sources.push(`${projectPath}（读取失败）`);
-    }
-  }
-
   if (errors.length > 0) {
     return { config: degradedConfig(), sources, errors, warnings, degraded: true };
   }
@@ -515,18 +488,67 @@ export type ConfigWriteResult =
   | { ok: false; problems: ConfigProblem[] };
 
 /**
- * 只写用户层；调用方只能在成功之后更新内存态。
- * 临时文件用 wx 独占创建，关闭后 rename；绝不先删除目的文件。
- * 不合法配置拒绝写入（不能把读盘的安全降级配置当作成功结果写回）。
+ * 读用户文件**原文**（不合并默认值）。Ctrl+S 的稀疏写盘与「该项是否已被保存过」都靠它。
+ * 文件不存在 → `raw: undefined`；文件损坏或根不是对象 → `ok: false`（调用方必须拒绝覆盖）。
+ */
+export function readUserConfigRaw(
+  agentDir: string,
+): { ok: true; raw: Record<string, unknown> | undefined } | { ok: false; problems: ConfigProblem[] } {
+  const file = userConfigPath(agentDir);
+  const read = readJsonFile(file);
+  if (read.ok) {
+    if (!isPlainObject(read.value)) return { ok: false, problems: [{ path: file, message: "配置根必须是 JSON 对象" }] };
+    return { ok: true, raw: read.value };
+  }
+  if (read.missing) return { ok: true, raw: undefined };
+  return { ok: false, problems: [{ path: file, message: read.message }] };
+}
+
+/**
+ * 把单项补丁合并进用户文件并原子写盘（Ctrl+S）。
+ *
+ * 与 `writeUserConfig` 的区别：**写的是稀疏用户默认**（原文已有字段 + 本次这一个补丁），
+ * 不把其余字段写成今天的默认值快照，因此用户没碰过的项仍然跟随出厂默认。
+ * 损坏原文件 → 拒绝写入（否则会把安全降级结果固化成用户默认）。
+ */
+export function writeUserDefault(agentDir: string, patch: ConfigPatch): ConfigWriteResult {
+  const file = userConfigPath(agentDir);
+  const current = readUserConfigRaw(agentDir);
+  if (!current.ok) return { ok: false, problems: current.problems };
+  const sparse = mergePatch(current.raw ?? {}, patch);
+  // 写盘前用同一套严格校验（单项也走全量字段校验，非法值一律拒绝）。
+  const merged = mergeConfig(defaultConfig(), sparse, file);
+  if (merged.errors.length > 0) return { ok: false, problems: merged.errors };
+  const written = atomicWriteConfig(agentDir, `${JSON.stringify(sparse, null, 2)}\n`);
+  if (!written.ok) return written;
+  return { ok: true, config: merged.config, problems: [], warnings: merged.warnings };
+}
+
+/**
+ * 写用户层完整快照（测试与迁移用）；调用方只能在成功之后更新内存态。
+ * 新代码优先用 `writeUserDefault` 写单项。
  */
 export function writeUserConfig(agentDir: string, raw: unknown): ConfigWriteResult {
+  const file = userConfigPath(agentDir);
+  const merged = mergeConfig(defaultConfig(), raw, file);
+  if (merged.errors.length > 0) return { ok: false, problems: merged.errors };
+  const written = atomicWriteConfig(agentDir, `${JSON.stringify(merged.config, null, 2)}\n`);
+  if (!written.ok) return written;
+  return { ok: true, config: merged.config, problems: [], warnings: merged.warnings };
+}
+
+/**
+ * 原子写盘：同目录临时文件用 `wx` 独占创建（`0o600`）→ 关闭 → rename；绝不先删目的文件。
+ * 失败时保留原文件，临时文件尽力清理。
+ */
+function atomicWriteConfig(
+  agentDir: string,
+  text: string,
+): { ok: true } | { ok: false; problems: ConfigProblem[] } {
   let temporary: string | undefined;
   let fd: number | undefined;
   try {
     const file = userConfigPath(agentDir);
-    const merged = mergeConfig(defaultConfig(), raw, file);
-    if (merged.errors.length > 0) return { ok: false, problems: merged.errors };
-    const text = `${JSON.stringify(merged.config, null, 2)}\n`;
     mkdirSync(path.dirname(file), { recursive: true });
     const candidate = path.join(path.dirname(file), `.config-${randomUUID()}.tmp`);
     fd = openSync(candidate, "wx", 0o600);
@@ -536,7 +558,7 @@ export function writeUserConfig(agentDir: string, raw: unknown): ConfigWriteResu
     fd = undefined;
     renameSync(temporary, file);
     temporary = undefined;
-    return { ok: true, config: merged.config, problems: [], warnings: merged.warnings };
+    return { ok: true };
   } catch (error) {
     return { ok: false, problems: [{ path: "userConfig", message: error instanceof Error ? error.message : String(error) }] };
   } finally {

@@ -210,18 +210,21 @@ await step("H 假 provider + 真实 prompt：投递 1 条 run_completed", async 
   assert.match(degraded[0].reason, /TTY/);
 });
 
-await step("I /notify status：真实 CLI 下命令可派发、退出干净、stdout 未被污染", async () => {
+await step("I /notify（单一入口）：真实 CLI 下可派发、退出干净、stdout 未被污染", async () => {
   const run = runPi({
-    label: "notify-status",
-    args: ["--no-session", "--approve", ...EXTENSIONS, "-p", "/notify status"],
+    label: "notify-settings",
+    args: ["--no-session", "--approve", ...EXTENSIONS, "-p", "/notify"],
   });
   assertCleanExit("I", run);
 
-  const statusRecords = run.plugin.filter((row) => row.event === "notify_status");
-  assert.equal(statusRecords.length, 1, `I: /notify status 未执行 [${run.plugin.map((r) => r.event)}]`);
-  assert.match(statusRecords[0].text, /投递统计/);
-  assert.match(statusRecords[0].text, /配置来源/);
-  assert.match(statusRecords[0].text, /默认|defaults/);
+  const viewRecords = run.plugin.filter((row) => row.event === "notify_settings_view");
+  assert.equal(viewRecords.length, 1, `I: /notify 未执行 [${run.plugin.map((r) => r.event)}]`);
+  assert.equal(viewRecords[0].mode, "print", "I: 非 TUI 应记录模式而不是打开组件");
+  // 状态与配置路径走 stderr（stdout 归调用方）
+  assert.match(run.stderr, /投递统计/);
+  assert.match(run.stderr, /配置来源/);
+  assert.match(run.stderr, /用户默认: /);
+  assert.match(run.stderr, /设置界面仅 TUI 可用/);
 
   // 纯命令不进入 agent 生命周期（与 G 同一不变量，只是换成了插件自己的命令）
   const probeEvents = run.probe.map((row) => row.ev);
@@ -230,7 +233,22 @@ await step("I /notify status：真实 CLI 下命令可派发、退出干净、st
     assert.ok(!probeEvents.includes(forbidden), `I: 纯命令却出现了 ${forbidden}`);
   }
   assert.equal(run.plugin.filter((row) => row.event === "delivery").length, 0, "I: 纯命令不应投递");
-  assert.ok(!run.stdout.includes("\u001b"), "I: stdout 被转义序列污染");
+  assert.ok(!run.stdout.includes(""), "I: stdout 被转义序列污染");
+  assert.ok(!fs.existsSync(path.join(AGENT_DIR, "pi-notification", "config.json")), "I: 非 TUI 的 /notify 不得写盘");
+});
+
+await step("I2 旧子命令在真实 CLI 下已移除：只给指路，不执行、不写盘", async () => {
+  const run = runPi({
+    label: "notify-old-subcommand",
+    args: ["--no-session", "--approve", ...EXTENSIONS, "-p", "/notify status"],
+  });
+  assertCleanExit("I2", run);
+  const usage = run.plugin.filter((row) => row.event === "notify_usage");
+  assert.equal(usage.length, 1, "I2: /notify status 未被识别为旧子命令");
+  assert.equal(usage[0].args, "status");
+  assert.match(run.stderr, /单一入口/);
+  assert.equal(run.plugin.filter((row) => row.event === "delivery").length, 0);
+  assert.ok(!fs.existsSync(path.join(AGENT_DIR, "pi-notification", "config.json")), "I2: 旧子命令不得写盘");
 });
 
 await step("J 用户级配置 enabled=false 在真实 CLI 下生效（一条通知都不发）", async () => {
@@ -299,24 +317,33 @@ await step("L --no-notify：本会话静默，一条都不发（且不改写配�
   assert.equal(startup.silenced, true, "L: 插件未记录静默标志");
 });
 
-await step("M /notify off → 新 CLI 进程零投递（持久化，不重写测试配置）", async () => {
-  const off = runPi({ label: "off-write", args: ["--no-session", "--approve", ...EXTENSIONS, "-p", "/notify off"] });
+await step("M 旧 /notify off 不再写盘（写盘只发生在设置界面的 Ctrl+S）", async () => {
+  const seeded = { version: 1, coalesce: { windowMs: 0, cooldownMs: 0 } };
+  const off = runPi({ label: "off-removed", userConfig: seeded, args: ["--no-session", "--approve", ...EXTENSIONS, "-p", "/notify off"] });
   assertCleanExit("M off", off);
-  assert.match(off.stderr, /已保存用户级配置/);
+  assert.match(off.stderr, /单一入口/);
   assert.ok(!off.probe.some((r) => r.ev === "agent_start"));
   const file = path.join(AGENT_DIR, "pi-notification", "config.json");
-  const saved = fs.readFileSync(file, "utf8");
-  assert.equal(JSON.parse(saved).enabled, false);
-  const next = runPi({ label: "off-next-process", preserveConfig: true,
-    args: ["--no-session", "--approve", "--no-tools", "--model", "probe-fake/fake-model", ...EXTENSIONS, "-p", "hi"],
-  });
-  assertCleanExit("M next", next);
-  assert.ok(next.probe.some((r) => r.ev === "settled_enter"));
-  assert.equal(next.plugin.filter((r) => r.event === "delivery").length, 0);
-  assert.equal(fs.readFileSync(file, "utf8"), saved);
+  assert.equal(fs.readFileSync(file, "utf8"), JSON.stringify(seeded, null, 2), "M: 旧子命令改写了用户文件");
 });
-await step("N 非 TUI config 在 stderr 输出路径/值，stdout 保持干净", async () => {
-  const run = runPi({ label: "config-view", args: ["--no-session", "--approve", ...EXTENSIONS, "-p", "/notify config"] });
+
+await step("M2 稀疏用户默认跨进程生效：预置的单项默认决定下一个进程的行为", async () => {
+  const run = runPi({
+    label: "sparse-default",
+    // 这就是 Ctrl+S 写出来的形状：只有用户固化过的字段
+    userConfig: { rules: { runCompleted: { enabled: false } } },
+    args: ["--no-session", "--approve", "--no-tools", "--model", "probe-fake/fake-model", ...EXTENSIONS, "-p", "只回复 OK"],
+  });
+  assertCleanExit("M2", run);
+  assert.ok(run.probe.map((row) => row.ev).includes("settled_enter"), "M2: 这轮根本没跑起来");
+  assert.equal(run.plugin.filter((row) => row.event === "delivery").length, 0, "M2: 稀疏用户默认未生效");
+  const loaded = run.plugin.filter((row) => row.event === "config_loaded").at(-1);
+  assert.equal(loaded.enabled, true, "M2: 未保存的字段应继续跟随出厂默认");
+  assert.ok(loaded.sources.some((item) => item.endsWith("config.json")), `M2: 未记录配置来源 ${JSON.stringify(loaded.sources)}`);
+});
+
+await step("N 非 TUI 的 /notify 在 stderr 输出路径/值，stdout 保持干净", async () => {
+  const run = runPi({ label: "config-view", args: ["--no-session", "--approve", ...EXTENSIONS, "-p", "/notify"] });
   assertCleanExit("N", run);
   assert.ok(run.stderr.includes(path.join(AGENT_DIR, "pi-notification", "config.json")));
   assert.match(run.stderr, /当前生效值/);
@@ -333,7 +360,7 @@ for (const item of failures) {
 }
 
 if (failures.length === 0) {
-  console.log("\n通过：真实 CLI 下 G/H（判定与管道纪律）+ I（命令面）+ J/K（配置真实生效）+ L（--no-notify）+ M/N（写盘持久化/非 TUI 展示）全部成立。");
+  console.log("\n通过：真实 CLI 下 G/H（判定与管道纪律）+ I（单一入口命令面）+ J/K（配置真实生效）+ L（--no-notify）+ M/N（旧子命令不写盘、稀疏默认跨进程生效、非 TUI 展示）全部成立。");
   fs.rmSync(TMP, { recursive: true, force: true });
   process.exit(0);
 } else {

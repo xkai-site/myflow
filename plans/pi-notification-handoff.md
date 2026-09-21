@@ -79,6 +79,19 @@ macOS 原生横幅（`osascript`）、Telegram/Discord/Slack 专用渠道、通�
 
 ---
 
+### 安装到用户级（已完成）
+
+```bash
+pi install "D:\XuKai\Project\myflow\work\scripts\pi\pi-notification"   # 写入 packages，不复制文件
+```
+
+- 验证方式（**不触发任何通知**，因为纯命令不进入 agent 生命周期）：
+  `PI_NOTIFY_LOG_FILE=<win 路径> pi --no-session -p "/notify status"` → 应看到
+  `plugin_session_start`（`enabled: true` / `providers: ["terminal"]` / `degraded: false`）与 `notify_status`。
+- 注意 `MSYS_NO_PATHCONV=1` + Windows 风格的 `PI_NOTIFY_LOG_FILE`：`/tmp/...` 会被 node 解成 `C:\tmp\...`，
+  日志写入失败时 sink 是**静默禁用**的（看不到报错，容易误判成“插件没加载”）。
+- 卸载：`pi remove "<同一个路径>"`（只删 settings 里的登记）。
+
 ## 3. 环境陷阱（踩过一次就够）
 
 1. **Git Bash 必须 `MSYS_NO_PATHCONV=1`**：否则 `/probe-cmd` 这类参数被改写成 `C:/Program Files/Git/probe-cmd`，
@@ -100,6 +113,10 @@ macOS 原生横幅（`osascript`）、Telegram/Discord/Slack 专用渠道、通�
 9. **SDK/jiti 的 fs 导入快照**：M3 的 J8 曾在运行中替换 `fs.openSync` 注入 EACCES，但未影响宿主已加载的插件，
    导致测试桩无效。现改用真实文件占据 agentDir 目录路径制造 `ENOTDIR`，验证失败不改内存/原文件。
    Windows `chmod` 也不能可靠模拟 POSIX 不可写目录；`0o600` 在 Windows 上不等于已验证 ACL 隔离。
+10. **`/notify off` 会把整份用户级配置快照写盘**（含 `enabled: false`）——手工验收/调试后如果不恢复，
+    就会得到“插件装好了但永不通知”的假故障（真实踩过：M3-3 验收后残留 `enabled: false`，安装验证时才发现）。
+    排查顺序：`/notify status` 看开关 → 看 `config.json` 的 `enabled` → 必要时删配置文件回归默认。
+    注意快照会**钉住当时的默认值**（后续插件默认值变化不会生效）；只想改一个开关就直接编辑 JSON。
 
 ## 4. 实测硬约束（6 条，违反即回退）
 

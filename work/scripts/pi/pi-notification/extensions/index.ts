@@ -17,7 +17,6 @@
  */
 
 import {
-  CONFIG_DIR_NAME,
   getAgentDir,
   type ExtensionAPI,
   type ExtensionCommandContext,
@@ -30,6 +29,7 @@ import {
   CONFIG_VERSION,
   isDisabledByEnv,
   loadConfig,
+  readUserConfigRaw,
   type ConfigLoadResult,
 } from "../src/config.ts";
 import { createLifecycle } from "../src/lifecycle.ts";
@@ -46,6 +46,14 @@ import {
   evaluateWaitingForUser,
 } from "../src/rules.ts";
 import { createService } from "../src/service.ts";
+import {
+  SESSION_OVERLAY_ENTRY,
+  applyOverlay,
+  emptyOverlay,
+  isEmptyOverlay,
+  restoreOverlayFromEntries,
+  type SessionOverlay,
+} from "../src/settings.ts";
 import type { AssistantStopReason, Notifier, NotificationConfig, RunSummary, UIPromptKind } from "../src/types.ts";
 
 /** 实例标识：保证 reload 后新旧实例的 runId / 去重键不冲突。 */
@@ -99,14 +107,16 @@ function asPromptKind(value: unknown): UIPromptKind | undefined {
 export default function piNotification(pi: ExtensionAPI): void {
   const log = createLogger();
 
-  // 用户级配置在工厂里读（§5）：失败也要完成注册，保证 `/notify status` 一定可用。
-  let load: ConfigLoadResult = loadConfig({
-    agentDir: getAgentDir(),
-    configDirName: CONFIG_DIR_NAME,
-    projectTrusted: false,
-  });
+  // 用户级默认在工厂里读（§5）：失败也要完成注册，保证 `/notify` 一定可用。
+  let load: ConfigLoadResult = loadConfig({ agentDir: getAgentDir() });
   const config: NotificationConfig = load.config;
   if (isDisabledByEnv()) config.enabled = false;
+
+  /**
+   * 「本对话选择」（UX 方案 §值模型）：Enter 改的值写在这里，不落用户文件。
+   * 生效配置 = 出厂默认 → 用户默认（磁盘） → 本对话覆盖，在 `adoptConfig` 里一次性叠加。
+   */
+  let overlay: SessionOverlay = emptyOverlay();
 
   const registry = createRegistry({ log });
 
@@ -181,58 +191,97 @@ export default function piNotification(pi: ExtensionAPI): void {
 
   /** 配置被重新合并后同步到内存态（service 的渠道表惰性派生，见 service.ts）。 */
   function adoptConfig(next: ConfigLoadResult, reason: string): void {
-    load = next;
-    const merged = next.config;
-    if (isDisabledByEnv()) merged.enabled = false;
+    // 先把本对话覆盖叠上去：覆盖只包含用户改过的项，其余字段从磁盘层继承。
+    const applied = applyOverlay(next.config, overlay);
+    const merged: ConfigLoadResult = applied.problems.length > 0
+      ? { ...next, config: applied.config, warnings: [...next.warnings, ...applied.problems] }
+      : { ...next, config: applied.config };
+    if (applied.problems.length > 0) {
+      // 覆盖本身失效（例如用户手动把文件改成互斥值）：整体忽略覆盖，通知投递不受影响。
+      log.log("warning", "本对话覆盖已失效，已忽略（详见状态总览）");
+    }
+    load = merged;
+    const effective = merged.config;
+    if (isDisabledByEnv()) effective.enabled = false;
     // 原地替换字段：service / rules 持有的是同一个对象引用
-    config.enabled = merged.enabled;
-    config.minLevel = merged.minLevel;
-    config.rules = merged.rules;
-    config.coalesce = merged.coalesce;
-    config.quietHours = merged.quietHours;
-    config.content = merged.content;
-    config.delivery = merged.delivery;
-    config.shutdownFlushMs = merged.shutdownFlushMs;
-    config.providers = merged.providers;
+    config.enabled = effective.enabled;
+    config.minLevel = effective.minLevel;
+    config.rules = effective.rules;
+    config.coalesce = effective.coalesce;
+    config.quietHours = effective.quietHours;
+    config.content = effective.content;
+    config.delivery = effective.delivery;
+    config.shutdownFlushMs = effective.shutdownFlushMs;
+    config.providers = effective.providers;
     log.record({
       event: "config_loaded",
       reason,
       sources: next.sources,
       degraded: next.degraded,
       errors: next.errors,
-      warnings: next.warnings,
+      warnings: merged.warnings,
+      overlay: !isEmptyOverlay(overlay),
       enabled: config.enabled,
       minLevel: config.minLevel,
     });
     for (const problem of next.errors) {
       log.log("error", `配置错误 ${problem.path}: ${problem.message}`);
     }
-    for (const problem of next.warnings) {
+    for (const problem of merged.warnings) {
       log.log("warning", `配置提示 ${problem.path}: ${problem.message}`);
     }
   }
 
-  /** session_start 与 /notify reload 共用读盘/信任判定；不重建生命周期。 */
-  function reloadConfig(ctx: ExtensionContext, reason: string): void {
-    let projectTrusted = false;
-    let cwd: string | undefined;
+  /** session_start 与 Ctrl+R 共用读盘；不重建生命周期。 */
+  function reloadConfig(_ctx: ExtensionContext, reason: string): void {
+    adoptConfig(loadConfig({ agentDir: getAgentDir() }), reason);
+  }
+
+  /**
+   * 从会话条目恢复本对话覆盖（Enter 的成果）。
+   * 过滤规则（含 `/fork` 复制条目的情况）在 `restoreOverlayFromEntries` 里，并有单测覆盖。
+   */
+  function restoreOverlay(ctx: ExtensionContext, sessionId: string): void {
     try {
-      projectTrusted = ctx.isProjectTrusted();
-      cwd = ctx.cwd;
-    } catch {
-      projectTrusted = false;
+      overlay = restoreOverlayFromEntries(ctx.sessionManager.getEntries(), sessionId);
+    } catch (error) {
+      overlay = emptyOverlay();
+      log.log("warning", "恢复本对话覆盖失败（已忽略）", {
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
-    adoptConfig(
-      loadConfig({ agentDir: getAgentDir(), cwd, configDirName: CONFIG_DIR_NAME, projectTrusted }),
-      `${reason}${projectTrusted ? ":trusted" : ""}`,
-    );
+  }
+
+  /** 写一条新覆盖快照到会话（每次覆盖都是完整快照，恢复时取最后一条）。 */
+  function persistOverlay(): void {
+    if (isEmptyOverlay(overlay)) return;
+    try {
+      pi.appendEntry(SESSION_OVERLAY_ENTRY, {
+        sessionId: currentSessionId,
+        patch: overlay.patch,
+        providers: overlay.providers,
+        at: Date.now(),
+      });
+    } catch (error) {
+      // 没有会话文件等情况下 appendEntry 可能不可用：内存覆盖仍然生效。
+      log.log("warning", "本对话覆盖未能写入会话（仅本次进程内有效）", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /** 界面 Enter：写入本对话覆盖 → 落会话条目 → 重新叠加生效配置（不改用户文件）。 */
+  function setOverlay(next: SessionOverlay): void {
+    overlay = next;
+    persistOverlay();
+    adoptConfig(loadConfig({ agentDir: getAgentDir() }), "session_overlay");
   }
 
   if (load.errors.length > 0 || load.warnings.length > 0) {
     log.record({ event: "config_loaded_initial", degraded: load.degraded, errors: load.errors, warnings: load.warnings });
   }
   if (load.degraded) {
-    log.log("error", `配置非法，已降级为「仅失败通知 / 仅终端 / error 门槛」。原因见 /notify status。`);
+    log.log("error", `配置非法，已降级为「仅失败通知 / 仅终端 / error 门槛」。原因见状态总览（Ctrl+O）。`);
   }
 
   pi.registerFlag("no-notify", {
@@ -242,7 +291,7 @@ export default function piNotification(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("notify", {
-    description: "消息通知：status / test / on / off / config / reload",
+    description: "通知设置（单一入口：分类浏览、Ctrl+S 保存为默认）",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       try {
         await handleNotifyCommand(args, ctx, {
@@ -251,11 +300,16 @@ export default function piNotification(pi: ExtensionAPI): void {
           configLoad: () => load,
           service: () => service,
           agentDir: () => getAgentDir(),
-          userConfig: () => loadConfig({ agentDir: getAgentDir(), configDirName: CONFIG_DIR_NAME, projectTrusted: false }),
           reload: (commandCtx) => reloadConfig(commandCtx, "notify_reload"),
           isSilenced: () => pi.getFlag("no-notify") === true,
           sessionId: () => currentSessionId,
           isWaitingForUser: () => lifecycle.isWaitingForUser(),
+          overlay: () => overlay,
+          setOverlay,
+          userRaw: () => {
+            const raw = readUserConfigRaw(getAgentDir());
+            return raw.ok ? raw.raw : undefined;
+          },
         });
       } catch (error) {
         // 命令里的异常不能冒泡（§13 第 11 项）
@@ -263,7 +317,7 @@ export default function piNotification(pi: ExtensionAPI): void {
           error: error instanceof Error ? error.message : String(error),
         });
         try {
-          ctx.ui.notify("pi-notification: 命令执行失败，详见 /notify status 或诊断日志", "error");
+          ctx.ui.notify("pi-notification: 命令执行失败，详见状态总览（Ctrl+O）或诊断日志", "error");
         } catch {
           // ui 不可用则忽略
         }
@@ -288,7 +342,7 @@ export default function piNotification(pi: ExtensionAPI): void {
         projectName = undefined;
       }
 
-      // 项目级配置只在项目被信任时读（§10.1 / §13 第 7 项）。
+      restoreOverlay(ctx, sessionId);
       reloadConfig(ctx, `session_start:${event.reason}`);
 
       log.record({

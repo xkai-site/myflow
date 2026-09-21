@@ -347,7 +347,7 @@ for (const value of ["25:00", "8:00"]) {
       const file = configModule.userConfigPath(dir);
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, JSON.stringify({ quietHours: { enabled: true, start: value } }));
-      const result = configModule.loadConfig({ agentDir: dir, configDirName: ".pi", projectTrusted: false });
+      const result = configModule.loadConfig({ agentDir: dir });
       assert.equal(result.degraded, true);
       assert.equal(result.config.quietHours.enabled, false);
       assert.ok(result.errors.some((p) => p.path === "quietHours.start"));
