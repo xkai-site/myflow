@@ -3,6 +3,8 @@
 > 状态：研究 + 设计，**未编写任何实现代码**。
 > 目标宿主：`@earendil-works/pi-coding-agent` **0.86.1**（下方简写 `O/` = `D:/Nodejs/node_modules/@earendil-works/pi-coding-agent`）。
 > 仓库：`D:/XuKai/Project/myflow`，HEAD `a0059283327b5d8f56fa117077f4a55fac9e1265`。
+> **命名修订（v1.2 之后）**：插件目录与配置目录统一为 **`pi-notification`**（原文档写作 `pi-message-notification`），已全文替换。
+> **实施进展见 `plans/pi-notification-handoff.md`**（已完成 S1/S1.5/S3/S5-min；含 4 条实施期实测发现）。
 > 标记约定：**【官方】**= 当前 0.86.1 文档/源码可验证；**【设计】**= 本方案自定；**【待验证】**= 编码前必须实测。
 
 ---
@@ -319,7 +321,7 @@ on: (channel, handler) => { const safeHandler = async (data) => { try { await ha
 ## 7. 推荐目录结构
 
 ```
-work/scripts/pi/pi-message-notification/
+work/scripts/pi/pi-notification/
 ├── package.json                 # type:module, keywords:[pi-package], pi.extensions:["./extensions/index.ts"]
 ├── README.md                    # 安装/启用/配置/权限/模式/隐私与失败边界
 ├── extensions/
@@ -405,9 +407,9 @@ SignalEvent（工具失败等）───────────────┘
 
 ```
 用户级（默认，始终可读）:
-  <getAgentDir()>/pi-message-notification/config.json     # 例: ~/.pi/agent/pi-message-notification/config.json
+  <getAgentDir()>/pi-notification/config.json     # 例: ~/.pi/agent/pi-notification/config.json
 项目级（仅 ctx.isProjectTrusted() 为真时读取）:
-  <cwd>/<CONFIG_DIR_NAME>/pi-message-notification/config.json
+  <cwd>/<CONFIG_DIR_NAME>/pi-notification/config.json
 优先级: 项目级覆盖用户级（逐字段），但**不**允许项目级定义或覆盖任何 secret（防恶意仓库外传）
 ```
 
@@ -799,7 +801,7 @@ agent_settled + ctx.isIdle()     → 发"轮到你输入"（默认策略）
 | 模块（4 个） | `extensions/index.ts`、`src/lifecycle.ts`、`src/rules.ts`、`src/providers/terminal.ts`（+ `types.ts`） |
 | Hook（4 个） | `session_start`、`message_end`（只读取 stopReason）、`agent_settled`（唯一出口）、`session_shutdown`（清 timer/abort） |
 | 命令（1 个） | `/notify status`（显示开关、等级、上次通知时间、错误） |
-| 配置 | 只需 `~/.pi/agent/pi-message-notification/config.json` 的 `{ enabled, minLevel }`（缺失即用默认：启用、info） |
+| 配置 | 只需 `~/.pi/agent/pi-notification/config.json` 的 `{ enabled, minLevel }`（缺失即用默认：启用、info） |
 | 通知规则 | `completed` → info；`failed` → error；`aborted` → 静默 |
 | 去重 | 单条 `dedupeKey = sessionId + runId`，进程内存 Set |
 | 渠道 | 仅终端：OSC 777 / OSC 99 / Windows toast（保留控制字符清洗） |

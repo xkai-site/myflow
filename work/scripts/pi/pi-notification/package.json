@@ -1,0 +1,28 @@
+{
+  "name": "pi-notification",
+  "version": "0.1.0",
+  "description": "Pi extension: native desktop notification when an agent run really settles",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "test": "node test/terminal-channel.mjs && node test/host-lifecycle.mjs && node test/cli-smoke.mjs",
+    "test:terminal": "node test/terminal-channel.mjs",
+    "test:host": "node test/host-lifecycle.mjs",
+    "test:cli": "node test/cli-smoke.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "notification"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  }
+}
