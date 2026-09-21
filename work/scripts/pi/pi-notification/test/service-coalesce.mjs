@@ -11,6 +11,8 @@
 
 import assert from "node:assert/strict";
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const PLUGIN_DIR = fileURLToPath(new URL("..", import.meta.url));
@@ -61,6 +63,7 @@ function makeHarness({ mutateConfig, send } = {}) {
     records,
     sends,
     log,
+    setTime(value) { nowMs = value; },
     /** 推进假时钟 */
     advance(ms) {
       nowMs += ms;
@@ -266,12 +269,106 @@ await step("dispose 幂等：之后 submit 一律丢弃，且不抛异常", asyn
   assert.ok(h.events().includes("service_disposed"));
 });
 
+// M3：本地日历构造，不依赖测试机时区；判断必须使用注入时钟。
+function quietHarness(quiet = {}) {
+  return makeHarness({ mutateConfig: (c) => {
+    c.coalesce.windowMs = 0;
+    c.coalesce.cooldownMs = 0;
+    c.quietHours = { ...c.quietHours, enabled: true, ...quiet };
+  } });
+}
+for (const [hour, minute, blocked] of [[23, 0, true], [23, 30, true], [7, 59, true], [8, 0, false], [12, 0, false]]) {
+  await step(`Q 静默跨午夜 ${hour}:${String(minute).padStart(2, "0")} → ${blocked ? "静默" : "放行"}`, async () => {
+    const h = quietHarness();
+    h.setTime(new Date(2025, 0, 15, hour, minute).getTime());
+    assert.equal(h.service.isQuietHours(), blocked);
+    h.service.submit(request());
+    await h.settle();
+    assert.equal(h.sends.length, blocked ? 0 : 1);
+    assert.equal(h.events().includes("quiet_hours_drop"), blocked);
+  });
+}
+await step("Q 等级例外：静默时 error 仍投递，warning 静默", async () => {
+  const h = quietHarness();
+  h.setTime(new Date(2025, 0, 15, 23, 30).getTime());
+  h.service.submit(request({ level: "warning", dedupeKey: "quiet:warning" }));
+  h.service.submit(request({ level: "error", dedupeKey: "quiet:error" }));
+  await h.settle();
+  assert.equal(h.sends.length, 1);
+  assert.equal(h.sends[0].dedupeKey, "quiet:error");
+});
+await step("Q enabled=false 全时段放行；默认与降级均不启用静默", async () => {
+  assert.deepEqual(configModule.defaultConfig().quietHours, { enabled: false, start: "23:00", end: "08:00", exceptLevels: ["error"] });
+  assert.equal(configModule.degradedConfig().quietHours.enabled, false);
+  const h = quietHarness({ enabled: false });
+  for (const hour of [0, 7, 8, 12, 23]) {
+    h.setTime(new Date(2025, 0, 15, hour, 30).getTime());
+    h.service.submit(request({ dedupeKey: `disabled:${hour}` }));
+  }
+  await h.settle();
+  assert.equal(h.sends.length, 5);
+});
+await step("Q 同日左闭右开 / start=end 全天", async () => {
+  const h = quietHarness({ start: "09:00", end: "17:00" });
+  for (const [hour, minute, expected] of [[8, 59, false], [9, 0, true], [16, 59, true], [17, 0, false]]) {
+    h.setTime(new Date(2025, 0, 15, hour, minute).getTime());
+    assert.equal(h.service.isQuietHours(), expected);
+  }
+  h.config.quietHours.end = "09:00";
+  for (const hour of [0, 9, 23]) {
+    h.setTime(new Date(2025, 0, 15, hour, 0).getTime());
+    h.service.submit(request({ dedupeKey: `all:${hour}` }));
+  }
+  await h.settle();
+  assert.equal(h.sends.length, 0);
+});
+await step("Q 自检绕过静默，不绕过门槛；静默不推进合并/冷却", async () => {
+  const h = quietHarness();
+  h.config.coalesce.windowMs = 600000;
+  h.config.coalesce.cooldownMs = 600000;
+  h.setTime(new Date(2025, 0, 15, 7, 59).getTime());
+  h.service.submit(request());
+  h.service.submit(request({ dedupeKey: "manual:quiet" }), { bypassFilters: true });
+  await h.settle();
+  assert.equal(h.sends.length, 1);
+  h.advance(60000);
+  h.service.submit(request({ dedupeKey: "after:quiet" }));
+  await h.settle();
+  assert.equal(h.sends.length, 2);
+  h.config.minLevel = "error";
+  h.service.submit(request({ dedupeKey: "manual:threshold" }), { bypassFilters: true });
+  await h.settle();
+  assert.equal(h.sends.length, 2);
+});
+for (const value of ["25:00", "8:00"]) {
+  await step(`Q 非法时间 ${value} → 读盘降级并保留原因`, () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-notify-quiet-"));
+    try {
+      const file = configModule.userConfigPath(dir);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify({ quietHours: { enabled: true, start: value } }));
+      const result = configModule.loadConfig({ agentDir: dir, configDirName: ".pi", projectTrusted: false });
+      assert.equal(result.degraded, true);
+      assert.equal(result.config.quietHours.enabled, false);
+      assert.ok(result.errors.some((p) => p.path === "quietHours.start"));
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+}
+await step("Q exceptLevels 严格数组/去重，enabled/end 同样严格校验", () => {
+  const base = configModule.defaultConfig();
+  const merged = configModule.mergeConfig(base, { quietHours: { exceptLevels: ["error", "error", "info"] } }, "test");
+  assert.deepEqual(merged.config.quietHours.exceptLevels, ["error", "info"]);
+  for (const quietHours of [{ exceptLevels: "error" }, { exceptLevels: ["loud"] }, { exceptLevels: [null] }, { enabled: 1 }, { end: "24:00" }, { end: "08:60" }, null]) {
+    assert.ok(configModule.mergeConfig(base, { quietHours }, "test").errors.length > 0);
+  }
+});
+
 for (const item of failures) {
   console.error(`\n[FAIL] ${item.name}\n${item.error?.stack ?? item.error}`);
 }
 
 if (failures.length === 0) {
-  console.log("\n通过：门槛/去重/冷却/合并窗口/队列/超时 全部断言成立。");
+  console.log("\n通过：门槛/去重/静默时段/冷却/合并窗口/队列/超时 全部断言成立。");
   process.exit(0);
 } else {
   console.error(`\n失败：${failures.length} 项断言未通过。`);

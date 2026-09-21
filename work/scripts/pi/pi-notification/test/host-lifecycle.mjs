@@ -1,5 +1,5 @@
 /**
- * S1.5 / S3 / S5-min 回归脚本。
+ * S1.5 / S3 / S5 / M3 回归脚本。
  *
  * 用真实宿主（`@earendil-works/pi-coding-agent` SDK）在**本进程内**驱动真实会话，断言四组不变量：
  *
@@ -8,7 +8,7 @@
  *   渠道纪律（H）：非 TTY 时一个字节都不写，且必须留下可审计的跳过记录
  *   配置读盘（I1–I11）：文件真的被读、门槛/规则/渠道真的生效、**非法配置降级而不是静默全关**、
  *                      项目级配置只在信任时读且不得定义渠道
- *   命令面（J1–J4）：`/notify status|test` 走 Pi 真实命令分发，且不产生 agent 生命周期
+ *   命令面（J1–J14）：真实命令分发、配置写盘/热读、静默状态、TUI 向导与模式守卫
  *
  * 隔离设计（每个 host 独立）：
  *   - 自己的 `PI_CODING_AGENT_DIR`（用户级配置互不串味）
@@ -228,7 +228,7 @@ function stubUiContext(notices) {
   };
 }
 
-async function makeHost({ label, extensions, projectTrusted = true, userConfig }) {
+async function makeHost({ label, extensions, projectTrusted = true, userConfig, mode = "print", ui = {} }) {
   const root = path.join(TMP, label);
   const agentDir = path.join(root, "agent");
   const probeFile = path.join(root, "probe.jsonl");
@@ -292,8 +292,8 @@ async function makeHost({ label, extensions, projectTrusted = true, userConfig }
   const runtimeErrors = [];
   const notices = [];
   await session.bindExtensions({
-    mode: "print",
-    uiContext: stubUiContext(notices),
+    mode,
+    uiContext: { ...stubUiContext(notices), ...ui },
     onError: (error) => runtimeErrors.push(error),
   });
 
@@ -435,7 +435,7 @@ function assertNoPluginErrors(host) {
 // Phase 0：清洗与脱敏（纯函数）
 // ---------------------------------------------------------------------------
 
-console.log("S1.5 / S3 / S5-min 回归：pi-notification");
+console.log("S1.5 / S3 / S5 / M3 回归：pi-notification");
 
 const { sanitize, redact } = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "log.ts")).href);
 
@@ -841,6 +841,162 @@ await step("J4 /notify status 不产生副作用，且错误/告警会露出", a
 
 await commander.dispose();
 
+// M3 配置写盘/热读：同一宿主，不借助扩展 reload 掩盖内存态问题。
+const writer = await makeHost({ label: "writer", extensions: [PROBE_ENTRY, PLUGIN_ENTRY], userConfig: NO_COALESCE });
+await writer.useModel("probe-fake", "fake-model");
+
+await step("J5 /notify off/on 原子写盘，下一次运行立即生效", async () => {
+  assert.equal((await writer.prompt()).deliveries.length, 1);
+  const off = await writer.command("/notify off");
+  assert.match(off.notice.message, /已保存/);
+  assert.equal(JSON.parse(fs.readFileSync(writer.userConfigPath, "utf8")).enabled, false);
+  assert.equal((await writer.prompt()).deliveries.length, 0);
+  assert.equal(off.plugin.filter((r) => r.event === "plugin_shutdown").length, 0);
+  await writer.command("/notify on");
+  assert.equal(JSON.parse(fs.readFileSync(writer.userConfigPath, "utf8")).enabled, true);
+  assert.equal((await writer.prompt()).deliveries.length, 1);
+});
+await step("J6 非法写入被拒：磁盘、输入对象与运行内存态不变", async () => {
+  const before = fs.readFileSync(writer.userConfigPath, "utf8");
+  const invalid = { enabled: false, quietHours: { start: "25:00" } };
+  const copy = structuredClone(invalid);
+  const result = configModule.writeUserConfig(writer.agentDir, invalid);
+  assert.equal(result.ok, false);
+  assert.ok(result.problems.some((p) => p.path === "quietHours.start"));
+  assert.deepEqual(invalid, copy);
+  assert.equal(fs.readFileSync(writer.userConfigPath, "utf8"), before);
+  assert.equal((await writer.prompt()).deliveries.length, 1);
+});
+await step("J7 临时文件无残留 / 0o600；rename 失败保留原目标", () => {
+  assert.deepEqual(fs.readdirSync(path.dirname(writer.userConfigPath)), ["config.json"]);
+  // Windows 不支持 POSIX 权限位，退化为实际创建/替换不报错；不声称验证了 ACL。
+  if (process.platform !== "win32") assert.equal(fs.statSync(writer.userConfigPath).mode & 0o777, 0o600);
+  const dir = path.join(TMP, "rename-failure");
+  const target = configModule.userConfigPath(dir);
+  fs.mkdirSync(target, { recursive: true });
+  fs.writeFileSync(path.join(target, "sentinel"), "unchanged");
+  const result = configModule.writeUserConfig(dir, { enabled: false });
+  assert.equal(result.ok, false);
+  assert.equal(fs.readFileSync(path.join(target, "sentinel"), "utf8"), "unchanged");
+  assert.deepEqual(fs.readdirSync(path.dirname(target)), ["config.json"]);
+});
+await step("J8 agentDir 不可写：命令报错不抛异常，内存与原文件不变", async () => {
+  const before = fs.readFileSync(writer.userConfigPath, "utf8");
+  // Windows chmod 无法可靠模拟不可写；用真实文件占据目录路径制造 ENOTDIR。
+  const blocked = path.join(writer.root, "blocked-agent-dir");
+  fs.writeFileSync(blocked, "unchanged");
+  process.env.PI_CODING_AGENT_DIR = blocked;
+  try {
+    assert.equal(configModule.writeUserConfig(blocked, { enabled: false }).ok, false);
+    const delta = await writer.command("/notify off");
+    assert.equal(delta.notice.type, "error");
+    // OS 可能在读盘阶段就报 ENOTDIR，或在 mkdir 阶段才报；都必须拒绝更新内存。
+    assert.match(delta.notice.message, /保存失败|拒绝覆盖/);
+    assert.deepEqual(writer.runtimeErrors, []);
+    assert.equal(fs.readFileSync(blocked, "utf8"), "unchanged");
+  } finally { process.env.PI_CODING_AGENT_DIR = writer.agentDir; }
+  assert.equal(fs.readFileSync(writer.userConfigPath, "utf8"), before);
+  assert.equal((await writer.prompt()).deliveries.length, 1);
+  assert.deepEqual(fs.readdirSync(path.dirname(writer.userConfigPath)), ["config.json"]);
+});
+await step("J9 /notify reload 重新读盘（不重载扩展），相同渠道 id 缓存刷新", async () => {
+  writer.writeUserConfig({ ...NO_COALESCE, enabled: false });
+  const delta = await writer.command("/notify reload");
+  assert.equal(delta.plugin.filter((r) => r.event === "config_loaded").length, 1);
+  assert.equal(delta.plugin.filter((r) => ["plugin_shutdown", "plugin_session_start"].includes(r.event)).length, 0);
+  assert.equal((await writer.prompt()).deliveries.length, 0);
+  writer.writeUserConfig({ ...NO_COALESCE, providers: [{ id: "terminal", type: "debug", enabled: true }] });
+  await writer.command("/notify reload");
+  const run = await writer.prompt();
+  assert.equal(run.deliveries.length, 1);
+  assert.equal(run.notifies, 0, "同 id 的旧渠道缓存未刷新");
+  writer.writeUserConfig(NO_COALESCE);
+  await writer.command("/notify reload");
+  assert.equal((await writer.prompt()).notifies, 1);
+});
+await step("J10 静默状态可见；test 绕过全天静默并提示，reload 坏配置降级", async () => {
+  writer.writeUserConfig({ ...NO_COALESCE, quietHours: { enabled: true, start: "00:00", end: "00:00" } });
+  await writer.command("/notify reload");
+  assert.match((await writer.command("/notify status")).notice.message, /静默时段: 00:00–00:00（当前生效/);
+  assert.equal((await writer.prompt()).deliveries.length, 0);
+  const test = await writer.command("/notify test");
+  assert.equal(test.notifies, 1);
+  assert.match(test.notice.message, /当前处于静默时段/);
+  writer.writeUserConfig({ quietHours: { end: "8:00" } });
+  assert.match((await writer.command("/notify reload")).notice.message, /已降级/);
+  const bad = fs.readFileSync(writer.userConfigPath, "utf8");
+  assert.equal((await writer.command("/notify on")).notice.type, "error");
+  assert.equal(fs.readFileSync(writer.userConfigPath, "utf8"), bad, "不得把安全降级配置覆盖原文件");
+});
+await writer.dispose();
+
+await step("J11 非 TUI config 只展示路径/值，RPC hasUI 不得弹向导且隐藏凭据", async () => {
+  for (const mode of ["print", "json", "rpc"]) {
+    const host = await makeHost({ label: `config-${mode}`, extensions: [PROBE_ENTRY, PLUGIN_ENTRY], mode,
+      userConfig: { providers: [{ id: "debug", type: "debug", options: { headers: { "X-Private": "private-value-123" } } }] },
+      ui: { select: () => { throw new Error("非 TUI 不得 select"); }, confirm: () => { throw new Error("非 TUI 不得 confirm"); } },
+    });
+    const before = fs.readFileSync(host.userConfigPath, "utf8");
+    const result = await host.command("/notify config");
+    assert.ok(result.notice.message.includes(host.userConfigPath));
+    assert.match(result.notice.message, /当前生效值/);
+    assert.doesNotMatch(result.notice.message, /private-value-123/);
+    assert.equal(fs.readFileSync(host.userConfigPath, "utf8"), before);
+    assert.deepEqual(host.runtimeErrors, []);
+    await host.dispose();
+  }
+});
+await step("J12 TUI 规则向导保存后立即生效，保留其它规则字段", async () => {
+  const selections = ["runCompleted", "warning"];
+  const confirms = [true, true];
+  const host = await makeHost({ label: "wizard-save", extensions: [PROBE_ENTRY, PLUGIN_ENTRY], mode: "tui", userConfig: NO_COALESCE,
+    ui: { select: async () => selections.shift(), confirm: async () => confirms.shift() },
+  });
+  await host.useModel("probe-fake", "fake-model");
+  const result = await host.command("/notify config");
+  assert.match(result.notice.message, /已保存/);
+  const saved = JSON.parse(fs.readFileSync(host.userConfigPath, "utf8"));
+  assert.equal(saved.rules.runCompleted.level, "warning");
+  assert.deepEqual(saved.rules.runCompleted.channels, ["terminal"]);
+  assert.equal(saved.rules.toolFailed.mode, "aggregate");
+  assert.equal((await host.prompt()).deliveries[0].level, "warning");
+  assert.deepEqual(host.runtimeErrors, []);
+  await host.dispose();
+});
+await step("J13 TUI 向导取消不改磁盘与内存（选择、等级、最终确认）", async () => {
+  for (const [index, picks, confirmations] of [[0, [], []], [1, ["runCompleted"], [false]], [2, ["runCompleted", "error"], [false, false]]]) {
+    const host = await makeHost({ label: `wizard-cancel-${index}`, extensions: [PROBE_ENTRY, PLUGIN_ENTRY], mode: "tui", userConfig: NO_COALESCE,
+      ui: { select: async () => picks.shift(), confirm: async () => confirmations.shift() },
+    });
+    await host.useModel("probe-fake", "fake-model");
+    const before = fs.readFileSync(host.userConfigPath, "utf8");
+    assert.match((await host.command("/notify config")).notice.message, /已取消/);
+    assert.equal(fs.readFileSync(host.userConfigPath, "utf8"), before);
+    assert.equal((await host.prompt()).deliveries[0].level, "info");
+    await host.dispose();
+  }
+});
+await step("J14 保存不固化项目/环境覆盖；reload 保持信任边界", async () => {
+  const host = await makeHost({ label: "write-layers", extensions: [PROBE_ENTRY, PLUGIN_ENTRY], userConfig: NO_COALESCE });
+  await host.useModel("probe-fake", "fake-model");
+  host.writeProjectConfig({ minLevel: "error", enabled: true });
+  const projectBefore = fs.readFileSync(host.projectConfigPath, "utf8");
+  process.env.PI_NOTIFY_DISABLE = "1";
+  try {
+    await host.command("/notify on");
+    const saved = JSON.parse(fs.readFileSync(host.userConfigPath, "utf8"));
+    assert.equal(saved.enabled, true, "环境静默不应写盘");
+    assert.equal(saved.minLevel, "info", "项目门槛不应写入用户层");
+    assert.equal((await host.prompt()).deliveries.length, 0);
+  } finally { delete process.env.PI_NOTIFY_DISABLE; }
+  await host.command("/notify off");
+  assert.equal(JSON.parse(fs.readFileSync(host.userConfigPath, "utf8")).enabled, false);
+  assert.match((await host.command("/notify status")).notice.message, /pi-notification: 开启/); // 项目仍优先
+  assert.equal(fs.readFileSync(host.projectConfigPath, "utf8"), projectBefore);
+  assert.equal((await host.prompt()).deliveries.length, 0); // 项目门槛
+  await host.dispose();
+});
+
 // ---------------------------------------------------------------------------
 // Host 8：S4 合并窗口 / 冷却 —— 默认值在真实宿主下真的生效
 // ---------------------------------------------------------------------------
@@ -1152,7 +1308,7 @@ globalThis.fetch = realFetch;
 
 if (failures === 0) {
   console.log(
-    "\n通过：判定/去重/阻塞/reload（A–F,H）+ 配置读盘（I1–I11）+ 命令面（J1–J4）"
+    "\n通过：判定/去重/阻塞/reload（A–F,H）+ 配置读盘（I1–I11）+ 命令与写盘（J1–J14）"
     + " + 合并/冷却（L0–L2）+ 工具失败/压缩失败/等待输入（K1–K6）+ Webhook（M1–M3）全部成立。",
   );
   fs.rmSync(TMP, { recursive: true, force: true });

@@ -75,10 +75,12 @@ function readJsonl(file) {
 }
 
 /** 一次真实 CLI 运行。返回 stdout/stderr/exit code 与两份 JSONL。 */
-function runPi({ label, args, userConfig }) {
+function runPi({ label, args, userConfig, preserveConfig = false }) {
   const configDir = path.join(AGENT_DIR, "pi-notification");
   const configFile = path.join(configDir, "config.json");
-  if (userConfig === undefined) {
+  if (preserveConfig) {
+    // M3 跨进程持久化验收：保留上一进程实际写下的文件，不重新造配置。
+  } else if (userConfig === undefined) {
     fs.rmSync(configDir, { recursive: true, force: true });
   } else {
     fs.mkdirSync(configDir, { recursive: true });
@@ -297,6 +299,33 @@ await step("L --no-notify：本会话静默，一条都不发（且不改写配�
   assert.equal(startup.silenced, true, "L: 插件未记录静默标志");
 });
 
+await step("M /notify off → 新 CLI 进程零投递（持久化，不重写测试配置）", async () => {
+  const off = runPi({ label: "off-write", args: ["--no-session", "--approve", ...EXTENSIONS, "-p", "/notify off"] });
+  assertCleanExit("M off", off);
+  assert.match(off.stderr, /已保存用户级配置/);
+  assert.ok(!off.probe.some((r) => r.ev === "agent_start"));
+  const file = path.join(AGENT_DIR, "pi-notification", "config.json");
+  const saved = fs.readFileSync(file, "utf8");
+  assert.equal(JSON.parse(saved).enabled, false);
+  const next = runPi({ label: "off-next-process", preserveConfig: true,
+    args: ["--no-session", "--approve", "--no-tools", "--model", "probe-fake/fake-model", ...EXTENSIONS, "-p", "hi"],
+  });
+  assertCleanExit("M next", next);
+  assert.ok(next.probe.some((r) => r.ev === "settled_enter"));
+  assert.equal(next.plugin.filter((r) => r.event === "delivery").length, 0);
+  assert.equal(fs.readFileSync(file, "utf8"), saved);
+});
+await step("N 非 TUI config 在 stderr 输出路径/值，stdout 保持干净", async () => {
+  const run = runPi({ label: "config-view", args: ["--no-session", "--approve", ...EXTENSIONS, "-p", "/notify config"] });
+  assertCleanExit("N", run);
+  assert.ok(run.stderr.includes(path.join(AGENT_DIR, "pi-notification", "config.json")));
+  assert.match(run.stderr, /当前生效值/);
+  assert.match(run.stderr, /quietHours/);
+  assert.doesNotMatch(run.stdout, /用户级配置|quietHours|\u001b/);
+  assert.ok(!run.probe.some((r) => r.ev === "agent_start"));
+  assert.ok(!fs.existsSync(path.join(AGENT_DIR, "pi-notification", "config.json")));
+});
+
 // ---------------------------------------------------------------------------
 
 for (const item of failures) {
@@ -304,7 +333,7 @@ for (const item of failures) {
 }
 
 if (failures.length === 0) {
-  console.log("\n通过：真实 CLI 下 G/H（判定与管道纪律）+ I（命令面）+ J/K（配置真实生效）+ L（--no-notify）全部成立。");
+  console.log("\n通过：真实 CLI 下 G/H（判定与管道纪律）+ I（命令面）+ J/K（配置真实生效）+ L（--no-notify）+ M/N（写盘持久化/非 TUI 展示）全部成立。");
   fs.rmSync(TMP, { recursive: true, force: true });
   process.exit(0);
 } else {

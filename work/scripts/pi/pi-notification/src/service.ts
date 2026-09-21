@@ -1,7 +1,7 @@
 /**
  * 投递服务（设计 §8 / §12.1 第 5、6 步 / §17.2）。
  *
- * 职责：门槛过滤 → 去重 → **合并窗口 + 冷却（S4）** → 有界队列 → 并发投递 → 超时 → 幂等 dispose。
+ * 职责：门槛过滤 → 去重 → 静默时段 → **合并窗口 + 冷却（S4）** → 有界队列 → 并发投递 → 超时 → 幂等 dispose。
  * 只关心「通知要发出去」，**不关心事件从哪来**，也不认识任何具体渠道（只认 `providerId`）。
  *
  * 硬约束（§18.4）：
@@ -93,11 +93,27 @@ export function createService(options: ServiceOptions): NotificationService {
     }
   }
 
+  /** 本地时间的 [start,end)，跨午夜；相同端点表示全天。 */
+  function isQuietHours(): boolean {
+    const quiet = config.quietHours;
+    if (!quiet.enabled) return false;
+    const date = new Date(now());
+    const minute = date.getHours() * 60 + date.getMinutes();
+    const minutes = (value: string): number => Number(value.slice(0, 2)) * 60 + Number(value.slice(3));
+    const start = minutes(quiet.start);
+    const end = minutes(quiet.end);
+    return start === end || (start < end ? minute >= start && minute < end : minute >= start || minute < end);
+  }
+
   /**
-   * 合并窗口 + 冷却。返回 true 表示被拦下（调用方直接 return）。
+   * 静默时段 → 合并窗口 → 冷却。返回 true 表示被拦下（调用方直接 return）。
    * 两个窗口都只在**已放行**时推进：被拦下的通知不应延长别人的等待。
    */
   function filtered(req: NotificationRequest): boolean {
+    if (isQuietHours() && !config.quietHours.exceptLevels.includes(req.level)) {
+      log.record({ event: "quiet_hours_drop", kind: req.kind, dedupeKey: req.dedupeKey });
+      return true; // 不推进合并/冷却窗口
+    }
     const nowMs = now();
     // 通知自带的窗口优先（工具失败 immediate 模式用 `toolFailureWindowMs` 聚合并行失败），
     // 但**已在窗口内的 key 一律合并**：窗口一旦被（任一条通知）打开，同一运行的后续通知
@@ -133,9 +149,10 @@ export function createService(options: ServiceOptions): NotificationService {
   }
 
   function notifierFor(providerId: string): Notifier {
+    // 先检测配置刷新，再查缓存；/notify reload 可保留相同 id 但更改类型/开关。
+    const provider = providersById().get(providerId);
     const cached = notifiers.get(providerId);
     if (cached) return cached;
-    const provider = providersById().get(providerId);
     let notifier: Notifier;
     if (!provider) {
       log.log("warning", `通知引用了未在配置中定义的渠道，已跳过: id=${providerId}`);
@@ -291,7 +308,7 @@ export function createService(options: ServiceOptions): NotificationService {
           const oldest = seen.keys().next();
           if (!oldest.done) seen.delete(oldest.value);
         }
-        // `/notify test` 这类自检绕过合并/冷却，否则「测试通知没来」会被误读成渠道坏了。
+        // `/notify test` 这类自检绕过静默时段/合并/冷却，否则「测试通知没来」会被误读成渠道坏了。
         if (options?.bypassFilters !== true && filtered(req)) return;
         enqueue(req);
         log.record({
@@ -326,6 +343,7 @@ export function createService(options: ServiceOptions): NotificationService {
     },
 
     discardPending,
+    isQuietHours,
 
     snapshot(): ServiceSnapshot {
       return { ...stats, queued: queue.length, active };

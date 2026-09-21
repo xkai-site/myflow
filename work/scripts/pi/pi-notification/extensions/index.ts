@@ -150,6 +150,7 @@ export default function piNotification(pi: ExtensionAPI): void {
     config.minLevel = merged.minLevel;
     config.rules = merged.rules;
     config.coalesce = merged.coalesce;
+    config.quietHours = merged.quietHours;
     config.content = merged.content;
     config.delivery = merged.delivery;
     config.shutdownFlushMs = merged.shutdownFlushMs;
@@ -172,6 +173,22 @@ export default function piNotification(pi: ExtensionAPI): void {
     }
   }
 
+  /** session_start 与 /notify reload 共用读盘/信任判定；不重建生命周期。 */
+  function reloadConfig(ctx: ExtensionContext, reason: string): void {
+    let projectTrusted = false;
+    let cwd: string | undefined;
+    try {
+      projectTrusted = ctx.isProjectTrusted();
+      cwd = ctx.cwd;
+    } catch {
+      projectTrusted = false;
+    }
+    adoptConfig(
+      loadConfig({ agentDir: getAgentDir(), cwd, configDirName: CONFIG_DIR_NAME, projectTrusted }),
+      `${reason}${projectTrusted ? ":trusted" : ""}`,
+    );
+  }
+
   if (load.errors.length > 0 || load.warnings.length > 0) {
     log.record({ event: "config_loaded_initial", degraded: load.degraded, errors: load.errors, warnings: load.warnings });
   }
@@ -186,13 +203,17 @@ export default function piNotification(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("notify", {
-    description: "消息通知：status（状态）/ test（发一条自检通知）",    handler: async (args: string, ctx: ExtensionCommandContext) => {
+    description: "消息通知：status / test / on / off / config / reload",
+    handler: async (args: string, ctx: ExtensionCommandContext) => {
       try {
         await handleNotifyCommand(args, ctx, {
           log,
           config: () => config,
           configLoad: () => load,
           service: () => service,
+          agentDir: () => getAgentDir(),
+          userConfig: () => loadConfig({ agentDir: getAgentDir(), configDirName: CONFIG_DIR_NAME, projectTrusted: false }),
+          reload: (commandCtx) => reloadConfig(commandCtx, "notify_reload"),
           isSilenced: () => pi.getFlag("no-notify") === true,
           sessionId: () => currentSessionId,
           isWaitingForUser: () => lifecycle.isWaitingForUser(),
@@ -218,18 +239,7 @@ export default function piNotification(pi: ExtensionAPI): void {
       lifecycle.onSessionStart({ sessionId, reason: event.reason });
 
       // 项目级配置只在项目被信任时读（§10.1 / §13 第 7 项）。
-      let projectTrusted = false;
-      let cwd: string | undefined;
-      try {
-        projectTrusted = ctx.isProjectTrusted();
-        cwd = ctx.cwd;
-      } catch {
-        projectTrusted = false;
-      }
-      adoptConfig(
-        loadConfig({ agentDir: getAgentDir(), cwd, configDirName: CONFIG_DIR_NAME, projectTrusted }),
-        `session_start:${event.reason}${projectTrusted ? ":trusted" : ""}`,
-      );
+      reloadConfig(ctx, `session_start:${event.reason}`);
 
       log.record({
         event: "plugin_session_start",

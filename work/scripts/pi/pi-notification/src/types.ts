@@ -210,7 +210,7 @@ export interface DeliveryResult {
 export interface NotificationService {
   /**
    * 立即返回（入队）。绝不 await 网络。
-   * `bypassFilters` 仅供 `/notify test` 这类自检使用：绕过合并/冷却（但不绕过去重与门槛），
+   * `bypassFilters` 仅供 `/notify test` 这类自检使用：绕过静默时段/合并/冷却（但不绕过去重与门槛），
    * 否则「自检没收到」会被误读成渠道坏了。
    */
   submit(req: NotificationRequest, options?: { bypassFilters?: boolean }): void;
@@ -222,6 +222,8 @@ export interface NotificationService {
   dispose(): Promise<void>;
   /** 只读快照，供 `/notify status` 展示（不触发任何投递） */
   snapshot(): ServiceSnapshot;
+  /** 使用同一个注入时钟计算本地静默时段（与等级例外无关）。 */
+  isQuietHours(): boolean;
 }
 
 /** `/notify status` 需要的运行统计；全部在内存里，不持久化（设计 §13 第 16 项）。 */
@@ -290,6 +292,13 @@ export interface NotificationConfig {
     toolFailureWindowMs: number;
     /** 同一 kind 两次入队之间的最小间隔 */
     cooldownMs: number;
+  };
+  /** 本地时间，左闭右开；跨午夜；start=end 表示全天。 */
+  quietHours: {
+    enabled: boolean;
+    start: string;
+    end: string;
+    exceptLevels: NotifyLevel[];
   };
   content: {
     includeDuration: boolean;

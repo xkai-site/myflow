@@ -1,6 +1,8 @@
 # Pi 消息通知插件 — 里程碑 2（S4 合并/冷却 + S6 工具失败/压缩失败/等待输入 + S7 Webhook）
 
-> 状态：**已交付**（实现 + 76 条断言全绿；原文为里程碑 1 的规划，现**原地改写**为本里程碑规划，不新增规划文件）
+> 状态：**已交付**（实现 + 当时 76 条断言全绿；原文为里程碑 1 的规划，现**原地改写**为本里程碑规划，不新增规划文件）
+> **本文是 M2 的历史记录**：后续 M3（静默时段 + 配置写盘/向导）已交付，当前状态见 `plans/pi-notification-handoff.md` 与插件 `README.md`。
+> 下文提到的“76 条断言”为 M2 当时计数，现为 **100 条**。
 > 权威设计：`plans/pi-notification-plugin-design.md` v1.2（§7 目录、§10.2 配置、§12 判定、§15 步骤、§17 渠道抽象、§18 实测修订）
 > 里程碑 1（S1 骨架 + S1.5 回归 + S3 终端渠道 + S5 最小配置面）的规划与验收记录已固化在代码、
 > `test/host-lifecycle.mjs`、`test/cli-smoke.mjs` 与 `plans/pi-notification-handoff.md` 里；本文件不再重复。
@@ -148,7 +150,7 @@ MSYS_NO_PATHCONV=1 npm test      # 五套脚本，76 条断言，全绿
 4. **断言 C 的抖动假失败**：基线单次采样曾测到 265ms（阈值 250ms）→ 改为取 3 次最小值，
    对照组仍必须 > 1000ms（保持区分度）。
 
-### 4. 人工一次性（属 §18.6 未测项，如实记录而非当作已验证）
+### 4. 人工一次性（属 §18.6 未测项，如实记录而非当作已验证；本节为 M2 当时状态）
 
 真终端里 `/notify test` 看本地通知是否显示；`webhook` 指向真实第三方端点（Slack/Discord）跑一次。
 `/notify status` 在 TUI 下的排版也需人眼确认。
@@ -169,12 +171,15 @@ MSYS_NO_PATHCONV=1 npm test      # 五套脚本，76 条断言，全绿
 
 ## 下一个里程碑（M3）
 
-**M3 的可执行步骤、验收判据与人工验证清单写在 `plans/pi-notification-handoff.md` 的 §2**
-（新会话入口，避免两处重复维护）。一句话版：
+**M3 的可执行步骤、验收判据与人工验证清单以 `plans/pi-notification-handoff.md` 为准**
+（新会话入口，避免两处重复维护）。下面是**当时写下、现已完成**的三项，保留作历史对照：
 
-1. `quietHours` 静默时段（设计已定、代码 0 行）——在 service 过滤链里加时间窗口判定 + config 校验 + 单测；
-2. S5 完整形态：`/notify on|off|config|reload` + 原子写（临时文件 `0o600` + `rename`，失败保留原文件）+ `ui.ts` 向导；
-3. 真终端人工验证（`/notify test` 可见性、TUI 里的 `waitingForUser`、`/notify status` 排版）。
+1. ~~`quietHours` 静默时段——service 过滤链时间窗口 + config 校验 + 单测~~ **已在 M3-1 完成**；
+2. ~~S5 完整形态：`/notify on|off|config|reload` + 原子写 + `ui.ts` 向导~~ **已在 M3-2 完成**；
+3. 真终端人工验证（`/notify test` 可见性、TUI 里的 `waitingForUser`、`/notify status` 排版）——
+   **仍未完成**（M3-3，不要在无人工验收证据时勾选）。
+
+本文档是 M2 的**历史记录**，不反映 M3 之后的当前状态；能力与缺口见插件 `README.md`。
 
 M3 之后为可选扩展（不在原始承诺内）：macOS 原生横幅 / Telegram-Discord-Slack / 成本与上下文占比 /
 通知历史与状态行（完整清单见插件 `README.md` 的「当前能力与缺口」）。

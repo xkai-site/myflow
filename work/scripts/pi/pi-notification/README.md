@@ -5,10 +5,10 @@ Pi 扩展：**在一次 agent 运行真正结束时**（而不是每次底层 ru
 设计方案与全部实测依据：`plans/pi-notification-plugin-design.md`（v1.2，§17 渠道抽象、§18 实测修订）。
 交接与后续计划：`plans/pi-notification-handoff.md`、`plans/pi-notification-plugin-m2.md`。
 
-> 当前进度：**MVP + S4 + S6 + S7 已完成** —— S1 骨架、S1.5 回归、S3 终端渠道、S5 最小配置面、
-> **S4 合并窗口/冷却**、**S6 工具失败/压缩失败/等待输入**、**S7 Webhook 渠道（+ 可靠性装饰器）**。
-> 尚未做：`quietHours` 静默时段、配置向导与写盘（`/notify on|off|config|reload`）、
-> 成本/上下文占比、macOS 原生横幅（`osascript`）、Telegram/Discord/Slack、通知历史与状态行
+> 当前进度：**MVP + S4 + S6 + S7 + M3-1/M3-2 已完成** —— 新增 `quietHours` 静默时段、
+> **S5 完整配置面**（原子写盘、`/notify on|off|config|reload`、最小规则向导）。
+> M3-3 真终端人工验证仍待完成（M3 开发已交付，设计状态已同步）。
+> 尚未做：成本/上下文占比、macOS 原生横幅（`osascript`）、Telegram/Discord/Slack、通知历史与状态行
 > （详见下方「当前能力与缺口」与 `plans/pi-notification-handoff.md` §2）。
 
 ---
@@ -94,6 +94,9 @@ pi -e work/scripts/pi/pi-notification/extensions/index.ts
     "cooldownMs": 3000            // 同一 kind 两次通知的最小间隔
   },
 
+  // 本地时间，左闭右开；跨午夜；相同端点表示全天
+  "quietHours": { "enabled": false, "start": "23:00", "end": "08:00", "exceptLevels": ["error"] },
+
   "content": { "includeDuration": true, "includeToolFailureNames": true, "maxMessageChars": 300 },
 
   "delivery": {
@@ -123,10 +126,32 @@ pi -e work/scripts/pi/pi-notification/extensions/index.ts
 把两个过滤关掉即可（`coalesce` 里两个 0）。默认值是为了防刷屏：
 用户连点两次、或一次输入触发了多次运行，默认只会收到一条。
 
+### 静默时段
+
+`quietHours` 默认关闭。启用后按**本地时间**判定 `[start,end)`：`23:00–08:00` 跨午夜，
+23:00 起静默、08:00 起恢复；`start === end` 表示全天。时间必须严格为两位 `HH:MM`，
+范围 `00:00–23:59`；`exceptLevels` 是去重后的等级数组（默认 `error`，可设 `[]`）。
+顺序：总开关/等级门槛 → 去重 → **静默时段** → 合并/冷却 → 入队。静默不会推进合并/冷却窗口，
+会留下 `quiet_hours_drop` 诊断记录；已入队/在途的通知不会因进入静默时段被撤回。
+`/notify status` 显示时段是否当前生效；`/notify test` 绕过静默并提示，但仍受总开关和等级门槛约束。
+
+### 用户级写盘与热重读
+
+`on/off/config` 只改用户层，**不会**把项目覆盖或 `PI_NOTIFY_DISABLE` 固化进用户文件。
+保存成功后重读，项目层仍优先（因此项目显式 `enabled: true` 可以覆盖用户级 `/notify off`）；
+会话级静默仍可用 `--no-notify` / `PI_NOTIFY_DISABLE=1`。
+向导：选规则 → confirm 开关 → 选等级 → 最终确认保存；此前只改副本，取消不写盘。
+静默时间、渠道及其它参数仍通过 JSON 编辑。
+
+写盘先 `mergeConfig` 严格校验，再独占创建同目录临时文件（`0o600`），关闭后原子 `rename` 覆盖；
+失败保留原文件、内存态不变，临时文件尽力清理。拒绝把损坏配置的安全降级结果覆盖回原文件。
+Windows 的 POSIX mode 不代表 ACL 隔离，测试仅验证创建/替换不报错。
+`/notify reload` 只重新读盘/校验并更新配置与渠道缓存，不重建扩展/生命周期；坏配置仍按下节降级。
+
 ### 配置写错会怎样（重要）
 
 **不会静默全关。** 解析失败或字段非法时，插件降级为安全子集：
-**只发失败通知（`run_failed` / error 门槛 / `terminal` 渠道）**，并在 `/notify status` 与诊断日志里写明原因。
+**只发失败通知（`run_failed` / error 门槛 / `terminal` 渠道 / 静默时段关闭）**，并在 `/notify status` 与诊断日志里写明原因。
 理由：用户写错一个逗号就再也收不到失败通知，是这个插件最糟糕的失败模式。
 
 ### 环境变量
@@ -145,8 +170,13 @@ pi -e work/scripts/pi/pi-notification/extensions/index.ts
 
 | 命令 | 作用 |
 |---|---|
-| `/notify status` | 开关、生效规则/渠道、合并/冷却参数、配置来源、终端机制、投递统计（成功/失败/去重/合并/冷却/丢弃）、上次成功时间、上次错误、是否正在等你输入、配置错误与告警 |
-| `/notify test` | 立即走一遍完整投递链路（含渠道选择与清洗），用来确认“通知到底能不能到”。**自检绕过合并/冷却**，否则“自检没收到”会被误读成渠道坏了 |
+| `/notify status` | 开关、生效规则/渠道、合并/冷却参数、静默时段及当前是否生效、配置来源、终端机制、投递统计（成功/失败/去重/合并/冷却/丢弃）、上次成功时间、上次错误、是否正在等你输入、配置错误与告警 |
+| `/notify test` | 立即走一遍完整投递链路（含渠道选择与清洗），用来确认“通知到底能不能到”。**自检绕过静默时段/合并/冷却**（仍受总开关/等级门槛/去重约束）；静默期间给出提示 |
+| `/notify on` / `/notify off` | 原子写入用户级总开关并重新应用配置；失败不改内存态 |
+| `/notify config` | TUI 最小规则向导；非 TUI 只显示路径和当前生效值（隐藏渠道 options），不弹对话框 |
+| `/notify reload` | 重新读盘并校验，不触发扩展重载 |
+
+新增配置命令在 print/json 模式通过 **stderr** 回显，stdout 保持干净；RPC 使用 `ui.notify`，不启动向导。
 
 CLI 开关：`--no-notify` 让本会话不发通知（不改配置文件）。
 
@@ -224,15 +254,14 @@ macOS 只走 OSC 777，因此 Apple Terminal 不会显示；原生横幅（`osas
 ## 当前能力与缺口
 
 **能做**：判定 completed/failed/aborted/unknown（含 `length` → warning）→ 规则映射等级与渠道 →
-门槛/去重/**合并窗口/冷却** → 入队 → 在独立任务里投递（终端/系统通知、Webhook）→
+门槛/去重/**静默时段/合并窗口/冷却** → 入队 → 在独立任务里投递（终端/系统通知、Webhook）→
 内置超时/重试/熔断/脱敏；工具失败聚合、压缩失败、等待输入；
-用户级与项目级配置读盘（含降级）；`/notify status|test`；`--no-notify`；
+用户级与项目级配置读盘（含降级）；用户级原子写盘与 TUI 规则向导；
+`/notify status|test|on|off|config|reload`；`--no-notify`；
 `reload` 后旧实例失效、不重复投递；quit 时在 200ms 预算内尽力投递。
 
 **还没做**：
 
-- ❌ **`quietHours` 静默时段**（设计 §10.2/§8/§12.1 已定，代码尚未实现）——目前**不能**按“23:00–08:00 静音”这类策略过滤
-- ❌ 配置向导与写盘（`/notify on|off|config|reload`、原子写 + `0o600`）；目前配置只能手工编辑 JSON
 - ❌ 成本/上下文占比（`content.includeCost`）：usage **尚未采集**，所以打开它也不会有效果
 - ❌ macOS 原生横幅（`osascript`）
 - ❌ Telegram / Discord / Slack 等专用渠道（Webhook 已是它们的通用底座）
@@ -277,12 +306,12 @@ macOS 只走 OSC 777，因此 Apple Terminal 不会显示；原生横幅（`osas
 ```bash
 cd work/scripts/pi/pi-notification
 
-npm test                                            # 全部五套（76 条断言）
+MSYS_NO_PATHCONV=1 npm test                       # 全部五套（100 条断言）
 MSYS_NO_PATHCONV=1 node test/terminal-channel.mjs   # 终端渠道：选择/渲染/注入面/TTY 纪律（不需要 SDK）
-MSYS_NO_PATHCONV=1 node test/service-coalesce.mjs   # 投递服务：门槛/去重/合并/冷却/队列/超时（注入假时钟）
+MSYS_NO_PATHCONV=1 node test/service-coalesce.mjs   # 投递服务：门槛/去重/静默/合并/冷却/队列/超时（注入假时钟）
 MSYS_NO_PATHCONV=1 node test/webhook-channel.mjs    # Webhook + 装饰器（回环 HTTP 服务，不出网）
 MSYS_NO_PATHCONV=1 node test/host-lifecycle.mjs     # 真实宿主会话：判定/去重/阻塞/reload/配置/命令/S4/S6/S7
-MSYS_NO_PATHCONV=1 node test/cli-smoke.mjs          # 真实 pi 进程（G–L）
+MSYS_NO_PATHCONV=1 node test/cli-smoke.mjs          # 真实 pi 进程（G–N）
 PI_SKIP_CLI=1 node test/cli-smoke.mjs               # 只想跑纯 SDK 时跳过
 ```
 
@@ -307,20 +336,25 @@ pi -e work/scripts/pi/pi-notification/extensions/index.ts
 
 Windows 上如果 `auto` 没选中预期机制，可以用 `PI_NOTIFY_CHANNEL=toast` 强制。
 
-### 回归断言覆盖什么（76 条）
+M3-3 待人工验收（本轮没有真终端，不把 UI 桩视为肉眼验证）：
+- `/notify test` 看本地通知；OSC 777/99 分别需在支持它们的终端确认。
+- 临时启用 `waitingForUser`，在 TUI 跑一个真实 `confirm` 扩展，确认等待提醒，再恢复配置。
+- 检查 `/notify status` 排版与 `/notify config` 实际按键/取消体验。
+
+### 回归断言覆盖什么（100 条）
 
 | 组 | 内容 |
 |---|---|
 | 终端渠道（10） | 机制选择表与 `PI_NOTIFY_CHANNEL` 覆盖、OSC 渲染字节、10 组恶意载荷注入面、toast 静态脚本与 base64 载荷、非 TTY 零字节、toast 失败冒泡、abort 不写字节、截断不切代理对 |
-| 投递服务（10） | 默认值、精确去重、`enabled`/`minLevel`/空渠道、同 kind 冷却与恢复、同运行合并窗口、请求级窗口覆盖、`bypassFilters`、队列上限丢最低级、provider 挂起超时算失败、dispose 幂等 |
+| 投递服务（22） | 原 10 项不变；新增静默跨午夜 23:00/23:30/07:59/08:00/12:00、等级例外、关闭时放行、同日与全天、自检绕过且不推进窗口、两个非法时间的读盘降级、等级数组校验/去重 |
 | Webhook + 装饰器（13） | URL/`secretEnv`/headers 校验、载荷字段形状、真实 POST + HMAC 可复算、无密钥不签名、非 2xx 报错且脱敏、不跟随重定向、abort、重试与退避、熔断开/半开/关闭、单次 deadline、出口脱敏、`validate/format/dispose` 透传 |
 | 判定与去重（A–F, H, 对照） | 纯命令不产生生命周期、一次运行 1 条投递且真的写出 1 条通知、settled→下一次 run < 250ms（取 3 次最小值，**带阻塞对照组**）、reload 后不叠加、失败判定、非 TTY 跳过留痕、不改写配置文件 |
 | 配置（I1–I11） | 默认值、`enabled=false`、`minLevel` 门槛、规则开关、**损坏配置降级且失败通知仍发得出**、非法字段值、渠道切换、未定义渠道、项目级生效/未信任忽略/不得定义 providers |
-| 命令（J1–J4） | `/notify status` 走真实分发且不产生生命周期、`/notify test` 真发一条、未知子命令给用法、降级原因会露出 |
+| 命令（J1–J14） | 原 J1–J4 不变；新增 on/off 真写盘、非法写入不变、临时文件/权限/rename 失败、目录不可写（真实 ENOTDIR）、配置热读及同 id 渠道缓存刷新、静默状态与自检提示、非 TUI/RPC 守卫和凭据隐藏、向导保存/取消、用户与项目/环境层隔离 |
 | 合并/冷却（L0–L2） | 默认参数符合设计、默认配置下 1.5s 内两次运行只发一条（并留 `cooldown_drop`）、`cooldownMs=0` 后恢复每条 |
 | 工具失败/压缩失败/等待输入（K1–K6） | 聚合进结果通知、结果不通知时单独发、immediate 立刻发且并行失败被合并、压缩失败 error（用户取消不发）、真 `select` 触发等待通知、`custom` 排除、`end`/reload 复位等待 |
 | Webhook 端到端（M1–M3） | 真实 POST + HMAC、日志不出现 query/密钥、非法配置降级为 noop 且不发、`§17.3` 反回退（lifecycle/rules 无渠道名、service 不认识 webhook、未注册 `agent_end`） |
-| 真实 CLI（G–L） | `pi -e` 能加载、纯命令零生命周期零投递、stdout 不被转义序列污染、`/notify status` 可用、配置 `enabled=false` 真实生效、损坏配置降级后失败通知仍发出、`--no-notify` 静默 |
+| 真实 CLI（G–N） | 原 G–L 不变；新增 `/notify off` 后新进程零投递（保留实际落盘文件）、非 TUI config 在 stderr 打印路径/值且 stdout 干净 |
 
 断言 C 的对照组是关键：没有它，“不阻塞”只是一个看起来通过的观察。
 断言 M3 是**结构约束**的可执行版本：`lifecycle.ts` / `rules.ts` 里出现渠道名、或 `service.ts` 出现
@@ -332,14 +366,15 @@ Windows 上如果 `auto` 没选中预期机制，可以用 `PI_NOTIFY_CHANNEL=to
 
 ```
 extensions/index.ts   薄接线：注册 + 形状转换 + 配置装配；注册 /notify 与 --no-notify
-   ├─ config.ts       默认值 / 读盘 / 校验 / 降级 / 项目级合并
+   ├─ config.ts       默认值 / 读盘 / 校验 / 降级 / 项目级合并 / 用户级原子写盘
    ├─ lifecycle.ts    运行状态机、工具失败与等待输入的簿记；唯一完成判定点；陈旧实例丢弃
    │    └─ rules.ts   纯函数：RunOutcome / 工具失败 / 压缩失败 / 等待 → NotificationRequest | null
    │         │        （不认识任何渠道名；一个运行最多一条由 evaluateSettlement 保证）
-   │         └─ service.ts  同步入队 → 异步投递；门槛/去重/合并窗口/冷却/超时/有界队列/统计
+   │         └─ service.ts  同步入队 → 异步投递；门槛/去重/静默/合并窗口/冷却/超时/有界队列/统计
    │              └─ providers/{registry,decorators,noop,terminal,debug,webhook}.ts
    │                   同一个 Notifier 接口；decorators 统一提供超时/重试/熔断/脱敏
-   ├─ commands.ts     /notify status|test（只读状态 + 立即自检，不写盘）
+   ├─ commands.ts     /notify status|test|on|off|config|reload
+   │    └─ ui.ts       TUI 规则向导（副本编辑 + 最终确认）
    └─ log.ts          控制字符清洗 / 脱敏 / 可选 JSONL 诊断
 ```
 
@@ -378,5 +413,12 @@ extensions/index.ts   薄接线：注册 + 形状转换 + 配置装配；注册 
 - TUI 内真实 `/reload` 的交互路径（本轮的 reload 断言走 SDK 的 `session.reload()`，语义相同但入口不同）。
 - `session_shutdown` 的 `reason = "new" | "resume" | "fork"` 语义（需要交互流程）。
 - `/notify status` 在真实 TUI 里的排版效果（print 模式下只有文本，TUI 渲染未看）。
+- **M3 新增**：`/notify config` 向导的真实按键流程（`select` / `confirm` 呈现、Esc 取消、最终确认文案）
+  未在真终端验证；自动化只用 UI 桩覆盖了分支与保存/取消后的副作用。
+- **M3 新增**：静默时段跨午夜的行为已用固定本地时间单测覆盖，但**跨午夜的真实挂机切换**（23:59→00:00）
+  未在长时间运行中观察；系统时钟跳变、睡眠唤醒等场景也未验证。
+- **M3 新增**：`0o600` 在 Windows 上只验证了“创建/替换不报错”（POSIX mode 位不代表 ACL 隔离）；
+  仅非 Windows 平台断言了 `mode & 0o777 === 0o600`。
+- **M3 新增**：`/notify reload` 的断言走 SDK 的配置重读路径，真实 TUI 里用同一命令重读的交互未单独验证。
 - 后台子任务是否在 runner 进程内二次加载本扩展（S0 源码预测会，未实测）。
 - 无 `tsc`（仓库不允许装依赖），所以类型**未经编译器校验**；运行时加载已在 SDK 与真实 CLI 两侧验证。

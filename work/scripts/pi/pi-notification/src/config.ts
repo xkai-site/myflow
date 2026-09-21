@@ -1,9 +1,8 @@
 /**
  * 配置（设计 §10 / §13 第 5、6、7 项）。
  *
- * 本轮实现：内置默认值 + 用户级读盘 + 校验 + 降级 + 项目级合并（仅信任项目）。
- * **不做**：写入（原子写/`0o600`）、配置向导、`/notify reload` —— 那些属于 S5 的完整形态；
- * 本轮没有"改配置"的命令，因此暂时不需要写盘。
+ * 内置默认值 + 用户级读写 + 校验 + 降级 + 项目级合并（仅信任项目）。
+ * 写盘先校验，再同目录临时文件（0o600）+ 原子 rename；失败不覆盖原文件。
  *
  * 两条关键安全/健壮性规则：
  *  1. **损坏配置不静默全关**（§13 第 5 项）：解析或校验失败时降级为「仅 terminal + 仅 error +
@@ -14,7 +13,8 @@
  *     不能让一个被 clone 下来的仓库决定把通知发到哪里。
  */
 
-import { readFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import type {
@@ -120,6 +120,7 @@ export function defaultConfig(): NotificationConfig {
       // 同 kind 两次通知的最小间隔（用户连点两次、极短时间内的多次运行只提醒一次）。
       cooldownMs: 3000,
     },
+    quietHours: { enabled: false, start: "23:00", end: "08:00", exceptLevels: ["error"] },
     content: {
       includeDuration: true,
       includeToolFailureNames: true,
@@ -367,6 +368,30 @@ export function mergeConfig(base: NotificationConfig, raw: unknown, source: stri
     }
   }
 
+  if (raw.quietHours !== undefined) {
+    if (!isPlainObject(raw.quietHours)) {
+      errors.push({ path: "quietHours", message: "必须是对象" });
+    } else {
+      const quiet = raw.quietHours;
+      checkBoolean(quiet, "enabled", config.quietHours as unknown as Record<string, unknown>, "quietHours.enabled", errors);
+      for (const key of ["start", "end"] as const) {
+        if (quiet[key] === undefined) continue;
+        if (typeof quiet[key] !== "string" || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(quiet[key])) {
+          errors.push({ path: `quietHours.${key}`, message: "必须是严格 HH:MM（00:00–23:59）" });
+        } else {
+          config.quietHours[key] = quiet[key];
+        }
+      }
+      if (quiet.exceptLevels !== undefined) {
+        if (!Array.isArray(quiet.exceptLevels) || quiet.exceptLevels.some((level) => !LEVELS.includes(level))) {
+          errors.push({ path: "quietHours.exceptLevels", message: "必须是 info | warning | error 等级数组" });
+        } else {
+          config.quietHours.exceptLevels = [...new Set(quiet.exceptLevels)] as NotifyLevel[];
+        }
+      }
+    }
+  }
+
   if (raw.content !== undefined) {
     if (!isPlainObject(raw.content)) {
       errors.push({ path: "content", message: "必须是对象" });
@@ -478,6 +503,41 @@ export function loadConfig(options: ReadConfigOptions): ConfigLoadResult {
     return { config: degradedConfig(), sources, errors, warnings, degraded: true };
   }
   return { config, sources, errors, warnings, degraded: false };
+}
+
+export type ConfigWriteResult =
+  | { ok: true; config: NotificationConfig; problems: ConfigProblem[]; warnings: ConfigProblem[] }
+  | { ok: false; problems: ConfigProblem[] };
+
+/**
+ * 只写用户层；调用方只能在成功之后更新内存态。
+ * 临时文件用 wx 独占创建，关闭后 rename；绝不先删除目的文件。
+ * 不合法配置拒绝写入（不能把读盘的安全降级配置当作成功结果写回）。
+ */
+export function writeUserConfig(agentDir: string, raw: unknown): ConfigWriteResult {
+  let temporary: string | undefined;
+  let fd: number | undefined;
+  try {
+    const file = userConfigPath(agentDir);
+    const merged = mergeConfig(defaultConfig(), raw, file);
+    if (merged.errors.length > 0) return { ok: false, problems: merged.errors };
+    const text = `${JSON.stringify(merged.config, null, 2)}\n`;
+    mkdirSync(path.dirname(file), { recursive: true });
+    const candidate = path.join(path.dirname(file), `.config-${randomUUID()}.tmp`);
+    fd = openSync(candidate, "wx", 0o600);
+    temporary = candidate; // 只清理本次成功创建的文件
+    writeFileSync(fd, text, "utf8");
+    closeSync(fd);
+    fd = undefined;
+    renameSync(temporary, file);
+    temporary = undefined;
+    return { ok: true, config: merged.config, problems: [], warnings: merged.warnings };
+  } catch (error) {
+    return { ok: false, problems: [{ path: "userConfig", message: error instanceof Error ? error.message : String(error) }] };
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
+    if (temporary !== undefined) { try { unlinkSync(temporary); } catch { /* best effort */ } }
+  }
 }
 
 /** 会话级静默开关（§10.3 的环境变量覆盖）。 */
