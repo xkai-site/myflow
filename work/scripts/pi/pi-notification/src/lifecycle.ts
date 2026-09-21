@@ -36,6 +36,10 @@ export interface Lifecycle {
     sessionId: string;
     stopReason: AssistantStopReason | undefined;
     errorMessage?: string;
+    /** 本条 assistant 消息的 `usage.cost.total`（provider 不报时不给） */
+    usageCostUsd?: number;
+    /** 本条 assistant 消息的文本（**由 index 限长**；本层只做“保留最新非空一条”） */
+    text?: string;
   }): void;
   /**
    * 一次工具执行结束。`isError === false` 时只做簿记（不累积）。
@@ -59,6 +63,8 @@ export interface Lifecycle {
   onSettled(input: { sessionId: string; isIdle: boolean }): RunOutcome | null;
   onShutdown(reason: ShutdownReason): void;
   currentSessionId(): string | undefined;
+  /** 本实例内该会话的累计成本（`agent_settled` 的 `RunSummary` 用它做“累计”口径） */
+  sessionCostUsd(): number;
   /** 当前是否在等用户输入（`/notify status` 展示用） */
   isWaitingForUser(): boolean;
   isStale(): boolean;
@@ -87,10 +93,19 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
     stopReason?: AssistantStopReason;
     errorMessage?: string;
     sawAssistant: boolean;
+    /** 本 run 内 assistant usage 成本累计（多轮/重试都算在同一次运行里） */
+    costUsd?: number;
+    /** 本 run 最后一条非空 assistant 文本 */
+    assistantText?: string;
     /** 本 run 内的工具失败：按 toolName 去重（§12.3），保留失败顺序 */
     toolFailures: Map<string, number>;
     compactFailed: boolean;
   } | undefined;
+  /**
+   * 会话累计成本。**只在本实例内存里**：`/reload` 或换会话会重建实例，累计随之归零。
+   * 不读 SessionManager：那需要把会话内容搬进本层，与“只吃纯数据”的边界冲突。
+   */
+  let sessionCostUsd = 0;
   /**
    * 等待用户输入的深度计数。
    * 实测（§18.5 修订 1）：嵌套/重叠 prompt **不会**产生内层 span，`ui_prompt_end.kind` 报的是外层，
@@ -145,6 +160,7 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
       if (stale) return;
       boundSessionId = sessionId;
       activeRun = undefined;
+      sessionCostUsd = 0;
       log.record({ event: "lifecycle_session_start", sessionId, reason });
     },
 
@@ -155,13 +171,19 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
       log.record({ event: "lifecycle_run_start", sessionId, runId: run.runId });
     },
 
-    onAssistantMessage({ sessionId, stopReason, errorMessage }): void {
+    onAssistantMessage({ sessionId, stopReason, errorMessage, usageCostUsd, text }): void {
       if (!accept(sessionId)) return;
       // 没有 agent_start 也允许记录（实例可能在中途接管），但不会伪造开始时间。
       const run = ensureRun(sessionId);
       run.sawAssistant = true;
       run.stopReason = stopReason;
       if (errorMessage !== undefined) run.errorMessage = errorMessage;
+      if (typeof usageCostUsd === "number" && Number.isFinite(usageCostUsd) && usageCostUsd > 0) {
+        run.costUsd = (run.costUsd ?? 0) + usageCostUsd;
+        sessionCostUsd += usageCostUsd;
+      }
+      // 只保留最新的非空文本：settled 时它恰好是本 run 的最后一条 assistant 回复。
+      if (typeof text === "string" && text !== "") run.assistantText = text;
     },
 
     onToolExecutionEnd({ sessionId, toolName, isError }): ToolFailureEvent | null {
@@ -237,6 +259,8 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
         errorMessage: run?.errorMessage,
         toolFailures,
         ...(run?.compactFailed ? { compactFailed: true } : {}),
+        ...(run?.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
+        ...(run?.assistantText ? { assistantExcerpt: run.assistantText } : {}),
       };
 
       log.record({
@@ -249,6 +273,8 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
         sawAssistant: run?.sawAssistant ?? false,
         toolFailures: toolFailures.length,
         compactFailed: run?.compactFailed === true,
+        costUsd: outcome.costUsd ?? null,
+        sessionCostUsd,
       });
       return outcome;
     },
@@ -263,6 +289,10 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
 
     currentSessionId(): string | undefined {
       return boundSessionId;
+    },
+
+    sessionCostUsd(): number {
+      return sessionCostUsd;
     },
 
     isWaitingForUser(): boolean {

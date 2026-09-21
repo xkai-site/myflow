@@ -1,6 +1,7 @@
 # Pi「消息通知插件」设计方案
 
-> 状态：**MVP + S4/S6/S7 + M3-1/M3-2 已实现**，S5 完整配置面已落地；最近一次自动化验收 100 项全绿。**M3-3 真终端人工验收仍未完成**。
+> 状态：**MVP + S4/S6/S7 + M3-1/M3-2 + M4 已实现**，S5 完整配置面与正文内容字段均已落地；最近一次自动化验收 105 项全绿。
+> **M3-3 真终端人工验收已由维护者执行并通过**；M4 的视觉口味建议在下一次真实运行时顺带看一眼（见 §19 末尾）。
 > 目标宿主：`@earendil-works/pi-coding-agent` **0.86.1**（下方简写 `O/` = `D:/Nodejs/node_modules/@earendil-works/pi-coding-agent`）。
 > 研究时仓库：`D:/XuKai/Project/myflow`，当时 HEAD `a0059283327b5d8f56fa117077f4a55fac9e1265`（历史基线，不代表当前工作区）。
 > **命名修订（v1.2 之后）**：插件目录与配置目录统一为 **`pi-notification`**（原文档写作 `pi-message-notification`），已全文替换。
@@ -195,6 +196,7 @@ on: (channel, handler) => { const safeHandler = async (data) => { try { await ha
 | 用户可配置 | ✅ | 用户级 JSON + `/notify` 命令 |
 | 需要 `registerCommand` | ✅ 需要（状态/测试/开关/配置） | §10 |
 | 需要 UI 配置 | ✅ 仅 TUI 的规则向导；非 TUI 显示文件路径与当前值（隐藏渠道 options） | `ctx.ui.select` / `confirm`，最终确认后保存 |
+| 通知正文有内容 | ✅ 会话名 / 成本（本次+累计） / 上下文占比 / assistant 摘录 | 均不读用户 prompt 原文（§19） |
 | 需要 Event Bus | ❌ 核心不需要；仅作可选扩展入口 | §7.6 |
 | 渠道与生命周期解耦 | ✅ **硬性要求** | Provider 接口 + 规则/服务分层 |
 
@@ -328,7 +330,7 @@ work/scripts/pi/pi-notification/
 ├── package.json                 # type:module, keywords:[pi-package], pi.extensions:[./extensions/index.ts]
 ├── README.md                    # 安装/启用/配置/命令/隐私与失败边界/未验证项
 ├── extensions/
-│   └── index.ts                 # 默认工厂：组装 + 注册 9 个 hook + /notify + --no-notify（薄接线，不判定）
+│   └── index.ts                 # 默认工厂：组装 + 注册 10 个 hook + /notify + --no-notify（薄接线，不判定）
 ├── src/
 │   ├── types.ts                 # 共享契约（§11 + §17.4）；唯一的跨层类型来源
 │   ├── config.ts                # 默认值 / 用户级+项目级读盘 / 严格校验 / 降级 / 用户级原子写盘
@@ -435,8 +437,9 @@ SignalEvent（工具失败等）───────────────┘
 
 ### 10.2 Schema（v1）
 
-以下保留为**设计示例，不是当前默认配置的逐字副本**：`includeCost` 尚未实现，
-当前并发默认值为 `1`（草稿为 `2`），规则默认渠道均为 `terminal`，内置 providers 仅有 `terminal`。
+以下保留为**设计示例，不是当前默认配置的逐字副本**：
+当前并发默认值为 `1`（草稿为 `2`），规则默认渠道均为 `terminal`，内置 providers 仅有 `terminal`；
+`content` 字段的实际集合与默认值以 §19 为准（已删除 `includePromptExcerpt`）。
 实际字段与默认值以 `src/types.ts` / `src/config.ts` 和插件 README 为准。
 
 ```jsonc
@@ -471,8 +474,9 @@ SignalEvent（工具失败等）───────────────┘
   "content": {
     "includeDuration": true,
     "includeToolFailureNames": true,
-    "includeCost": false,
-    "includePromptExcerpt": false,   // 默认 false：不外传用户输入
+    "includeSessionLabel": true,
+    "includeCost": true,
+    "includeAssistantExcerpt": false,  // 默认 false：不外传 assistant 回复（§19）
     "maxMessageChars": 300
   },
 
@@ -839,7 +843,8 @@ agent_settled + ctx.isIdle()     → 发"轮到你输入"（默认策略）
 ## 15. 实现步骤（按开发顺序）
 
 > **状态（M3-1/M3-2 落地后）**：表中 ✅ 表示阶段开发完成，并有列出的回归证据；不代表所有平台或交互路径都已人工验证。
-> 最近一次 `MSYS_NO_PATHCONV=1 npm test`：五套 **100 项全绿**。**M3-3 真终端人工验收仍未完成**，见表后说明。
+> 最近一次 `MSYS_NO_PATHCONV=1 npm test`：五套 **105 项全绿**。
+> M3-3 真终端人工验收**已通过**；M4 只建议下次真实运行时顺带看一眼正文口味（见 §19.6）。
 
 | 阶段 | 内容 | 完成判据 | 状态 |
 |---|---|---|---|
@@ -854,23 +859,24 @@ agent_settled + ctx.isIdle()     → 发"轮到你输入"（默认策略）
 | **S7 外部渠道** | `src/providers/webhook.ts` + `src/providers/decorators.ts`（首个非终端渠道） | 本地 echo 服务验证 payload、超时、密钥来自 env | ✅ `test/webhook-channel.mjs` + 断言 M1–M3（回环 HTTP 服务即“本地 echo 服务”） |
 | **S8 生命周期加固** | 会话替换/重载/退出场景；旧实例丢弃；quit 尽力 flush | 连续 `/reload` 不叠加、换会话不误报 | ✅ 断言 D / E / K6 |
 | **S9 文档与默认值** | README：安装、隐私、模式降级、覆盖范围限制 | 明写“不覆盖子会话 / 不覆盖纯命令任务” | ✅ 插件 README |
+| **M4 正文内容字段**（§19，后续里程碑） | 会话名 / 成本（本次+累计） / 上下文占比 / assistant 摘录；删除 no-op 的 `includePromptExcerpt` | 会话名与成本进正文、摘录默认关且 10 字截断/先清洗、拿不到就不写 | ✅ 断言 R1–R5 |
 
 顺序理由：先钉死判定正确性（S2），再谈渠道（S3/S7）；可靠性（S4）在配置（S5）之前，因为配置要靠 service 生效。
 
-**M3 自动化验收**：原 76 项断言语义不变；新增服务 12 项、宿主 J5–J14 共 10 项、CLI M/N 共 2 项，总计 100 项。
+**M3/M4 自动化验收**：M3 新增 24 项，M4 新增 5 项（R1–R5），总计 **105 项**，
+均已在原 76 项语义不变的前提下全绿。
 宿主断言 **M3** 是 §17.3 渠道解耦反回退的名称（不是里程碑编号），仍全绿；未注册 `agent_end`。
 
-**已开发但待人工验收（M3-3）**：真实终端 `/notify test` 显示、真实 `confirm` 等待提醒、
-`/notify status` 排版与配置向导按键/取消体验。Windows toast 有历史实发确认，不代表本轮重验；
-OSC 777/99 仍待对应终端肉眼验证。SDK UI 桩不等同于真终端验收。步骤见交接 §2。
+**已开发但待人工确认**：M3-3（通知显示 / 等待提醒 / TUI 排版 / 向导按键）已由维护者执行并**通过**；
+M4 的内容字段只建议在下一次真实运行时顺带看一眼（见 §19 末尾）。SDK UI 桩不等同于肉眼验收。
 
-**可选未开发项（不在 M3 范围）**：成本/上下文占比（`content.includeCost` / `RunSummary.costUsd`，未采集）、
-通知历史与状态行（`pi.appendEntry`+`registerEntryRenderer`、`ctx.ui.setStatus`）、
-macOS 原生横幅（`osascript`）、Telegram/Discord/Slack 专用渠道。
-子任务通知是 §18.5 修订 4 裁定不做的覆盖边界，不是 S5 的遗留开发项。
+**可选未开发项（不在 M3/M4 范围）**：通知历史与状态行（`pi.appendEntry`+`registerEntryRenderer`、`ctx.ui.setStatus`）、
+macOS 原生横幅（`osascript`）、Telegram/Discord/Slack 专用渠道、
+累计成本的跨实例口径（当前为实例内存累计，`/reload` 后归零）。
+子任务通知是 §18.5 修订 4 裁定不做的覆盖边界，不是遗留开发项。
 
-**“接受但不生效”的字段**：`content.includePromptExcerpt` 会被校验但**无一处读取**（插件从不外传 prompt）。
-README 已明确“保留字段、当前无效果”，是否删除或实现留待后续决策。
+**已交付的内容字段（M4）**：会话名 / 成本（本次+累计） / 上下文占比 / assistant 摘录。
+语义、边界与断言映射见 **§19**；原先“接受但不生效”的 `content.includePromptExcerpt` 已随 M4 删除。
 
 ---
 
@@ -892,6 +898,8 @@ README 已明确“保留字段、当前无效果”，是否删除或实现留�
 - 终端是否真的展示 OSC 通知取决于终端模拟器，无法由 Pi 保证。
 - `tool_execution_end` 在"被 `tool_call` block 的工具"上是否发出（被阻断的工具可能无 end 事件）——需实测，否则会漏报。
 - 静默时段的时区已在 M3 明确：使用注入时钟对应的本地时间，边界语义见 §10.2；不再是未决项。
+- 真实 provider 的 `usage.cost.total` 形态（是否都提供、是否含缓存读写、与 Pi `/session` 统计是否一致）**未验证**；
+  插件因此采取“拿不到就不写”，见 §19。
 
 ---
 
@@ -1229,6 +1237,85 @@ pi.events.emit("pi-notification:emit", {
 原 §15 的 S0 已完成 → 现在可直接从 **S1 骨架** 开始；但建议在 S1 之后插入一项：
 
 - **S1.5 回归脚本**：把本轮的可复现配方固化成 `test/host-lifecycle.mjs`（带 `MSYS_NO_PATHCONV=1`），断言：纯命令不产生 `agent_settled`、settled 内不留阻塞、reload 后不重复投递。这样“覆盖范围边界”会被持续验证而不是靠记忆。
+
+---
+
+## 19. 正文内容字段（M4 追加）
+
+> 目标：让一条通知能回答两个问题——“**这是哪个任务**”与“**这事办完没有**”——而**不把用户输入原文送出去**。
+> 本节是 §10.2 `content` 块的语义权威；实现分散在 `rules.ts`（拼装与格式化）、`lifecycle.ts`（运行级采集）、
+> `extensions/index.ts`（会话名与上下文占比的采集）。
+
+### 19.1 字段与默认值
+
+| 字段 | 默认 | 值来源 | 正文位置 |
+|---|---|---|---|
+| `includeDuration` | `true` | 既有 | 第 3 段 |
+| `includeToolFailureNames` | `true` | 既有 | 第 4 段 |
+| `includeSessionLabel` | `true` | 会话名（`session_info_changed.name`，初值 `pi.getSessionName()`）→ 缺失时回退 `basename(ctx.cwd)` | **首段** `[标识]` |
+| `includeCost` | `true` | `usage.cost.total` 累计 + `ctx.getContextUsage()` / `ctx.model.contextWindow` | 第 5、6 段 |
+| `includeAssistantExcerpt` | `false` | `message_end` 里 assistant 消息的文本片段 | **末段**（真截断时标 `…`） |
+| `maxMessageChars` | `300` | 既有 | 整串上限 |
+
+正文按阅读优先级拼接（` · ` 分隔，整串仍受 `maxMessageChars` 限制）：
+
+```
+[重构登录] · 用时 42.3s · 但 1 个工具失败: bash · 成本 $0.0123（累计 $0.0456） · 上下文 42% · 已修复登录 bug…
+```
+
+### 19.2 五条边界（都是刻意的）
+
+1. **拿不到就不写，不猜数字。** `provider` 不报 `usage`、金额为 0（本地模型/免费额度）、
+   拿不到 `contextWindow` 时，对应片段直接不出现；金额四舍五入到 `$0.0000` 也当作没有。
+   宁可少写一节，也不要让用户看到“免费”的假象。
+2. **累计的口径是“本实例内存”。** 同一会话内跨次运行累加，`/reload` 或换会话后归零。
+   不读 `SessionManager`：那会把会话内容搬进只吃纯数据的判定层，与 §17.3 的依赖方向冲突。
+   本次与累计四舍五入后相同时只显示一次（避免“累计”重复同一个数字）。
+3. **成本与上下文共用 `includeCost` 一个开关**，且占比低于 1% 不显示（“上下文 0%”是噪声）。
+4. **摘录默认关闭，且“先清洗再截断”。** 顺序不能反：回复常以换行/缩进开头，
+   先截断会把空白截进摘录、清洗后反而变空。长度固定为 `ASSISTANT_EXCERPT_CHARS = 10`
+   ——**刻意不做成配置项**：多一个配置项就多一个“设了没效果”的机会，而 10 个字只够当提示。
+   真要在真实使用中发现不够，再按“真被读到的需求”加配置，而不是现在猜一个更大的默认值。
+5. **首段标识有回退，且截断只在真的截断时动手。**
+   - 标识：**会话名优先，未命名时回退项目目录名**。绝大多数人从不 `/name`，没有回退这一栏对他们永远不出现（等于白做）。
+     两者都无（如磁盘根目录的 basename 为空）则整段省略；`includeSessionLabel: false` 可整栏关闭。
+   - 摘录：超长时去掉被切在末尾的悬空标点并补 `…`；**未超长就原样呈现**，
+     不把模型自己写的完整句号改成截断标记（“被我们截了”与“模型本来就写了半句”必须可区分）。
+
+### 19.3 为什么删掉 `includePromptExcerpt`
+
+它被校验但**无一处读取**，属于典型的假开关：用户设了 `true` 却什么也没发生，也不报错。
+另外它要求插件读取并外传**用户输入原文**，与“默认不外传 prompt / 完整回复”的立场直接冲突。
+两个真实需求分别由 `includeSessionLabel`（展示用元数据 + 项目名回退）与 `includeAssistantExcerpt`（agent 自己的产出）满足。
+删除后的兼容性：旧配置里残留该字段**不会**导致降级（它已不是被校验的字段），但也不再有任何效果。
+
+### 19.4 隐私与注入面
+
+- 日志**不记**条目正文、不记会话名、不记 assistant 文本；`session_info_changed` 只记“有没有名字”。
+- 摘录进入正文前经 `sanitize()`：**整段删除**转义序列（含载荷），因此模型回复无法伪造通知或夹带新序列。
+- 首段标识（会话名或**项目目录名**）会随正文发到所有已配渠道（包括 Webhook）；不想外传就关掉 `includeSessionLabel`。
+- `webhook` 渠道的载荷形状未变（仍只有元数据 + title/body），正文里的内容因此也只会随 title/body 上浮。
+
+### 19.5 断言映射
+
+| 断言 | 覆盖 |
+|---|---|
+| R1 | 新字段默认值与更名、已删字段不复活（且旧配置不因此降级）、新字段类型错仍触发降级 |
+| R2 | 未命名时回退项目目录名；`setSessionName` 后会话名优先；`includeSessionLabel: false` 整栏关闭；日志不落会话名 |
+| R3 | 摘录默认关闭；开启后 10 字截断 + `…` 标记、恰好 10 字不补标记、悬空标点去除、换行归一、转义序列整段删除（注入面）|
+| R4 | 成本本次与跨 run 累计；`includeCost=false` 时成本与占比一起消失 |
+| R5 | 上下文占比 42% 显示、<1% 不显示 |
+
+测试旋钮（**仅测试夹具**）：`PROBE_ASSISTANT_TEXT` / `PROBE_COST_USD` / `PROBE_CONTEXT_TOKENS`，
+与 `PROBE_DELAY_MS` 同一套做法（每次调用时读 env，用完即清，避免跨 host 泄漏）。
+
+### 19.6 仍未验证（不得当成已解决）
+
+- 真实 provider 的 `usage.cost.total`：是否都提供、是否含缓存读写、与 Pi 自带 `/session` 统计是否一致。
+  这是“拿不到就不写”的其中一个原因。
+- 多轮（带工具调用）运行时“最后一条非空 assistant 文本”是否总是用户想看的那句（只与假 provider 对过）。
+- 内容字段的**视觉口味**（正文长度是否合意）需真终端看一眼：这是 M4 唯一的人工项，
+  不必单独一轮，下次真实运行时顺带确认即可。
 
 ---
 

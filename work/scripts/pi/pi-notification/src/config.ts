@@ -124,8 +124,11 @@ export function defaultConfig(): NotificationConfig {
     content: {
       includeDuration: true,
       includeToolFailureNames: true,
-      // 默认不外传用户输入与完整回复（§13 第 16 项）。
-      includePromptExcerpt: false,
+      // 首段标识：会话名优先，未命名时回退到项目目录名；两者都是展示用元数据。
+      includeSessionLabel: true,
+      // 默认不外传 assistant 回复（可能带出文件内容/密钥）——§13 第 16 项。
+      includeAssistantExcerpt: false,
+      includeCost: true,
       maxMessageChars: 300,
     },
     delivery: {
@@ -398,7 +401,9 @@ export function mergeConfig(base: NotificationConfig, raw: unknown, source: stri
     } else {
       checkBoolean(raw.content, "includeDuration", config.content as unknown as Record<string, unknown>, "content.includeDuration", errors);
       checkBoolean(raw.content, "includeToolFailureNames", config.content as unknown as Record<string, unknown>, "content.includeToolFailureNames", errors);
-      checkBoolean(raw.content, "includePromptExcerpt", config.content as unknown as Record<string, unknown>, "content.includePromptExcerpt", errors);
+      checkBoolean(raw.content, "includeSessionLabel", config.content as unknown as Record<string, unknown>, "content.includeSessionLabel", errors);
+      checkBoolean(raw.content, "includeAssistantExcerpt", config.content as unknown as Record<string, unknown>, "content.includeAssistantExcerpt", errors);
+      checkBoolean(raw.content, "includeCost", config.content as unknown as Record<string, unknown>, "content.includeCost", errors);
       checkPositiveInt(raw.content, "maxMessageChars", config.content as unknown as Record<string, unknown>, "content.maxMessageChars", errors, { min: 20, max: 2000 });
     }
   }

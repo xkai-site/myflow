@@ -61,24 +61,34 @@ function mockModel(id) {
 }
 
 function assistantMessage(model, overrides) {
+  // M4 内容字段（§19）的测试旋钮：都是**每次调用时读 env**，与 PROBE_DELAY_MS 同一套做法，
+  // 这样同一个进程里的多个 host 可以各给各的值（模块只加载一次）。
+  const costUsd = Number(process.env.PROBE_COST_USD ?? 0) || 0;
+  // 输入 token 同时是 `ctx.getContextUsage()` 的来源（与 model.contextWindow=100000 配比例）。
+  const inputTokens = Number(process.env.PROBE_CONTEXT_TOKENS ?? 1) || 1;
   return {
     role: "assistant",
-    content: [{ type: "text", text: "OK" }],
+    content: [{ type: "text", text: assistantText() }],
     api: model.api,
     provider: model.provider,
     model: model.id,
     usage: {
-      input: 1,
+      input: inputTokens,
       output: 1,
       cacheRead: 0,
       cacheWrite: 0,
-      totalTokens: 2,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      totalTokens: inputTokens + 1,
+      cost: { input: costUsd, output: 0, cacheRead: 0, cacheWrite: 0, total: costUsd },
     },
     stopReason: "stop",
     timestamp: Date.now(),
     ...overrides,
   };
+}
+
+/** 假 assistant 的正文；测试用 `PROBE_ASSISTANT_TEXT` 换成可控字符串（含换行/控制字符）。 */
+function assistantText() {
+  return process.env.PROBE_ASSISTANT_TEXT ?? "OK";
 }
 
 /** mode: "ok" | "error" */
@@ -105,8 +115,8 @@ function buildStream(model, mode) {
     const pending = { ...message, content: [], stopReason: "pending" };
     stream.push({ type: "start", partial: pending });
     stream.push({ type: "text_start", contentIndex: 0, partial: pending });
-    stream.push({ type: "text_delta", contentIndex: 0, delta: "OK", partial: message });
-    stream.push({ type: "text_end", contentIndex: 0, content: "OK", partial: message });
+    stream.push({ type: "text_delta", contentIndex: 0, delta: assistantText(), partial: message });
+    stream.push({ type: "text_end", contentIndex: 0, content: assistantText(), partial: message });
     stream.push({ type: "done", reason: "stop", message });
   });
   return stream;

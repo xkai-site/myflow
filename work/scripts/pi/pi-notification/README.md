@@ -5,10 +5,10 @@ Pi 扩展：**在一次 agent 运行真正结束时**（而不是每次底层 ru
 设计方案与全部实测依据：`plans/pi-notification-plugin-design.md`（v1.2，§17 渠道抽象、§18 实测修订）。
 交接与后续计划：`plans/pi-notification-handoff.md`、`plans/pi-notification-plugin-m2.md`。
 
-> 当前进度：**MVP + S4 + S6 + S7 + M3-1/M3-2 已完成** —— 新增 `quietHours` 静默时段、
-> **S5 完整配置面**（原子写盘、`/notify on|off|config|reload`、最小规则向导）。
-> M3-3 真终端人工验证仍待完成（M3 开发已交付，设计状态已同步）。
-> 尚未做：成本/上下文占比、macOS 原生横幅（`osascript`）、Telegram/Discord/Slack、通知历史与状态行
+> 当前进度：**MVP + S4 + S6 + S7 + M3-1/M3-2 + M4 已完成** —— 新增 `quietHours` 静默时段、
+> **S5 完整配置面**（原子写盘、`/notify on|off|config|reload`、最小规则向导）、
+> **M4 内容字段**（会话名 / 成本本次+累计 / 上下文占比 / assistant 摘录，见“通知正文里有什么”）。
+> 尚未做：macOS 原生横幅（`osascript`）、Telegram/Discord/Slack、通知历史与状态行
 > （详见下方「当前能力与缺口」与 `plans/pi-notification-handoff.md` §2）。
 
 ---
@@ -97,7 +97,14 @@ pi -e work/scripts/pi/pi-notification/extensions/index.ts
   // 本地时间，左闭右开；跨午夜；相同端点表示全天
   "quietHours": { "enabled": false, "start": "23:00", "end": "08:00", "exceptLevels": ["error"] },
 
-  "content": { "includeDuration": true, "includeToolFailureNames": true, "maxMessageChars": 300 },
+  "content": {
+    "includeDuration": true,           // 时长
+    "includeToolFailureNames": true,   // 工具失败名（关掉只给数量）
+    "includeSessionLabel": true,     // 正文首段：会话名（/name）→ 未命名时用项目目录名
+    "includeCost": true,               // 成本（本次+累计）与上下文占比
+    "includeAssistantExcerpt": false,   // **默认关**：assistant 回复前 10 字，可能带出文件内容/密钥
+    "maxMessageChars": 300
+  },
 
   "delivery": {
     "timeoutMs": 8000,            // 单次投递的总预算（超时算失败）
@@ -147,6 +154,43 @@ pi -e work/scripts/pi/pi-notification/extensions/index.ts
 失败保留原文件、内存态不变，临时文件尽力清理。拒绝把损坏配置的安全降级结果覆盖回原文件。
 Windows 的 POSIX mode 不代表 ACL 隔离，测试仅验证创建/替换不报错。
 `/notify reload` 只重新读盘/校验并更新配置与渠道缓存，不重建扩展/生命周期；坏配置仍按下节降级。
+
+### 通知正文里有什么
+
+正文按“先看是哪个任务，再看结果，最后才是可选信息”的顺序用 ` · ` 拼接，整串仍受 `maxMessageChars` 限制：
+
+```
+[重构登录] · 用时 42.3s · 但 1 个工具失败: bash · 成本 $0.0123（累计 $0.0456） · 上下文 42% · 已修复登录 bug…
+```
+
+首段标识的取值顺序是 **会话名（`/name`）→ 项目目录名（`ctx.cwd` 的 basename）→ 两者都无则整段省略**。
+例：未命名会话在 `…/myflow` 下跑完，首段是 `[myflow]`；`/name 重构登录` 之后变成 `[重构登录]`。
+
+| 字段 | 默认 | 语义 |
+|---|---|---|
+| `includeDuration` | 开 | 本次运行时长 |
+| `includeToolFailureNames` | 开 | 失败工具名；关掉只给“N 个工具失败” |
+| `includeSessionLabel` | 开 | 正文首段 `[标识]`：会话名优先，未命名时回退项目目录名；都无则省略 |
+| `includeCost` | 开 | `成本 <本次>`，有历史运行时附 `（累计 <本实例会话累计>）`；另加 `上下文 <占比>%` |
+| `includeAssistantExcerpt` | **关** | assistant 最终回复的**前 10 个字**（先清洗、再截断；真截断时标 `…`） |
+
+五条边界（都是刻意的）：
+
+1. **拿不到就不写，不猜一个数字**：`provider` 不报 `usage`、金额为 0（本地模型/免费额度）、
+   拿不到 `model.contextWindow` 时，对应片段直接不出。所以**免费模型不会显示“$0.0000”**。
+2. **累计成本是“本实例内存”口径**：同一会话内跨多次运行累加，`/reload` 或换会话后归零
+   （不读 `SessionManager`，不让会话内容进到判定层）。本次与累计相同时只显示一次，避免重复同一个数字。
+3. **上下文占比低于 1% 不显示**（“上下文 0%”是噪声）；占比来自 `ctx.getContextUsage()` 与 `ctx.model.contextWindow`。
+4. **摘录默认关闭且先清洗再截断**：assistant 回复可能包含文件内容、密钥或伪造通知的转义序列，
+   开启后它会被 `sanitize()` 整段删除转义序列并压缩空白，再取前 10 个字。想最保守就保持关闭。
+5. **截断只在真的截断时才动它**：超长时去掉被切在末尾的悬空标点并补 `…`
+   （`已修复登录 bug，改` → `已修复登录 bug…`）；**没超过 10 个字就原样呈现**，
+   不会把模型自己写的完整句号改成截断标记。
+
+> 原本的 `content.includePromptExcerpt`（用户输入摘录）**已删除**：它被校验但无人读取，属于“设了也没效果”的
+> 假开关。需要“这是哪个任务”用 `includeSessionLabel`，需要“这事办完没有”用 `includeAssistantExcerpt`，
+> 两者都不外传用户输入原文。注意首段标识（会话名或**项目目录名**）会随正文发到所有已配渠道，
+> 包括 Webhook——不想让它外传就关掉 `includeSessionLabel`。
 
 ### 配置写错会怎样（重要）
 
@@ -241,6 +285,7 @@ macOS 只走 OSC 777，因此 Apple Terminal 不会显示；原生横幅（`osas
 | `session_compact_failed` | 压缩失败（含手工 `/compact`） | `compact_failed`（error）；`aborted: true` 不发（用户自己取消的） |
 | `ui_prompt_start` | Pi 开始等待用户（`select`/`confirm`/`input`/`editor`） | `waiting_for_user`（默认关闭）；**`custom` 永久排除** |
 | `ui_prompt_end` / `session_shutdown` | 不再等待 | 复位等待状态（强杀时可能收不到 `end`，所以 shutdown 也兜底复位） |
+| `session_info_changed` | `/name` 或恢复会话时 | 刷新正文里的会话名标识（**只读**；日志只记“有没有名字”，不记名字本身） |
 
 两个刻意的取舍，都有实测依据（设计 §18.5 修订 1）：
 
@@ -256,21 +301,19 @@ macOS 只走 OSC 777，因此 Apple Terminal 不会显示；原生横幅（`osas
 **能做**：判定 completed/failed/aborted/unknown（含 `length` → warning）→ 规则映射等级与渠道 →
 门槛/去重/**静默时段/合并窗口/冷却** → 入队 → 在独立任务里投递（终端/系统通知、Webhook）→
 内置超时/重试/熔断/脱敏；工具失败聚合、压缩失败、等待输入；
+正文内容字段（会话名 / 成本本次+累计 / 上下文占比 / assistant 摘录）；
 用户级与项目级配置读盘（含降级）；用户级原子写盘与 TUI 规则向导；
 `/notify status|test|on|off|config|reload`；`--no-notify`；
 `reload` 后旧实例失效、不重复投递；quit 时在 200ms 预算内尽力投递。
 
 **还没做**：
 
-- ❌ 成本/上下文占比（`content.includeCost`）：usage **尚未采集**，所以打开它也不会有效果
 - ❌ macOS 原生横幅（`osascript`）
 - ❌ Telegram / Discord / Slack 等专用渠道（Webhook 已是它们的通用底座）
 - ❌ 通知历史与状态行（`pi.appendEntry` + `registerEntryRenderer`、`ctx.ui.setStatus`；设计列为可选）
 - ❌ 子任务通知（前台 `subagent` 可用 `tool_execution_end` 观察；后台 `async:true` 的完成
   发生在 detached runner 进程里，父进程看不到——设计 §18.5 修订 4 裁定 MVP 不做）
-
-**“接受但不生效”的字段**：`content.includePromptExcerpt` 会被校验但**没有任何代码读它**
-（插件从不外传 prompt 原文，所以它永远是 no-op）；目前保留仅为前向兼容，待决定删除或实现。
+- ❌ 累计成本的跨实例口径（当前是内存累计，`/reload` 后归零；若要持久化得先定语义与清理策略）
 
 ### 覆盖范围的硬边界（实测结论，不是猜测）
 
@@ -306,7 +349,7 @@ macOS 只走 OSC 777，因此 Apple Terminal 不会显示；原生横幅（`osas
 ```bash
 cd work/scripts/pi/pi-notification
 
-MSYS_NO_PATHCONV=1 npm test                       # 全部五套（100 条断言）
+MSYS_NO_PATHCONV=1 npm test                       # 全部五套（105 条断言）
 MSYS_NO_PATHCONV=1 node test/terminal-channel.mjs   # 终端渠道：选择/渲染/注入面/TTY 纪律（不需要 SDK）
 MSYS_NO_PATHCONV=1 node test/service-coalesce.mjs   # 投递服务：门槛/去重/静默/合并/冷却/队列/超时（注入假时钟）
 MSYS_NO_PATHCONV=1 node test/webhook-channel.mjs    # Webhook + 装饰器（回环 HTTP 服务，不出网）
@@ -336,12 +379,14 @@ pi -e work/scripts/pi/pi-notification/extensions/index.ts
 
 Windows 上如果 `auto` 没选中预期机制，可以用 `PI_NOTIFY_CHANNEL=toast` 强制。
 
-M3-3 待人工验收（本轮没有真终端，不把 UI 桩视为肉眼验证）：
-- `/notify test` 看本地通知；OSC 777/99 分别需在支持它们的终端确认。
-- 临时启用 `waitingForUser`，在 TUI 跑一个真实 `confirm` 扩展，确认等待提醒，再恢复配置。
-- 检查 `/notify status` 排版与 `/notify config` 实际按键/取消体验。
+人工验收记录（M3-3 已由维护者跑过，通过）：
+- `/notify test` 的本地通知显示、`/notify status` 排版、`/notify config` 向导的保存/取消按键。
+- `waitingForUser` 打开后，真实 `confirm` 流程的等待提醒与复位。
 
-### 回归断言覆盖什么（100 条）
+M4 之后建议顺手看一眼（不必单独一轮）：正文里会话名、成本与上下文占比是否合口味；
+拿不准就把 `content.includeCost` / `content.includeSessionLabel` 关掉，两者都是纯元数据。
+
+### 回归断言覆盖什么（105 条）
 
 | 组 | 内容 |
 |---|---|
@@ -353,6 +398,7 @@ M3-3 待人工验收（本轮没有真终端，不把 UI 桩视为肉眼验证�
 | 命令（J1–J14） | 原 J1–J4 不变；新增 on/off 真写盘、非法写入不变、临时文件/权限/rename 失败、目录不可写（真实 ENOTDIR）、配置热读及同 id 渠道缓存刷新、静默状态与自检提示、非 TUI/RPC 守卫和凭据隐藏、向导保存/取消、用户与项目/环境层隔离 |
 | 合并/冷却（L0–L2） | 默认参数符合设计、默认配置下 1.5s 内两次运行只发一条（并留 `cooldown_drop`）、`cooldownMs=0` 后恢复每条 |
 | 工具失败/压缩失败/等待输入（K1–K6） | 聚合进结果通知、结果不通知时单独发、immediate 立刻发且并行失败被合并、压缩失败 error（用户取消不发）、真 `select` 触发等待通知、`custom` 排除、`end`/reload 复位等待 |
+| 正文内容字段（R1–R5） | 新字段默认值与更名、已删 no-op 字段不复活（且旧配置不因此降级）+ 新字段类型错仍降级、首段标识的项目名回退/会话名优先/整栏关闭/日志不记名字、摘录默认关闭 + 10 字截断 + `…` 标记 + 悬空标点去除 + 恰好 10 字不补标记 + 换行归一 + 转义序列整段删除（注入面）、成本本次与跨 run 累计 + 关闭后与占比一起消失、上下文占比 42% 显示且 <1% 不显示 |
 | Webhook 端到端（M1–M3） | 真实 POST + HMAC、日志不出现 query/密钥、非法配置降级为 noop 且不发、`§17.3` 反回退（lifecycle/rules 无渠道名、service 不认识 webhook、未注册 `agent_end`） |
 | 真实 CLI（G–N） | 原 G–L 不变；新增 `/notify off` 后新进程零投递（保留实际落盘文件）、非 TUI config 在 stderr 打印路径/值且 stdout 干净 |
 
@@ -420,5 +466,10 @@ extensions/index.ts   薄接线：注册 + 形状转换 + 配置装配；注册 
 - **M3 新增**：`0o600` 在 Windows 上只验证了“创建/替换不报错”（POSIX mode 位不代表 ACL 隔离）；
   仅非 Windows 平台断言了 `mode & 0o777 === 0o600`。
 - **M3 新增**：`/notify reload` 的断言走 SDK 的配置重读路径，真实 TUI 里用同一命令重读的交互未单独验证。
+- **M4 新增**：成本/上下文占比只与**假 provider** 对过（它按测试旋钮汇报 `usage.cost.total`）；
+  真实 provider 是否都提供 `usage.cost.total`、数值是否含缓存读写、与 Pi 自带 `/session` 统计是否一致**未验证**。
+  这也是“拿不到就不写”的其中一个原因。
+- **M4 新增**：`includeAssistantExcerpt` 只验证了截断/清洗/注入面；不同 provider 是否都会在
+  `message_end` 携带 assistant 文本、多轮（带工具调用）时“最后一条非空文本”是否总是用户想看的那句，未用真实 provider 验证。
 - 后台子任务是否在 runner 进程内二次加载本扩展（S0 源码预测会，未实测）。
 - 无 `tsc`（仓库不允许装依赖），所以类型**未经编译器校验**；运行时加载已在 SDK 与真实 CLI 两侧验证。

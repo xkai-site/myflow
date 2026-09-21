@@ -12,6 +12,9 @@
  *  2. `length` 是**完成但被截断**：等级强制抬到 `warning`，标题写明截断（§12.1 第 3 步）。
  *  3. 一个运行**最多一条通知**：`evaluateSettlement` 按「结果 > 聚合的工具失败」取第一个非空，
  *     工具失败名已并入结果通知正文（`content.includeToolFailureNames`）。
+ *
+ * 正文的**内容字段**（§19）：会话名/项目名标识 / 成本 / 上下文占比 / assistant 摘录。
+ * 前三项是元数据，最后一项默认关闭（可能带出文件内容或密钥）。
  */
 
 import { sanitize, sanitizeError } from "./log.ts";
@@ -26,6 +29,22 @@ import type {
 } from "./types.ts";
 
 const LEVEL_RANK: Record<NotifyLevel, number> = { info: 0, warning: 1, error: 2 };
+
+/**
+ * assistant 摘录长度（code point）。**刻意写成常量而非配置项**：
+ * 多一个配置项就多一个“设了没效果”的机会，而 10 个字只够当提示，长度本身不是需要调参的东西。
+ * 真要调长度，正确的触发点是“真打开了它并发现不够”，而不是现在猜一个更大的默认值。
+ */
+export const ASSISTANT_EXCERPT_CHARS = 10;
+
+/** 截断标记：让“被我们截了”与“模型本来就写了半句”可区分。 */
+export const EXCERPT_ELLIPSIS = "…";
+
+/** 首段标识（会话名 / 项目名）的硬上限（避免一个超长名字把正文挤满）。 */
+const IDENTITY_LABEL_CHARS = 40;
+
+/** 上下文占比低于 1% 时不显示：“上下文 0%”是噪声，不是信息。 */
+const MIN_CONTEXT_PERCENT = 1;
 
 /** 取两个等级中更高的那个（`length` → 至少 warning）。 */
 function atLeast(level: NotifyLevel, floor: NotifyLevel): NotifyLevel {
@@ -44,6 +63,46 @@ function formatDuration(ms: number): string {
 
 function joinBody(parts: string[], config: NotificationConfig): string {
   return sanitize(parts.filter((part) => part !== "").join(" · "), config.content.maxMessageChars);
+}
+
+/**
+ * 金额展示。
+ * `provider` 不报 usage（`undefined`）与“报了但是 0”（本地模型/免费额度）都不显示——
+ * 宁可不写，也不要写一个“$0.0000”让用户以为真的免费。
+ */
+function formatUsd(value: number | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return "";
+  // 单次调用常见是「几分之一美分」量级：小额给 4 位，大额给 2 位。
+  const text = value < 1 ? value.toFixed(4) : value.toFixed(2);
+  return Number(text) <= 0 ? "" : `$${text}`;
+}
+
+/**
+ * 正文首段标识：**会话名优先，未命名时回退到项目目录名**。
+ * 绝大多数人从不 `/name`，没有回退的话这一栏对他们永远不出现（等于白做）。
+ * 两者都是展示用元数据；空白/纯控制字符一律视为“没有”。
+ */
+function identityLabel(summary: RunSummary | undefined): string {
+  const clean = (value: string | undefined): string =>
+    typeof value === "string" ? sanitize(value, IDENTITY_LABEL_CHARS) : "";
+  return clean(summary?.sessionName) || clean(summary?.projectName);
+}
+
+/**
+ * assistant 摘录：**先清洗再截断**。
+ * 顺序很重要：消息里经常以换行/缩进开头，先截断会把空白截进摘录里，清洗后反而变空。
+ *
+ * 截断时做两件小事（两者都**只在真的截断时**生效，不干预模型自己写的完整句子）：
+ *  1. 去掉被切在末尾的悬空标点（“已修复登录，改”不该以逗号收尾）；
+ *  2. 补 `…`，让“被截断”与“模型本来就写了半句”可区分。
+ */
+function excerptOf(text: string | undefined): string {
+  if (typeof text !== "string") return "";
+  const points = [...sanitize(text, 200)];
+  if (points.length <= ASSISTANT_EXCERPT_CHARS) return points.join("");
+  const cut = points.slice(0, ASSISTANT_EXCERPT_CHARS).join("").replace(/[\s·,，、;；:：.。,、|丨/\\-]+$/, "");
+  // 极端情况：切出来的全是标点/空白，宁可显示原样也不显示一个只有 `…` 的摘录。
+  return cut === "" ? `${points.slice(0, ASSISTANT_EXCERPT_CHARS).join("")}${EXCERPT_ELLIPSIS}` : `${cut}${EXCERPT_ELLIPSIS}`;
 }
 
 /** 每行统一在此产出，保证 `channels` 是拷贝、`meta` 一定带 sessionId/runId/level。 */
@@ -123,6 +182,11 @@ export function evaluateRunOutcome(
         : "任务已取消";
 
   const parts: string[] = [];
+  // 顺序即阅读优先级：先说“是哪个任务”，再说“结果如何”，最后才是成本与用户可能不想看的回复摘录。
+  if (config.content.includeSessionLabel) {
+    const label = identityLabel(input.summary);
+    if (label !== "") parts.push(`[${label}]`);
+  }
   if (kind === "run_failed" && outcome.errorMessage) {
     parts.push(sanitizeError(outcome.errorMessage, config.content.maxMessageChars));
   }
@@ -131,6 +195,21 @@ export function evaluateRunOutcome(
   }
   const failures = describeToolFailures(outcome.toolFailures, config);
   if (failures !== "") parts.push(kind === "run_completed" ? `但 ${failures}` : failures);
+  if (config.content.includeCost) {
+    const cost = formatUsd(outcome.costUsd);
+    if (cost !== "") {
+      const cumulative = formatUsd(input.summary?.cumulativeCostUsd);
+      parts.push(cumulative === "" || cumulative === cost ? `成本 ${cost}` : `成本 ${cost}（累计 ${cumulative}）`);
+    }
+    const percent = input.summary?.contextPercent;
+    if (typeof percent === "number" && Number.isFinite(percent) && percent >= MIN_CONTEXT_PERCENT) {
+      parts.push(`上下文 ${Math.min(100, Math.round(percent))}%`);
+    }
+  }
+  if (config.content.includeAssistantExcerpt) {
+    const excerpt = excerptOf(outcome.assistantExcerpt);
+    if (excerpt !== "") parts.push(excerpt);
+  }
 
   return request({
     kind,

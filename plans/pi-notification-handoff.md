@@ -4,7 +4,7 @@
 >
 > | 文档 | 用途 |
 > |---|---|
-> | [插件 README](../work/scripts/pi/pi-notification/README.md) | **当前实现状态的权威**：安装、配置、命令、能力与缺口、100 条断言、未验证项 |
+> | [插件 README](../work/scripts/pi/pi-notification/README.md) | **当前实现状态的权威**：安装、配置、命令、能力与缺口、105 条断言、未验证项 |
 > | [设计文档](pi-notification-plugin-design.md)（v1.2） | 架构与设计依据；M3 实现状态已同步（§7/§8/§10/§15） |
 > | [M2 记录](pi-notification-plugin-m2.md) | S4+S6+S7 的历史决策、验收与风险，不代表当前待办 |
 > | 本文件 | 新会话入口、人工验收待办、环境陷阱、实现期发现 |
@@ -15,10 +15,10 @@
 
 ```bash
 cd work/scripts/pi/pi-notification
-MSYS_NO_PATHCONV=1 npm test        # 五套脚本，100 条断言；离线回环、零 LLM、不弹真通知
+MSYS_NO_PATHCONV=1 npm test        # 五套脚本，105 条断言；离线回环、零 LLM、不弹真通知
 ```
 
-最近一次自动化验收：**100 项全绿**（原 76 项语义不变，新增 24 项）；渠道解耦反回退仍绿。
+最近一次自动化验收：**105 项全绿**（原 76 项语义不变；M3 新增 24 项、M4 新增 5 项）；渠道解耦反回退仍绿。
 改任何代码后**必跑**。`MSYS_NO_PATHCONV=1` 是硬约束（见 §3）。
 
 开工前先看 `git status --short` / `git diff`，不要把交接里的历史提交状态当作当前事实；
@@ -26,39 +26,46 @@ MSYS_NO_PATHCONV=1 npm test        # 五套脚本，100 条断言；离线回环
 
 ## 1. 当前状态
 
-**M3-1 / M3-2 开发完成，S5 完整配置面已落地；M3-3 真终端人工验收未完成。**
+**M3-1/M3-2（配置面）与 M4（正文内容字段）已交付；M3-3 真终端人工验收已由维护者执行并通过。**
 
-静默时段、原子写盘、`/notify on|off|config|reload` 和最小 TUI 规则向导均已实现，
-不再是“下一步待开发”。具体语义、能力缺口与测试覆盖以插件 README 为准。
+- M3：静默时段、原子写盘、`/notify on|off|config|reload`、最小 TUI 规则向导。
+- M4（设计 §19）：正文首段标识（会话名 → 未命名时回退**项目目录名**）、成本（本次+累计）、
+  上下文占比、assistant 摘录（默认关，前 10 个字，真截断时标 `…`）；
+  同时删除了“被校验但无人读取”的 `content.includePromptExcerpt`。
+
+具体语义、能力缺口与测试覆盖以插件 README 为准；设计语义以 §10.2 / §15 / §19 为准。
 
 注意区分三类事项：
-- **已开发但待人工验证**：见 §2，不把 SDK UI 桩或协议字节断言当作肉眼验证。
-- **可选后续开发**：见 README「当前能力与缺口」，不自动纳入 M3。
+- **已开发、待人工看**：仅剩 M4 的正文口味（下次真实运行时顺带看，见 §2）。
+- **可选后续开发**：见 README「当前能力与缺口」，不自动纳入本轮。
 - **明确不覆盖的边界**：见 README「覆盖范围的硬边界」与本文件 §7，不视为漏实现。
 
-## 2. 下一步：人工验收与文档收口
+## 2. 下一步
 
-### M3-3 真终端人工验收（尚未执行）
+### M4 内容字段的“顺带一看”（自动化已完成，无需单独一轮）
 
-在独立测试会话加载插件，避免把测试通知发到真实业务 Webhook；修改配置前备份，结束后恢复。
+真实运行一次后看一条通知：
 
-```bash
-pi -e work/scripts/pi/pi-notification/extensions/index.ts
-# 在交互式会话中执行：
-/notify test
-/notify status
-/notify config
+```
+[重构登录] · 用时 42.3s · 但 1 个工具失败: bash · 成本 $0.0123（累计 $0.0456） · 上下文 42% · 已修复登录 bug…
 ```
 
-- [ ] **通知显示**：肉眼确认 `/notify test`。Windows toast 有历史实发确认，
-  但不等于本轮已重验；OSC 777 / OSC 99 仍需分别在支持它们的真实终端验证。
-- [ ] **等待提醒**：临时打开 `waitingForUser`，执行 `/notify reload`，再运行会弹真实 `confirm`
-  的扩展（如 `pi-image-generation` 的确认流程）。确认“轮到你输入”时提醒，关闭对话框后等待状态复位。
-  测试时注意总开关、等级门槛、静默时段和冷却可能影响投递；结束后恢复配置。
-- [ ] **TUI 体验**：检查 `/notify status` 排版；走一次 `/notify config` 保存及取消流程。
-  保存/取消已有自动化覆盖，但真实按键与视觉效果未验收。
+（未 `/name` 的会话首段是项目目录名，如 `[myflow]`；两者都无则整段省略。）
 
-记录终端/系统、渠道机制、操作步骤与实际结果；无法验证的项目继续标为未验证，不勾选完成。
+- [ ] 正文长度与信息量是否合意（不满意就关 `content.includeCost` / `content.includeSessionLabel`，都是纯元数据）。
+- [ ] 真实 provider 下是否出现成本/占比（拿不到就不显示；若有已知计费模型，顺手确认量级）。
+- [ ] 若要开 `includeAssistantExcerpt`，确认它带出的句子可接受（它是 agent 产出，但仍可能含文件内容）。
+
+### 可选后续（随时可做，不属于任何已完成里程碑）
+
+macOS 原生横幅（`osascript`）、Telegram/Discord/Slack 专用渠道、通知历史与状态行、
+累计成本的跨实例口径（当前 `/reload` 后归零）。详见 README「当前能力与缺口」。
+
+### M3-3 人工验收记录（已通过）
+
+已由维护者在真终端执行：`/notify test` 的通知显示、`/notify status` 排版、`/notify config` 向导按键，
+以及 `waitingForUser` 打开后真实 `confirm` 的等待提醒与复位。
+需区分：“显示正常”不等于 OSC 777/99 在**其它终端**上也正常（见 README 的未验证清单）。
 
 ### 文档同步（已完成）
 
@@ -130,6 +137,17 @@ pi -e work/scripts/pi/pi-notification/extensions/index.ts
 10. **UI 模式不能用 `hasUI` 猜**：RPC 下也为真，规则向导只允许 `ctx.mode === "tui"`。
     print/json 下 `ui.notify` 是 no-op，新增配置命令用 stderr 回显，不能污染 stdout。
     `confirm(false)` 不能区分“否”与 Esc，因此向导增加最终保存确认；此前只改副本。
+11. **`session.setSessionName()` 发出的 `session_info_changed` 是 `void emit`（不 await）**：
+    测试里设完名字必须 `await host.drain()` 再断言，否则会话名可能还没进插件状态。
+    同理，日志里**不要记名字本身**，只记“有没有名字”（否则会话名会被写进诊断日志）。
+12. **内容字段的三个采集点**（M4）：成本来自 `message_end` 里 assistant 的 `usage.cost.total`（按 run 累加，
+    同一条消息的 usage 也是 `ctx.getContextUsage()` 的来源）；上下文占比需要 `getContextUsage().tokens`
+    **与** `ctx.model.contextWindow` 两者都拿得到；摘录必须**先 `sanitize()` 再截 10 字**，
+    反过来会把消息开头的换行/缩进截进摘录、清洗后反而变空。截断时再去掉末尾悬空标点并补 `…`，
+    但**只在真的超长时**做——否则会把模型自己写的完整句子变成截断标记。
+    首段标识同理：会话名优先，回退 `basename(ctx.cwd)`，两者都无则整段省略（磁盘根的 basename 是空串）。
+    测试旋钮 `PROBE_ASSISTANT_TEXT` / `PROBE_COST_USD` / `PROBE_CONTEXT_TOKENS` 与 `PROBE_DELAY_MS` 同一套写法：
+    **每次调用时读 env**，用完即清（跨 host 泄漏过一次游标，同类错误不要重犯）。
 
 ## 6. 新增断言放哪里
 
@@ -138,7 +156,7 @@ pi -e work/scripts/pi/pi-notification/extensions/index.ts
 | `test/terminal-channel.mjs` | 渠道机制选择、渲染字节、注入面、TTY 纪律（纯函数 + 注入 IO，不需要 SDK） |
 | `test/service-coalesce.mjs` | 门槛/去重/合并/冷却/静默时段/队列/超时（注入假时钟 + 假渠道；时间测试用固定本地日历时间） |
 | `test/webhook-channel.mjs` | 渠道校验/payload/签名/错误处理 + 可靠性装饰器（回环 HTTP 服务） |
-| `test/host-lifecycle.mjs` | 真实宿主判定、配置读写/热读、命令、TUI 桩、S4/S6/S7；**J5–J14 是 M3 新增覆盖，M3 是既有 §17.3 架构反回退断言名**，勿混淆 |
+| `test/host-lifecycle.mjs` | 真实宿主判定、配置读写/热读、命令、TUI 桩、S4/S6/S7、**正文内容字段（R1–R5）**；**J5–J14 是 M3 新增覆盖，M3 是既有 §17.3 架构反回退断言名**，勿混淆 |
 | `test/cli-smoke.mjs` | 真实进程加载、stdout 纪律、会话静默；M/N 覆盖 off 跨进程持久化及非 TUI config 的 stderr 输出 |
 
 完整断言表只维护在插件 README；旧断言不得随意改语义。

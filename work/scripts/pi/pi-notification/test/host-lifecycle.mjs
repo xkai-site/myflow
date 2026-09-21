@@ -136,6 +136,14 @@ function cursor(reader) {
 const events = (list) => list.map((row) => row.ev);
 const deliveries = (list) => list.filter((row) => row.event === "delivery");
 
+/** 从 OSC 777 原始序列里取出 body（正文内容字段的断言用）。 */
+const OSC777_HEAD = new RegExp("^\\u001b\\]777;notify;");
+const OSC777_TAIL = new RegExp("\\u0007$");
+function oscBody(sequence) {
+  const inner = sequence.replace(OSC777_HEAD, "").replace(OSC777_TAIL, "");
+  return inner.includes(";") ? inner.slice(inner.indexOf(";") + 1) : "";
+}
+
 /**
  * 等异步投递落地。
  *
@@ -996,6 +1004,156 @@ await step("J14 保存不固化项目/环境覆盖；reload 保持信任边界",
   assert.equal((await host.prompt()).deliveries.length, 0); // 项目门槛
   await host.dispose();
 });
+
+// ---------------------------------------------------------------------------
+// Host：内容字段（M4 / 设计 §19）—— 会话名 / 成本 / 上下文占比 / assistant 摘录
+// ---------------------------------------------------------------------------
+
+const CONTENT_CONFIG = {
+  version: 1,
+  coalesce: { windowMs: 0, cooldownMs: 0 },
+  content: { includeAssistantExcerpt: true },
+};
+
+const contentHost = await makeHost({
+  label: "content",
+  extensions: [PROBE_ENTRY, PLUGIN_ENTRY],
+  userConfig: CONTENT_CONFIG,
+});
+await contentHost.useModel("probe-fake", "fake-model");
+
+/** 每个内容字段断言都要控制假 provider 的输出，用完必清（否则会泄漏到后面的 host）。 */
+async function withEnv(values, run) {
+  const saved = new Map();
+  for (const [key, value] of Object.entries(values)) {
+    saved.set(key, process.env[key]);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return await run();
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+/** 跑一次成功运行，返回该次终端通知的正文。 */
+async function runBody(toolFailures = []) {
+  const delta = toolFailures.length > 0
+    ? await contentHost.promptWithToolFailures(toolFailures)
+    : await contentHost.prompt("hi");
+  assert.equal(delta.osc.osc777.length, 1, `应恰好写出 1 条终端通知，实际 ${delta.osc.osc777.length} 条`);
+  return oscBody(delta.osc.osc777[0]);
+}
+
+await step("R1 内容字段默认值与字段替换：no-op 字段已删，新字段仍严格校验", () => {
+  const content = configModule.defaultConfig().content;
+  assert.equal(content.includeSessionLabel, true);
+  assert.equal(content.includeAssistantExcerpt, false);
+  assert.equal(content.includeCost, true);
+  assert.ok(!("includeSessionName" in content), "首段标识已更名为 includeSessionLabel（语义含项目目录名回退）");
+  assert.ok(!("includePromptExcerpt" in content), "已删除的 no-op 字段不得复活（它会静默失效）");
+  // 旧配置里残留这个字段：不再是“有效字段”，但也不该因为一个已删字段而整份降级。
+  assert.deepEqual(
+    configModule.mergeConfig(configModule.defaultConfig(), { version: 1, content: { includePromptExcerpt: true } }, "test").errors,
+    [],
+  );
+  // 新字段的类型错误必须照旧降级（严格校验不得因为新增字段而放松）。
+  for (const content of [{ includeAssistantExcerpt: "yes" }, { includeSessionLabel: 1 }, { includeCost: null }]) {
+    assert.ok(configModule.mergeConfig(configModule.defaultConfig(), { content }, "test").errors.length > 0, JSON.stringify(content));
+  }
+});
+
+await step("R2 首段标识：未命名时回退项目目录名，`/name` 后会话名优先，可整栏关闭", async () => {
+  // 本 host 的 cwd 是 TMP/content，所以未命名时应回退成 [content]。
+  const fallback = await runBody();
+  assert.ok(fallback.startsWith(`[${contentHost.label}]`), `未命名时应回退到项目目录名: ${fallback}`);
+
+  contentHost.session.setSessionName("重构登录");
+  await contentHost.drain(); // `session_info_changed` 是 void 发出的，先等 handler 落盘
+  assert.ok(await runBody().then((body) => body.startsWith("[重构登录]")), "会话名应优先于项目目录名");
+  const changed = findBy(readJsonl(contentHost.pluginFile), (row) => row.event === "session_name_changed", "session_name_changed");
+  assert.equal(changed.hasName, true);
+  assert.ok(!JSON.stringify(changed).includes("重构登录"), "日志不得记下会话名本身");
+
+  // 两个来源都不想要时，整栏关掉。
+  contentHost.writeUserConfig({ ...CONTENT_CONFIG, content: { includeAssistantExcerpt: true, includeSessionLabel: false } });
+  await contentHost.command("/notify reload");
+  const off = await runBody();
+  assert.ok(!off.startsWith("["), `关掉 includeSessionLabel 后不该再有标识: ${off}`);
+  contentHost.writeUserConfig(CONTENT_CONFIG);
+  await contentHost.command("/notify reload");
+});
+
+await step("R3 assistant 摘录：默认关闭；开启后 10 字截断 + 截断标记 + 悬空标点去除", async () => {
+  // 默认关闭：用 M3 的 `/notify reload` 换成不含该字段的配置，而不是另建 host。
+  contentHost.writeUserConfig({ version: 1, coalesce: { windowMs: 0, cooldownMs: 0 } });
+  await contentHost.command("/notify reload");
+  await withEnv({ PROBE_ASSISTANT_TEXT: "0123456789ABCDEF" }, async () => {
+    assert.ok(!(await runBody()).includes("0123456789"), "摘录默认关闭，绝不能因为消息里存在模型回复就带出去");
+  });
+
+  contentHost.writeUserConfig(CONTENT_CONFIG);
+  await contentHost.command("/notify reload");
+  await withEnv({ PROBE_ASSISTANT_TEXT: "0123456789ABCDEF" }, async () => {
+    const body = await runBody();
+    assert.ok(body.includes("0123456789…"), `应带出前 10 个字符并标出截断: ${body}`);
+    assert.ok(!body.includes("0123456789A"), `摘录超过 10 个字符: ${body}`);
+  });
+  // 恰好 10 字：没有截断，就不该补 `…`（不能把模型的完整句子说成被截断）。
+  await withEnv({ PROBE_ASSISTANT_TEXT: "0123456789" }, async () => {
+    const body = await runBody();
+    assert.ok(body.includes("0123456789") && !body.includes("…"), `完整短句不该补截断标记: ${body}`);
+  });
+  // 悬空标点：第 10 个字符恰好是标点时要去掉（“已修复，改”这种尾巴读起来像坏了）。
+  await withEnv({ PROBE_ASSISTANT_TEXT: "abcdefghi。后面还有更多内容" }, async () => {
+    const body = await runBody();
+    assert.ok(body.includes("abcdefghi…"), `截断处的悬空标点应去掉: ${body}`);
+  });
+  await withEnv({ PROBE_ASSISTANT_TEXT: "a\nb" }, async () => {
+    assert.ok((await runBody()).includes("a b"), "换行应归一为空格（否则会撑破单行通知）");
+  });
+  // 注入面：模型回复可能包含伪造通知的序列，摘录必须先经 sanitize 再入正文。
+  await withEnv({ PROBE_ASSISTANT_TEXT: "x\u001b]777;notify;evil\u0007y" }, async () => {
+    const body = await runBody();
+    assert.ok(body.includes("xy"), `转义序列应整段删除（含载荷）: ${JSON.stringify(body)}`);
+    assert.ok(!body.includes("evil"), "摘录里不得出现转义序列的载荷");
+  });
+});
+
+await step("R4 成本：本次 + 会话累计；includeCost=false 时两者一起消失", async () => {
+  await withEnv({ PROBE_COST_USD: "0.0123" }, async () => {
+    // 第一次运行：本次与累计相同，只显示一次（避免“累计”重复同一数字）。
+    const first = await runBody();
+    assert.ok(first.includes("成本 $0.0123"), `缺少本次成本: ${first}`);
+    assert.ok(!first.includes("累计"), `首次运行不该重复累计值: ${first}`);
+    // 第二次运行：累计跨 run 累加（同一实例会话内）。
+    const second = await runBody();
+    assert.ok(second.includes("成本 $0.0123（累计 $0.0246）"), `累计口径不对: ${second}`);
+  });
+  // 关闭后成本与上下文占比一起消失（同一开关管两个字段）。
+  contentHost.writeUserConfig({ ...CONTENT_CONFIG, content: { includeAssistantExcerpt: true, includeCost: false } });
+  await contentHost.command("/notify reload");
+  await withEnv({ PROBE_COST_USD: "0.0123", PROBE_CONTEXT_TOKENS: "42000" }, async () => {
+    const body = await runBody();
+    assert.ok(!body.includes("成本") && !body.includes("上下文"), `关闭 includeCost 后仍有成本信息: ${body}`);
+  });
+  contentHost.writeUserConfig(CONTENT_CONFIG);
+  await contentHost.command("/notify reload");
+});
+
+await step("R5 上下文占比：拿得到才算，低于 1% 不显示", async () => {
+  await withEnv({ PROBE_CONTEXT_TOKENS: "42000" }, async () => {
+    assert.ok((await runBody()).includes("上下文 42%"), "应显示与 model.contextWindow 换比例后的百分比");
+  });
+  const tiny = await runBody(); // 默认 input=1 token / window=100000 → 0%，属于噪声
+  assert.ok(!tiny.includes("上下文"), `低于 1% 时不该显示“上下文 0%”: ${tiny}`);
+});
+
+await contentHost.dispose();
 
 // ---------------------------------------------------------------------------
 // Host 8：S4 合并窗口 / 冷却 —— 默认值在真实宿主下真的生效

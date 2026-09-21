@@ -114,6 +114,10 @@ export interface RunOutcome {
   errorMessage?: string;
   toolFailures: ToolFailure[];
   compactFailed?: boolean;
+  /** 本 run 内 assistant usage 的成本累计；provider 不报 usage 时 undefined */
+  costUsd?: number;
+  /** 最后一条 assistant 文本的前若干字符（已由 index 限长与去空，尚未清洗） */
+  assistantExcerpt?: string;
 }
 
 /** 一次失败的 `tool_execution_end` 累积结果（lifecycle 产出，rules 消费）。 */
@@ -131,7 +135,12 @@ export interface RunSummary {
   runStatus: RunStatus;
   durationMs: number;
   toolFailures: ToolFailure[];
-  costUsd?: number;
+  /** 会话名（`/name`）；未命名时 undefined */
+  sessionName?: string;
+  /** 项目目录名（`ctx.cwd` 的 basename）；用作会话名缺失时的降级标识 */
+  projectName?: string;
+  /** 本实例内该会话的累计成本（`/reload` 或换会话后重置） */
+  cumulativeCostUsd?: number;
   contextPercent?: number;
 }
 
@@ -303,7 +312,12 @@ export interface NotificationConfig {
   content: {
     includeDuration: boolean;
     includeToolFailureNames: boolean;
-    includePromptExcerpt: boolean;
+    /** 正文首段标识：会话名优先，未命名时回退到项目目录名；两者都无则省略 */
+    includeSessionLabel: boolean;
+    /** assistant 最终回复的前若干字符（默认关闭：可能带出文件内容/密钥） */
+    includeAssistantExcerpt: boolean;
+    /** 成本（本次 + 会话累计）与上下文占比 */
+    includeCost: boolean;
     maxMessageChars: number;
   };
   delivery: {

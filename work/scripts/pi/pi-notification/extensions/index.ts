@@ -23,6 +23,7 @@ import {
   type ExtensionCommandContext,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { basename } from "node:path";
 
 import { handleNotifyCommand } from "../src/commands.ts";
 import {
@@ -45,7 +46,7 @@ import {
   evaluateWaitingForUser,
 } from "../src/rules.ts";
 import { createService } from "../src/service.ts";
-import type { AssistantStopReason, Notifier, NotificationConfig, UIPromptKind } from "../src/types.ts";
+import type { AssistantStopReason, Notifier, NotificationConfig, RunSummary, UIPromptKind } from "../src/types.ts";
 
 /** 实例标识：保证 reload 后新旧实例的 runId / 去重键不冲突。 */
 const INSTANCE_TOKEN = Math.random().toString(36).slice(2, 8);
@@ -55,6 +56,37 @@ function isAssistantStopReason(value: unknown): value is AssistantStopReason {
     value === "pending" || value === "stop" || value === "length" || value === "toolUse"
     || value === "error" || value === "aborted" || value === "deferred"
   );
+}
+
+/**
+ * 只保留文本片段、最多 200 个 code point 的 assistant 回复样本。
+ * 展示长度（§19 的 10 个字）由 `rules` 决定；这里限长只是**不让运行期状态无界增长**。
+ */
+function assistantText(content: unknown): string | undefined {
+  if (!Array.isArray(content)) return undefined;
+  const parts: string[] = [];
+  for (const part of content) {
+    if ((part as { type?: unknown })?.type !== "text") continue;
+    const text = (part as { text?: unknown }).text;
+    if (typeof text === "string" && text !== "") parts.push(text);
+  }
+  const joined = parts.join(" ").trim();
+  return joined === "" ? undefined : [...joined].slice(0, 200).join("");
+}
+
+/**
+ * 上下文占比：`getContextUsage()` 与 `model.contextWindow` 都拿得到才算，拿不到就省略——
+ * 不猜一个数字出来（本地模型/未知模型没有可靠的窗口大小）。
+ */
+function contextPercentOf(ctx: ExtensionContext): number | undefined {
+  try {
+    const used = ctx.getContextUsage()?.tokens;
+    const window = ctx.model?.contextWindow;
+    if (typeof used !== "number" || !Number.isFinite(used) || typeof window !== "number" || window <= 0) return undefined;
+    return Math.max(0, Math.round((used / window) * 100));
+  } catch {
+    return undefined;
+  }
 }
 
 /** `ui_prompt_*` 的 kind（只接受已知值，避免把未知字符串写进白名单比较）。 */
@@ -116,6 +148,13 @@ export default function piNotification(pi: ExtensionAPI): void {
   });
 
   let currentSessionId: string | undefined;
+  /**
+   * 会话名（`/name`）：只作正文标识。
+   * `session_start` 时从 `pi.getSessionName()` 取初值，之后跟随 `session_info_changed`。
+   */
+  let sessionName: string | undefined;
+  /** 项目目录名：会话名缺失时作为降级标识（`ctx.cwd` 的 basename）。 */
+  let projectName: string | undefined;
   /** 让 `/compact`、`ui_prompt` 这类「没有 run 上下文」的通知也有稳定去重键（与 run 键隔离）。 */
   let promptSeq = 0;
   let compactSeq = 0;
@@ -237,6 +276,17 @@ export default function piNotification(pi: ExtensionAPI): void {
       const sessionId = sessionIdOf(ctx) ?? "unknown";
       currentSessionId = sessionId;
       lifecycle.onSessionStart({ sessionId, reason: event.reason });
+      try {
+        sessionName = pi.getSessionName() || undefined;
+      } catch {
+        sessionName = undefined; // 取不到就当未命名，不影响其它能力
+      }
+      try {
+        // 磁盘根目录的 basename 是空串，会被 rules 当作“没有”，不会产出空方括号。
+        projectName = basename(ctx.cwd) || undefined;
+      } catch {
+        projectName = undefined;
+      }
 
       // 项目级配置只在项目被信任时读（§10.1 / §13 第 7 项）。
       reloadConfig(ctx, `session_start:${event.reason}`);
@@ -273,15 +323,33 @@ export default function piNotification(pi: ExtensionAPI): void {
   // 否则会进入消息替换链（§1.3 / §13 第 17 项）。
   pi.on("message_end", (event, ctx) => {
     guard("message_end", () => {
-      const message = event.message as { role?: string; stopReason?: unknown; errorMessage?: unknown };
+      const message = event.message as {
+        role?: string;
+        stopReason?: unknown;
+        errorMessage?: unknown;
+        content?: unknown;
+        usage?: { cost?: { total?: unknown } };
+      };
       if (message?.role !== "assistant") return;
       const sessionId = sessionIdOf(ctx);
       if (!sessionId) return;
+      const text = assistantText(message.content);
       lifecycle.onAssistantMessage({
         sessionId,
         stopReason: isAssistantStopReason(message.stopReason) ? message.stopReason : undefined,
         ...(typeof message.errorMessage === "string" ? { errorMessage: message.errorMessage } : {}),
+        ...(typeof message.usage?.cost?.total === "number" ? { usageCostUsd: message.usage.cost.total } : {}),
+        ...(text !== undefined ? { text } : {}),
       });
+    });
+  });
+
+  // 只读：会话名变化时刷新正文标识（`/name`）。**不记名字本身**，只记“有没有名字”。
+  pi.on("session_info_changed", (event) => {
+    guard("session_info_changed", () => {
+      const name = typeof event.name === "string" && event.name.trim() !== "" ? event.name : undefined;
+      sessionName = name;
+      log.record({ event: "session_name_changed", hasName: name !== undefined });
     });
   });
 
@@ -397,8 +465,19 @@ export default function piNotification(pi: ExtensionAPI): void {
       }
       const outcome = lifecycle.onSettled({ sessionId, isIdle });
       if (!outcome) return;
+      // 会话级元数据在这里组装（rules 是纯函数：不读 ctx、也不读时钟）。
+      const percent = contextPercentOf(ctx);
+      const summary: RunSummary = {
+        runStatus: outcome.status,
+        durationMs: outcome.durationMs,
+        toolFailures: outcome.toolFailures,
+        ...(sessionName !== undefined ? { sessionName } : {}),
+        ...(projectName !== undefined ? { projectName } : {}),
+        cumulativeCostUsd: lifecycle.sessionCostUsd(),
+        ...(percent !== undefined ? { contextPercent: percent } : {}),
+      };
       // 一个运行最多一条：「结果通知」优先，聚合的工具失败只在没有结果时兜底（§12.1 第 4 步）。
-      const request = evaluateSettlement({ outcome }, config);
+      const request = evaluateSettlement({ outcome, summary }, config);
       if (!request) return;
       service.submit(request); // 同步入队，立即返回
     });
