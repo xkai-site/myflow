@@ -1,9 +1,11 @@
 /**
- * 终端渠道（S3）专项回归：机制选择、渲染字节、注入面、TTY 纪律。
+ * Terminal channel regression: mechanism selection, rendered bytes, injection surface and
+ * stdout discipline.
  *
- * 这个文件**不需要 SDK**：`terminal.ts` 的选择/渲染都是纯函数，IO 可注入，
- * 因此可以在任何环境下快速、确定性地验证整套安全属性。
- * （真实通知是否在终端里显示，取决于终端模拟器，只能人工确认。）
+ * Needs no SDK: selection and rendering in `terminal.ts` are pure functions with injectable IO,
+ * so the whole security surface is verified quickly and deterministically anywhere.
+ * Whether a notification is actually displayed depends on the terminal emulator and can only be
+ * confirmed by hand.
  *
  *   MSYS_NO_PATHCONV=1 node test/terminal-channel.mjs
  */
@@ -34,7 +36,7 @@ const env = (overrides = {}) => ({
   ...overrides,
 });
 
-/** 恶意/异常载荷：都不得让渲染结果多出 ESC / BEL，也不得进入 toast 脚本或 argv。 */
+/** Hostile or malformed payloads: none may add ESC/BEL to the rendered output or reach the toast script or argv. */
 const HOSTILE = [
   "\u001b]777;notify;hack\u0007",
   "a\u0007b",
@@ -72,9 +74,9 @@ await step("机制选择表：kitty→OSC99 / win32→toast / 其它 TTY→OSC77
   assert.equal(pick({ env: { TERM_PROGRAM: "kitty" } }), "osc99");
   assert.equal(pick({ platform: "win32" }), "toast");
   assert.equal(pick({ platform: "win32", env: { WT_SESSION: "abc" } }), "toast");
-  // kitty 优先级高于 win32（kitty 会渲染 OSC 99，比 toast 更贴近终端）
+  // Kitty outranks win32: it renders OSC 99, which stays inside the terminal.
   assert.equal(pick({ platform: "win32", env: { KITTY_WINDOW_ID: "1" } }), "osc99");
-  // 硬纪律：非 TTY（`pi -p` / `--mode json` / 重定向）一个字节都不许写
+  // Hard rule: without a TTY (`pi -p`, `--mode json`, redirected output) not a single byte is written.
   assert.equal(pick({ stdoutIsTTY: false }), "none");
   assert.equal(pick({ platform: "win32", stdoutIsTTY: false }), "none");
   assert.equal(pick({ env: { WT_SESSION: "abc" }, stdoutIsTTY: false }), "none");
@@ -89,10 +91,10 @@ await step("PI_NOTIFY_CHANNEL 覆盖：off 全局静默、显式机制优先，�
   assert.equal(pick({ env: { PI_NOTIFY_CHANNEL: "OSC99" } }), "osc99");
   assert.equal(pick({ platform: "win32", env: { PI_NOTIFY_CHANNEL: "osc777" } }), "osc777");
   assert.equal(pick({ env: { PI_NOTIFY_CHANNEL: "toast" } }), "toast");
-  // 写 stdout 的机制受 TTY 约束（否则会污染调用方拿到的输出）
+  // Mechanisms that write to stdout are gated on a TTY, otherwise the caller's data is corrupted.
   assert.equal(pick({ env: { PI_NOTIFY_CHANNEL: "osc777" }, stdoutIsTTY: false }), "none");
   assert.equal(pick({ env: { PI_NOTIFY_CHANNEL: "osc99" }, stdoutIsTTY: false }), "none");
-  // toast 不碰 stdout，所以显式指定时不受 TTY 限制（auto 仍然受限）
+  // A toast never touches stdout, so an explicit request skips the TTY gate (`auto` still needs it).
   assert.equal(pick({ env: { PI_NOTIFY_CHANNEL: "toast" }, platform: "win32", stdoutIsTTY: false }), "toast");
   assert.equal(pick({ platform: "win32", stdoutIsTTY: false }), "none");
 });
@@ -122,12 +124,12 @@ await step("注入面：载荷不能让通知提前终止或夹带新序列", ()
     assert.equal((osc99.match(/\u001b/g) ?? []).length, 4, `OSC99 出现额外 ESC: ${JSON.stringify(hostile)}`);
 
     for (const text of [osc777, osc99]) {
-      // 除我们自己的引入符外，不得出现任何 C0/C1 控制字符
+      // Apart from our own introducers, no C0/C1 control character may appear.
       const body = text.replace(/[\u001b\u0007]/g, "").replace(/\\/g, "");
       assert.doesNotMatch(body, /[\u0000-\u001f\u007f-\u009f]/, `残留控制字符: ${JSON.stringify(hostile)}`);
     }
   }
-  // OSC 载荷被整段删除，不会变成可见正文（伪造通知的素材）
+  // The OSC payload is removed as a whole, so it cannot become visible text used to forge a notification.
   assert.ok(!terminal.renderOsc777("\u001b]777;notify;hack\u0007", "").includes("hack"));
 });
 
@@ -215,7 +217,8 @@ await step("长文案截断：以 maxMessageChars 为界，且不切断代理对
   const body = writes[0];
   assert.ok(body.includes("…"));
   assert.ok([...body].length < 120, `未截断: ${[...body].length}`);
-  // 用 for...of（按码位迭代）判孤立代理对；正则字符类会逐 UTF-16 单元匹配，判不准。
+  // `for...of` iterates code points, which is what detecting a lone surrogate needs; a regex
+  // character class matches per UTF-16 unit and gets it wrong.
   for (const ch of body) {
     const code = ch.codePointAt(0) ?? 0;
     assert.ok(code < 0xd800 || code > 0xdfff, `孤立代理对: 0x${code.toString(16)}`);

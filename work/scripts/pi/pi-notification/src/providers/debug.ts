@@ -1,13 +1,10 @@
 /**
- * S1 的占位渠道：把通知渲染成**一行清洗后的纯文本**写进 logger。
+ * Diagnostic channel: renders a notification as one sanitized plain-text line in
+ * the logger instead of touching the terminal or the network.
  *
- * 它是「进程内无依赖渠道」这一类的第一个实例，用来把 S1 的判定链路打通并可观测。
- * S3 会新增 `terminal.ts`（OSC 777 / OSC 99 / Windows toast）实现同一个 `Notifier` 接口，
- * 并把默认配置的 provider 从 `debug` 换成 `terminal`；`lifecycle`/`rules`/`service` 不改一行。
- *
- * 刻意不做的事（避免与 S3 重复）：
- *  - 不写 OSC 序列（那需要终端能力探测与平台分支）
- *  - 不自行重试、不自行加超时（由 `service`/`decorators` 负责）
+ * It deliberately does not emit escape sequences (that needs terminal capability
+ * detection and platform branches) and does not retry or apply its own timeout:
+ * the service and the reliability decorators own both.
  */
 
 import { sanitize } from "../log.ts";
@@ -15,7 +12,7 @@ import type { Logger, Notifier, NotificationRequest } from "../types.ts";
 
 export interface DebugNotifierOptions {
   log: Logger;
-  /** 正文最大字符数（来自 config.content.maxMessageChars） */
+  /** Body length cap, taken from `config.content.maxMessageChars`. */
   maxChars: number;
 }
 

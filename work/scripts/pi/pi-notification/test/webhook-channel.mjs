@@ -1,8 +1,9 @@
 /**
- * S7 专项回归：Webhook 渠道 + 可靠性装饰器（设计 §17.1 P2 / §17.4 / §13 第 1、2、16 项）。
+ * Webhook channel plus reliability decorators regression.
  *
- * 不需要 SDK：渠道只依赖 Node 内置 `fetch`，所以用一个**回环地址**上的真实 HTTP 服务做端到端断言
- * （不经任何外部网络、不依赖互联网）。回环之外的 fetch 一律被陷阱拦下并让本次回归失败。
+ * Needs no SDK: the channel only uses Node's built-in `fetch`, so an end-to-end assertion runs
+ * against a real HTTP server on the loopback address, without any external network. Every fetch
+ * outside loopback hits a trap that fails this regression.
  *
  *   MSYS_NO_PATHCONV=1 node test/webhook-channel.mjs
  */
@@ -17,7 +18,7 @@ const PLUGIN_DIR = fileURLToPath(new URL("..", import.meta.url));
 const webhook = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "providers", "webhook.ts")).href);
 const decorators = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "providers", "decorators.ts")).href);
 
-// 外部网络陷阱：只允许回环地址（证明「离线」不是靠运气）
+// Outbound network trap: only loopback is allowed, so "offline" is enforced instead of assumed.
 const externalAttempts = [];
 const realFetch = globalThis.fetch;
 const LOOPBACK_RE = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/;
@@ -41,7 +42,7 @@ async function step(name, run) {
 }
 
 // ---------------------------------------------------------------------------
-// 回环 HTTP 服务：按路径决定响应
+// Loopback HTTP server; the request path selects the response.
 // ---------------------------------------------------------------------------
 
 const received = [];
@@ -59,7 +60,7 @@ const server = http.createServer((req, res) => {
     }
     if (req.url.startsWith("/boom")) {
       res.writeHead(500, { "content-type": "text/plain" });
-      // 故意带上一个看起来像凭据的串：错误消息必须被脱敏
+      // Deliberately echoes something credential-shaped: the error message has to be redacted.
       res.end("internal error apiKey=sk-abcdefgh12345678");
       return;
     }
@@ -110,7 +111,7 @@ await step("validate：URL 合法性与「只存环境变量名」都被严格�
   assert.match(validate({ url: "https://example.invalid/hook", secretEnv: "not-a-name" }), /合法的环境变量名/);
   assert.match(validate({ url: "https://example.invalid/hook", headers: { "x-a": "1\n2" } }), /换行/);
   assert.match(validate({ url: "https://example.invalid/hook", headers: { "x-a": 1 } }), /必须是字符串/);
-  // 真实的 secret 环境变量存在时通过；且**从不**校验 / 记录明文
+  // Passes when the secret environment variable exists, and never validates or records the value itself.
   assert.equal(validate({ url: "https://example.invalid/hook", secretEnv: "PI_NOTIFY_UNIT_SECRET" }), undefined);
 });
 
@@ -199,7 +200,7 @@ await step("withRetry：有界重试 + 指数退避，失败尝试留痕", async
   assert.equal(attempts, 3);
   assert.equal(log.records.filter((row) => row.event === "delivery_retry").length, 2);
 
-  // 重试次数用完仍然失败：错误是最后一次的
+  // Still failing after the retries are exhausted: the error is the last attempt's.
   attempts = 0;
   const alwaysFails = { ...flaky, async send() { attempts += 1; throw new Error("始终失败"); } };
   await assert.rejects(
@@ -256,20 +257,20 @@ await step("withCircuitBreaker：连续 N 次失败后熔断、冷却后半开�
   assert.equal(calls, 2);
   assert.equal(log.records.filter((row) => row.event === "circuit_open").length, 1, "达到阈值应开熔断");
 
-  // 熔断期间：即使渠道已经恢复也不能调用它（快速失败）
+  // While open, the breaker must fail fast even if the channel itself has recovered.
   fail = false;
   await assert.rejects(breaker.send(request(), new AbortController().signal), /熔断/);
   assert.equal(calls, 2, "熔断期间不应真的调用渠道");
   assert.equal(log.records.filter((row) => row.event === "circuit_open_skip").length, 1);
 
-  // 冷却结束 → 半开：放行一次，成功即复位
+  // After the cooldown the breaker is half-open: one attempt is let through and success resets it.
   nowMs = 2000;
   await breaker.send(request(), new AbortController().signal);
   assert.equal(calls, 3);
   await breaker.send(request(), new AbortController().signal);
   assert.equal(calls, 4, "成功后应完全恢复");
 
-  // failures<=0 表示关闭熔断
+  // failures <= 0 disables the breaker.
   const off = decorators.withCircuitBreaker(inner, { failures: 0 });
   fail = true;
   for (let i = 0; i < 5; i += 1) {
@@ -297,7 +298,7 @@ await step("withTimeout：内层无视 signal 也会被自己的 deadline 打断
     /超时（50ms）/,
   );
   assert.ok(Date.now() - startedAt < 1500, "超时没有及时生效");
-  // timeoutMs<=0 表示不额外加 deadline（只跟随外层 signal）
+  // timeoutMs <= 0 adds no deadline of its own and follows only the outer signal.
   await decorators.withTimeout(
     { ...hanging, async send() {} },
     { timeoutMs: 0 },
@@ -336,7 +337,7 @@ await step("withReliability：每次尝试有自己的 deadline，重试才真�
       calls += 1;
       const delay = calls === 1 ? 200 : 1;
       if (delay > 100) {
-        // 第一次尝试会被单次 deadline 打断
+        // The first attempt is cut short by its own deadline.
         await new Promise((resolve) => {
           const timer = setTimeout(resolve, delay);
           signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
@@ -359,7 +360,7 @@ await step("withReliability：每次尝试有自己的 deadline，重试才真�
   await stack.send(request(), new AbortController().signal);
   assert.equal(calls, 2, "第一次尝试应被单次 deadline 打断，然后重试成功");
   assert.equal(log.records.filter((row) => row.event === "delivery_retry").length, 1);
-  // 熔断在重试之外：一次投递彻底失败只计一次
+  // The breaker sits outside the retry, so one fully failed delivery counts as one failure.
   assert.equal(log.records.filter((row) => row.event === "circuit_open").length, 0);
 });
 

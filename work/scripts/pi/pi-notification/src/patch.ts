@@ -1,21 +1,26 @@
 /**
- * 稀疏补丁工具（出厂/用户/会话三层值的公共底座）。
+ * Sparse patch helpers shared by all three config layers.
  *
- * 三个使用方：
- *  - `config.ts`：把 Ctrl+S 的单字段补丁合并进用户文件原文（稀疏写盘）。
- *  - `settings.ts`：会话覆盖（overlay）与配置项路径读写。
- *  - 测试：直接驱动路径读写，不必构造整套配置。
+ * Used by `config.ts` (merging a single Ctrl+S field into the raw user file),
+ * by `settings.ts` (session overlay and per-setting path access) and by tests.
  *
- * 语义刻意的：**数组整体替换**（数组就是一个字段的值），普通对象逐字段深合并。
+ * Semantics are deliberate: arrays are replaced as a whole value while plain
+ * objects merge field by field.
  */
 
 export type ConfigPatch = Record<string, unknown>;
+
+/**
+ * Keys whose assignment would replace the prototype of the target object instead of storing a value.
+ * A configuration patch never needs them, so they are dropped.
+ */
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 export function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** 取嵌套字段；任一层不存在返回 undefined。 */
+/** Reads a nested field; returns undefined as soon as a level is missing. */
 export function getPathValue(source: unknown, path: string): unknown {
   let cursor: unknown = source;
   for (const key of path.split(".")) {
@@ -25,7 +30,7 @@ export function getPathValue(source: unknown, path: string): unknown {
   return cursor;
 }
 
-/** 路径是否在对象里**显式存在**（用于识别「用户从未保存过这一项」）。 */
+/** True when the path exists as an own property; used to detect "never saved by the user". */
 export function hasPath(source: unknown, path: string): boolean {
   let cursor: unknown = source;
   for (const key of path.split(".")) {
@@ -35,7 +40,7 @@ export function hasPath(source: unknown, path: string): boolean {
   return true;
 }
 
-/** 逐层写路径，返回新的补丁对象（不修改入参）。 */
+/** Writes one path level by level and returns a new patch object; the input is left untouched. */
 export function setPatchPath(patch: ConfigPatch, path: string, value: unknown): ConfigPatch {
   const keys = path.split(".");
   const root: ConfigPatch = { ...patch };
@@ -50,11 +55,14 @@ export function setPatchPath(patch: ConfigPatch, path: string, value: unknown): 
   return root;
 }
 
-/** 深合并：普通对象递归，数组与标量整体替换。 */
+/** Deep merge: plain objects recurse, arrays and scalars are replaced. */
 export function mergePatch<T>(base: T, patch: unknown): T {
   if (!isPlainObject(patch)) return (isPlainObject(base) ? base : patch) as T;
   const result: Record<string, unknown> = isPlainObject(base) ? { ...base } : {};
   for (const [key, value] of Object.entries(patch)) {
+    // Assigning `__proto__` would swap the prototype of the merged object, letting a file inject
+    // properties that were never validated; the key is dropped instead of written.
+    if (UNSAFE_KEYS.has(key)) continue;
     const current = result[key];
     result[key] = isPlainObject(value) && isPlainObject(current) ? mergePatch(current, value) : structuredClone(value);
   }

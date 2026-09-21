@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { mkdtemp, mkdir, readdir, readFile, writeFile, rm } from "node:fs/promises";
@@ -6,7 +7,32 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 const require = createRequire(import.meta.url);
-const sdk = process.argv[2] ?? pathToFileURL(require.resolve("@earendil-works/pi-coding-agent")).href;
+
+/**
+ * Locates the SDK entry that loads the extension source.
+ *
+ * argv[2] wins (a `file://` URL), then the package resolvable from this directory, and lastly the
+ * installation that owns the `pi` executable on PATH: this plugin ships without node_modules, so in a
+ * plain checkout only the last option works.
+ */
+function resolveSdkUrl() {
+	if (process.argv[2]) return process.argv[2];
+	try {
+		return pathToFileURL(require.resolve("@earendil-works/pi-coding-agent")).href;
+	} catch {
+		for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+			if (dir === "") continue;
+			const entry = path.join(dir, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "index.js");
+			if (existsSync(entry)) return pathToFileURL(entry).href;
+		}
+	}
+	throw new Error(
+		"Cannot locate @earendil-works/pi-coding-agent: pass its dist/index.js as a file:// URL argument, "
+		+ "or run this script from an environment whose PATH contains the pi installation.",
+	);
+}
+
+const sdk = resolveSdkUrl();
 const hostRequire = createRequire(sdk);
 const { createJiti } = hostRequire("jiti");
 const jiti = createJiti(import.meta.url, { moduleCache: false, fsCache: false, alias: {

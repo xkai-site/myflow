@@ -1,11 +1,12 @@
 /**
- * 渠道注册表：Factory Method + Registry（设计 §17.2）。
+ * Channel registry (factory + registry).
  *
- * **唯一的分派点**。`service` 只认 `type` 字符串，因此新增渠道的改动是：
- * 「新增 1 个 provider 文件 + 此处 register 1 行 + 配置加 1 条」，
- * `lifecycle.ts` / `rules.ts` / `service.ts` 的 diff 为 0（§17.3 的验收标准）。
+ * This is the only dispatch point: `service` only knows the `type` string, so
+ * adding a channel means one new provider file, one `register` call here and one
+ * config entry, with no change to lifecycle, rules or service.
  *
- * 未注册 / 工厂抛错 / 校验失败一律降级为 NoopNotifier + 警告，绝不抛异常给调用方。
+ * An unregistered type, a throwing factory or a failing validation always degrades
+ * to a NoopNotifier with a warning; it never throws at the caller.
  */
 
 import type { Logger, Notifier, NotifierFactory, NotifierRegistry } from "../types.ts";
@@ -21,7 +22,7 @@ export function createRegistry({ log }: RegistryOptions): NotifierRegistry {
   const describe = (error: unknown): string =>
     error instanceof Error ? error.message : String(error);
 
-  /** 降级为 Noop 时写一条结构化记录：避免"投递 ok"掩盖"其实什么都没发"。 */
+  /** Structured record on degradation, so "delivery ok" cannot hide "nothing was sent". */
   const degrade = (id: string, type: string, reason: string): Notifier => {
     log.record({ event: "channel_degraded", providerId: id, providerType: type, reason });
     return createNoopNotifier(id, type, reason);

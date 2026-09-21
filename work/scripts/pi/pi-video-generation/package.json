@@ -5,7 +5,8 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "test": "node test/output-preview.mjs"
+    "test": "node --test test/*.test.ts && node test/output-preview.mjs",
+    "test:adapters": "node --test test/adapters.test.ts"
   },
   "keywords": [
     "pi-package",

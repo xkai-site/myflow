@@ -1,13 +1,11 @@
 /**
- * 日志 / 清洗 / 脱敏（设计 §13 第 13、16、23 项）。
+ * Logging, sanitizing and redaction.
  *
- * 三件事：
- *  1. `sanitize()` —— 所有对外文案的唯一出口。先剥离转义序列与不可见控制字符，再截断。
- *     官方 `examples/extensions/notify.ts` 直接内插字符串（存在注入面），本插件不复刻该缺陷。
- *  2. `redact()` —— 错误信息脱敏（secret / 家目录路径）。
- *  3. `createLogger()` —— stderr 人类可读日志 + 可选 JSONL 结构化记录。
- *
- * JSONL sink 由 `PI_NOTIFY_LOG_FILE` 打开，仅用于诊断与回归断言；未设置时零开销。
+ *  - `sanitize()` is the single exit for text leaving this plugin: escape sequences
+ *    and invisible control characters are stripped before truncation.
+ *  - `redact()` masks secrets and home-directory paths in error text.
+ *  - `createLogger()` writes human-readable lines to stderr plus optional JSONL
+ *    records; the JSONL sink only opens when `PI_NOTIFY_LOG_FILE` is set.
  */
 
 import { appendFileSync } from "node:fs";
@@ -17,15 +15,15 @@ import type { Logger, LogLevel } from "./types.ts";
 
 const DEFAULT_MAX_CHARS = 300;
 
-/** 单条日志/记录写入上限，避免 hook 内出现无界的磁盘写入。 */
+/** Total JSONL sink budget, so a hook can never write unbounded data. */
 const SINK_MAX_BYTES = 1024 * 1024;
 
 /**
- * 剥离终端转义序列。
+ * Removes terminal escape sequences.
  *
- * 注意语义选择：OSC / CSI / DCS 等序列是**整段删除（含其参数与载荷）**，而不是只删控制字符。
- * 理由是安全第一 —— 若只删 `\x1b`/`\x07` 而保留 `]777;notify;fake`，这些残留文本会变成
- * 我们重新拼装 OSC 时的可见正文，反而制造了伪造通知的素材。
+ * Whole sequences (parameters and payload included) are deleted rather than just
+ * their control bytes: keeping `]777;notify;fake` would leave exactly the text
+ * needed to forge a notification once we emit our own OSC sequence.
  */
 function stripEscapeSequences(input: string): string {
   let out = "";
@@ -36,7 +34,7 @@ function stripEscapeSequences(input: string): string {
       continue;
     }
     const next = input[i + 1];
-    if (next === undefined) break; // 结尾孤立的 ESC：丢弃
+    if (next === undefined) break; // Trailing lone ESC: drop it.
     if (next === "[") {
       // CSI: ESC [ params(0x30-0x3f) intermediates(0x20-0x2f) final(0x40-0x7e)
       let j = i + 2;
@@ -47,7 +45,7 @@ function stripEscapeSequences(input: string): string {
       continue;
     }
     if (next === "]" || next === "P" || next === "X" || next === "^" || next === "_") {
-      // OSC / DCS / SOS / PM / APC：直到 BEL 或 ST(ESC \)
+      // OSC / DCS / SOS / PM / APC: consume until BEL or ST (ESC backslash)
       let j = i + 2;
       while (j < input.length) {
         if (input[j] === "\u0007") {
@@ -63,13 +61,13 @@ function stripEscapeSequences(input: string): string {
       i = j - 1;
       continue;
     }
-    // 其余双字符序列（如 ESC ( B、ESC 7）
+    // Other two-character sequences (for example ESC ( B, ESC 7).
     i += 1;
   }
   return out;
 }
 
-/** 去掉不可见/会造成视觉欺骗的字符，并归一换行。 */
+/** Drops invisible or visually deceptive characters and normalises newlines. */
 function stripInvisible(input: string): string {
   let out = "";
   for (const ch of input) {
@@ -78,7 +76,7 @@ function stripInvisible(input: string): string {
       out += "\n";
       continue;
     }
-    if (ch === "\r") continue; // \r\n 已由调用前的归一处理；孤立 \r 丢弃
+    if (ch === "\r") continue; // \r\n was normalised by the caller; a lone \r is dropped
     if (ch === "\t") {
       out += " ";
       continue;
@@ -89,20 +87,18 @@ function stripInvisible(input: string): string {
       out += "\n";
       continue;
     }
-    if (code >= 0x202a && code <= 0x202e) continue; // bidi 覆盖
-    if (code >= 0x2066 && code <= 0x2069) continue; // bidi 隔离
-    if (code === 0xfeff) continue; // BOM / 零宽非断行
+    if (code >= 0x202a && code <= 0x202e) continue; // bidi overrides
+    if (code >= 0x2066 && code <= 0x2069) continue; // bidi isolates
+    if (code === 0xfeff) continue; // BOM / zero-width no-break space
     out += ch;
   }
   return out;
 }
 
 /**
- * 对外文案的唯一清洗入口。
- *
- * - 剥离转义序列与不可见控制字符
- * - `\r\n` / `\r` 归一为 `\n`，压缩连续空白，去掉首尾空白
- * - 按 code point 截断到 `maxChars`（避免切断代理对）
+ * The single sanitizing entry point for text leaving this plugin.
+ * Normalises CRLF, collapses whitespace, then truncates by code point so
+ * surrogate pairs are never split.
  */
 export function sanitize(input: unknown, maxChars: number = DEFAULT_MAX_CHARS): string {
   const raw = typeof input === "string" ? input : String(input ?? "");
@@ -122,12 +118,20 @@ export function sanitize(input: unknown, maxChars: number = DEFAULT_MAX_CHARS): 
 const HOME_POSIX = homedir().replace(/\\/g, "/");
 
 /**
- * 脱敏：错误信息里可能带凭据或家目录路径（设计 §2.2 第 4 点）。
- * 只做「去敏」，不改变语义；宁可过度遮蔽，也不外传凭据。
+ * Masks credentials and home-directory paths that may appear in error text.
+ * Over-redacting is accepted; leaking a credential is not.
  */
 export function redact(input: unknown): string {
   let text = typeof input === "string" ? input : String(input ?? "");
   text = text.replace(/Bearer\s+[^\s,;"']+/gi, "Bearer ***");
+  // Cookie headers carry session credentials and are line-scoped, so the whole value goes.
+  text = text.replace(/(\b(?:set-)?cookie\s*[:=]\s*)[^\n]*/gi, "$1***");
+  // `Authorization: <scheme> <credential>`: the generic key/value rule below would mask only the
+  // scheme word and leave the credential in clear text.
+  text = text.replace(
+    /((?:proxy-)?authorization\s*[:=]\s*)(?:(?:basic|bearer|digest|negotiate|hoba|mutual|aws4-hmac-sha256|apikey|api-key|token)\s+)?("[^"]*"|'[^']*'|[^\s,;]+)/gi,
+    "$1***",
+  );
   text = text.replace(
     /((?:api[_-]?key|access[_-]?key|token|secret|password|passwd|authorization|auth)\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;]+)/gi,
     "$1***",
@@ -137,7 +141,7 @@ export function redact(input: unknown): string {
   text = text.replace(/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, "xox*-***");
   text = text.replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/g, "***jwt***");
   text = text.replace(/\b[A-Za-z0-9_-]{40,}\b/g, "***");
-  // 家目录 / 用户目录
+  // Home directory and user directory, in either separator style.
   if (HOME_POSIX.length > 3) {
     text = text.split(HOME_POSIX).join("~");
     text = text.split(homedir()).join("~");
@@ -146,7 +150,7 @@ export function redact(input: unknown): string {
   return text;
 }
 
-/** 清洗 + 脱敏的组合，供错误信息使用。 */
+/** Redacts first and then sanitizes; used for every error message shown to users. */
 export function sanitizeError(input: unknown, maxChars: number = DEFAULT_MAX_CHARS): string {
   return sanitize(redact(input), maxChars);
 }
@@ -162,10 +166,10 @@ function stderrEnabled(): boolean {
 }
 
 /**
- * 创建 logger。
+ * Creates the logger.
  *
- * 写入策略：JSONL sink 用同步 append —— 它只在 `PI_NOTIFY_LOG_FILE` 存在时开启（诊断/测试），
- * 单条受限于 1 MiB 总量，且能保证记录顺序与事件顺序一致（否则回归脚本无法稳定断言）。
+ * The JSONL sink appends synchronously so record order matches event order,
+ * which is what lets the regression scripts assert on it.
  */
 export function createLogger(): Logger {
   let sunkBytes = 0;
@@ -180,7 +184,7 @@ export function createLogger(): Logger {
       appendFileSync(file, line, { encoding: "utf8", mode: 0o600 });
       sunkBytes += Buffer.byteLength(line);
     } catch {
-      // 诊断 sink 失败绝不冒泡到 hook：宁可不记日志，也不阻断 Pi。
+      // A failing sink must never bubble into a hook: losing logs beats blocking Pi.
       sinkDisabled = true;
     }
   };
@@ -192,7 +196,7 @@ export function createLogger(): Logger {
         try {
           process.stderr.write(`[pi-notify] ${level} ${text}\n`);
         } catch {
-          // 忽略：stdout/stderr 可能已关闭
+          // Ignore: stdout/stderr may already be closed.
         }
       }
       writeSink({ event: "log", level, message: text, ...(meta ?? {}) });
@@ -203,7 +207,7 @@ export function createLogger(): Logger {
   };
 }
 
-/** 测试/调试用的空 logger。 */
+/** No-op logger for tests and for code paths that must stay silent. */
 export function createSilentLogger(): Logger {
   return {
     log(): void {},

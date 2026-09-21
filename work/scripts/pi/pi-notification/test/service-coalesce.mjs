@@ -1,10 +1,11 @@
 /**
- * S4 专项回归：投递服务的**门槛与过滤**（合并窗口 / 冷却 / 去重 / 门槛 / 队列 / 超时）。
+ * Delivery service thresholds and filters regression: coalescing window, cooldown, dedupe,
+ * threshold, queue and timeout.
  *
- * 为什么单独一个脚本：这些行为全是**时间与顺序**相关的策略，用注入的假时钟 + 假渠道做断言
- * 才能又快又确定（不需要 SDK、不需要真实会话、不弹通知）。
- * 宿主级的真实生效（默认值、`cooldownMs=0` 后恢复、immediate 工具失败的合并）在
- * `test/host-lifecycle.mjs` 的 L1/L2/K3 里覆盖。
+ * A separate script because these are all time- and order-dependent policies: an injected clock
+ * and fake channels make the assertions fast and deterministic, with no SDK, no real session and
+ * no notification. The host-level effects (defaults, recovery after `cooldownMs=0`, coalescing of
+ * `immediate` tool failures) are covered by L1/L2/K3 in `test/host-lifecycle.mjs`.
  *
  *   MSYS_NO_PATHCONV=1 node test/service-coalesce.mjs
  */
@@ -31,7 +32,7 @@ async function step(name, run) {
   }
 }
 
-/** 注入的假时钟：让「冷却/合并窗口」可以被确定性地推进。 */
+/** Injected clock, so cooldown and coalescing windows can be advanced deterministically. */
 function makeHarness({ mutateConfig, send } = {}) {
   const config = configModule.defaultConfig();
   if (mutateConfig) mutateConfig(config);
@@ -64,12 +65,12 @@ function makeHarness({ mutateConfig, send } = {}) {
     sends,
     log,
     setTime(value) { nowMs = value; },
-    /** 推进假时钟 */
+    /** Advances the fake clock. */
     advance(ms) {
       nowMs += ms;
     },
     events: () => records.map((row) => row.event),
-    /** 投递是异步的：断言前必须等落地（与宿主回归同一纪律）。 */
+    /** Delivery is asynchronous: wait for it to settle before asserting. */
     async settle() {
       await service.flush(1000);
     },
@@ -142,7 +143,7 @@ await step("冷却：同 kind 在 cooldownMs 内只放行一条，窗口过后�
   assert.equal(h.service.snapshot().cooled, 1);
   assert.ok(h.events().includes("cooldown_drop"));
 
-  // 不同 kind 不受同 kind 冷却影响
+  // A different kind is not affected by another kind's cooldown.
   h.service.submit(
     request({ kind: "run_failed", level: "error", dedupeKey: "s:2:run_failed", meta: { sessionId: "s", runId: "2", level: "error" } }),
   );
@@ -157,7 +158,7 @@ await step("冷却：同 kind 在 cooldownMs 内只放行一条，窗口过后�
 
 await step("合并窗口：同一（sessionId+runId）只放行一条，换 runId 立即放行", async () => {
   const h = makeHarness();
-  // 同一次运行的两条不同事件（例如 run_completed + waiting_for_user）
+  // Two different events of one run, for example run_completed plus waiting_for_user.
   h.service.submit(request({ dedupeKey: "s:1:run_completed" }));
   h.service.submit(request({ kind: "waiting_for_user", dedupeKey: "s:1:waiting", channels: ["terminal"] }));
   await h.settle();
@@ -174,13 +175,13 @@ await step("合并窗口：同一（sessionId+runId）只放行一条，换 runI
 });
 
 await step("请求级窗口覆盖：coalesceWindowMs 优先于配置（immediate 工具失败靠它聚合）", async () => {
-  // 两个过滤都关掉，只留下请求自带的窗口
+  // Both filters off, leaving only the window carried by the request itself.
   const h = makeHarness({ mutateConfig: (c) => { c.coalesce.windowMs = 0; c.coalesce.cooldownMs = 0; } });
   h.service.submit(request({ kind: "tool_failed", level: "warning", dedupeKey: "s:1:tool_failed:bash", coalesceWindowMs: 10000 }));
   await h.settle();
   assert.equal(h.sends.length, 1);
   h.advance(2000);
-  // 配置里 windowMs=0，但第一条请求把自己所在 run 的窗口推到了 10000ms
+  // The config has windowMs=0, but the first request pushed its run's window out to 10000ms.
   h.service.submit(request({ kind: "tool_failed", level: "warning", dedupeKey: "s:1:tool_failed:read" }));
   await h.settle();
   assert.equal(h.sends.length, 1, "请求级窗口未生效");
@@ -208,7 +209,7 @@ await step("队列上限：丢等级最低的最新一项并计数，不无限�
       c.delivery.queueLimit = 2;
       c.delivery.concurrency = 1;
     },
-    // 第一条卡住，后面的只能排队
+    // The first delivery is stuck, so the rest have to queue.
     send: async (_req, signal, index) => {
       if (index === 1) {
         await new Promise((resolve) => {
@@ -221,7 +222,7 @@ await step("队列上限：丢等级最低的最新一项并计数，不无限�
   h.service.submit(request({ dedupeKey: "q:1", meta: { sessionId: "q", runId: "1", level: "info" } }));
   h.service.submit(request({ kind: "run_failed", level: "error", dedupeKey: "q:1:err", meta: { sessionId: "q", runId: "1", level: "error" } }));
   h.service.submit(request({ kind: "compact_failed", level: "info", dedupeKey: "q:1:info", meta: { sessionId: "q", runId: "1", level: "info" } }));
-  // 队列已满（limit=2）+ 又来一条 info：必须丢一条并计数
+  // Queue full (limit=2) with one more info notification: one entry must be dropped and counted.
   h.service.submit(request({ kind: "waiting_for_user", level: "info", dedupeKey: "q:1:waiting", meta: { sessionId: "q", runId: "1", level: "info" } }));
   await h.settle();
   assert.equal(h.service.snapshot().dropped, 1, "队列满应恰好丢弃 1 条");
@@ -230,7 +231,7 @@ await step("队列上限：丢等级最低的最新一项并计数，不无限�
   assert.equal(h.service.snapshot().delivered, 3, "被丢的应只是最低级的新条目");
 });
 
-await step("Provider 挂起：超时算失败，不阻塞后面（§13 第 2 项）", async () => {
+await step("Provider 挂起：超时算失败，不阻塞后面", async () => {
   const h = makeHarness({
     mutateConfig: (c) => {
       c.coalesce.windowMs = 0;
@@ -269,7 +270,7 @@ await step("dispose 幂等：之后 submit 一律丢弃，且不抛异常", asyn
   assert.ok(h.events().includes("service_disposed"));
 });
 
-// M3：本地日历构造，不依赖测试机时区；判断必须使用注入时钟。
+// M3: build local calendar values instead of relying on the host time zone; the check must use the injected clock.
 function quietHarness(quiet = {}) {
   return makeHarness({ mutateConfig: (c) => {
     c.coalesce.windowMs = 0;

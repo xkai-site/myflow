@@ -1,16 +1,19 @@
 /**
- * 阶段 2 渠道：通用 HTTP POST Webhook（设计 §17.1 P2 / §17.4 / §13 第 2、16 项）。
+ * Generic HTTP POST webhook channel.
  *
- * 它是 Telegram / Discord / Slack 的**通用底座**，也是「§17.3 的渠道抽象是否真的成立」的
- * 第一次真正测试：本文件不 import `lifecycle` / `rules` / `config`，格式与重试分别由
- * `format()` 与 `decorators.ts` 负责，`services` 对它一无所知。
+ * It is the shared base for Telegram / Discord / Slack and it exercises the channel boundary:
+ * this file imports neither the judgement layer nor the config layer, the payload shape is owned
+ * by `format()` and retry policy by the reliability decorators, and the service knows nothing
+ * about it.
  *
- * 四条安全纪律：
- *  1. **不存密钥明文**：配置里只允许出现环境变量**名**（`secretEnv`），值在投递时读环境变量。
- *  2. `validate()` 负责把「不可用」说清楚（URL 非法 / 协议不对 / 环境变量不存在），
- *     由 `registry` 降级为 Noop —— 不存在「静默发到一个错地方」。
- *  3. 只发**结构化元数据**，不含用户输入原文与完整回复（§13 第 16 项）。
- *  4. 不跟随重定向（`redirect: "error"`）：否则凭据可能被转到另一个主机。
+ * Four security rules:
+ *  1. Never store a secret: the config may only name an environment variable (`secretEnv`), and
+ *     its value is read at delivery time.
+ *  2. `validate()` must state why the channel is unusable (bad URL, wrong protocol, missing
+ *     variable) so the registry can degrade to Noop; silently posting to the wrong place is not
+ *     an option.
+ *  3. Only structured metadata is sent, never user input or full replies.
+ *  4. Redirects are refused: a signed payload must not follow a redirect to another host.
  */
 
 import { createHmac } from "node:crypto";
@@ -20,21 +23,21 @@ import type { Logger, Notifier, NotificationRequest } from "../types.ts";
 
 const EVENT_HEADER = "X-Pi-Notify-Event";
 const SIGNATURE_HEADER = "X-Pi-Notify-Signature";
-/** 响应体片段进入错误消息前的截断长度（防止把整个页面塞进日志） */
+/** Truncation applied before a response snippet reaches an error or the log, to avoid logging a whole page. */
 const BODY_SNIPPET_CHARS = 200;
 
 export interface WebhookOptions {
   url?: unknown;
-  /** **只允许环境变量名**，例如 `PI_NOTIFY_WEBHOOK_SECRET` */
+  /** Environment variable **name** only, for example `PI_NOTIFY_WEBHOOK_SECRET`. */
   secretEnv?: unknown;
-  /** 额外请求头（值不得含换行；由 validate 把关） */
+  /** Extra request headers; values must not contain newlines, which `validate` enforces. */
   headers?: unknown;
 }
 
 export interface WebhookNotifierOptions {
   log: Logger;
   maxChars: number;
-  /** 供测试注入（默认全局 fetch）；在调用时才取，便于测试挂载陷阱/存根 */
+  /** Injectable for tests (global fetch by default); resolved per call so tests can swap it. */
   fetchImpl?: typeof fetch;
 }
 
@@ -54,7 +57,7 @@ function headerEntries(raw: unknown): Array<[string, string]> | string {
   return entries;
 }
 
-/** 解析并校验 URL；返回错误字符串表示不可用。 */
+/** Parses and validates the URL; a returned string means the channel is unusable. */
 export function validateWebhookOptions(raw: unknown, env: NodeJS.ProcessEnv = process.env): string | undefined {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return "options 必须是对象";
   const options = raw as WebhookOptions;
@@ -88,8 +91,9 @@ export function validateWebhookOptions(raw: unknown, env: NodeJS.ProcessEnv = pr
 }
 
 /**
- * 渠道特定格式化（§17.4 的 `format?`）。
- * 只包含投递所需的元数据：标题/正文（业务层已清洗）、等级、kind、会话与运行标识。
+ * Channel-specific formatting.
+ * Carries only delivery metadata: title and body (already sanitized upstream), level, kind and
+ * the session and run identifiers.
  */
 export function buildWebhookPayload(req: NotificationRequest, at: number = Date.now()): Record<string, unknown> {
   return {
@@ -107,12 +111,12 @@ export function buildWebhookPayload(req: NotificationRequest, at: number = Date.
   };
 }
 
-/** HMAC-SHA256 签名（`sha256=<hex>`）。签名对象是**实际发送的字节**，便于接收方直接校验。 */
+/** HMAC-SHA256 signature as `sha256=<hex>` over the exact bytes sent, so a receiver can verify directly. */
 export function signWebhookBody(body: string, secret: string): string {
   return `sha256=${createHmac("sha256", secret).update(body, "utf8").digest("hex")}`;
 }
 
-/** 日志里只留 origin + pathname：query 常被用来传 token。 */
+/** Logs keep only origin and pathname: a query string is commonly used to carry a token. */
 export function redactUrl(url: string): string {
   try {
     const parsed = new URL(url);
@@ -126,19 +130,19 @@ export function createWebhookNotifier(id: string, options: WebhookOptions, deps:
   const log = deps.log;
   const maxChars = Number.isFinite(deps.maxChars) && deps.maxChars > 0 ? deps.maxChars : 300;
   const rawHeaders = headerEntries(options.headers);
-  /** payload 形状只在这个函数里定义一次：`format()` 与 `send()` 共用它。 */
+  /** The payload shape is defined once here and shared by `format()` and `send()`. */
   const format = (req: NotificationRequest): Record<string, unknown> => buildWebhookPayload(req);
 
   return {
     id,
     type: "webhook",
 
-    /** 由 `registry.create()` 调用；同时给出「配置不可用」的明确原因（§17.4）。 */
+    /** Called by the registry; returning a reason degrades the channel to Noop with that reason. */
     validate(raw: unknown): string | undefined {
       return validateWebhookOptions(raw ?? options);
     },
 
-    /** 结构化 payload：渠道特定形状只在这里出现，不回流到 `rules`（§17.3 规则 4）。 */
+    /** Structured payload: the channel-specific shape appears here only and never flows back into rules. */
     format,
 
     async send(req: NotificationRequest, signal: AbortSignal): Promise<void> {
@@ -170,14 +174,14 @@ export function createWebhookNotifier(id: string, options: WebhookOptions, deps:
         headers,
         body: text,
         signal,
-        // 不跟随重定向：避免把签名/载荷带到另一个主机
+        // Refuse redirects: a signed payload must not be carried to another host.
         redirect: "error",
       });
 
       if (!response.ok) {
         let snippet = "";
         try {
-          // 响应体可能回显凭据：先用 `sanitizeError`（清洗 + 脱敏）再入日志/错误消息。
+          // A response body can echo credentials, so sanitize and redact before it reaches a log or error.
           snippet = sanitizeError(await response.text(), BODY_SNIPPET_CHARS);
         } catch {
           snippet = "";
@@ -192,11 +196,11 @@ export function createWebhookNotifier(id: string, options: WebhookOptions, deps:
         });
         throw new Error(`webhook 返回 HTTP ${response.status}${snippet ? `: ${snippet}` : ""}`);
       }
-      // 成功也要读掉响应体，否则 keep-alive 连接会挂住。
+      // Consume the body even on success, otherwise a keep-alive connection stays open.
       try {
         await response.arrayBuffer();
       } catch {
-        // 读取失败不影响投递判定
+        // A read failure does not change the delivery verdict.
       }
       log.record({ event: "webhook_sent", providerId: id, status: response.status, url: redactUrl(url), signed: Boolean(secret) });
     },

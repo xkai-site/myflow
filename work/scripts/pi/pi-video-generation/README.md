@@ -134,3 +134,17 @@ TUI 会话记录显示绝对路径与 **Open original video** 的 `file:///...` 
 - `response` 的 `success: true` 只代表命令被接受/处理，不代表视频生成成功；不要等待 LLM 的 `agent_end` 或 tool result 作为完成依据。通知 ID 不是请求关联 ID，建议逐个请求并核对结果。
 - RPC 不提供本插件专用取消命令，也未接入 RPC `abort` 的取消信号；不要把它当成 TUI Escape。远端任务与费用仍需自行核查。
 - 返回的是 **Pi 主机上的本地路径/URL，不是视频字节或公网下载链接**；远程客户端需自行取回该文件。
+
+## 测试
+
+```bash
+cd work/scripts/pi/pi-video-generation
+
+MSYS_NO_PATHCONV=1 npm test                     # 适配器单元测试（4 条）+ 输出渲染回归（1 套）
+MSYS_NO_PATHCONV=1 npm run test:adapters        # 只跑单元测试
+node test/output-preview.mjs "file:///<pi>/node_modules/@earendil-works/pi-coding-agent/dist/index.js"
+```
+
+`output-preview.mjs` 需要宿主 SDK：优先用命令行传入的 `file://` URL，其次解析本目录可找到的包，
+最后回退到 PATH 上 `pi` 安装目录里的同名包（本插件不带 `node_modules`）。三个来源都找不到时会直接
+报错，而不是静默跳过。单元测试不需要 SDK，可以单独秒级运行。

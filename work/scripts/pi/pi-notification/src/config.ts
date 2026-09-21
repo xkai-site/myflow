@@ -1,16 +1,20 @@
 /**
- * 配置（设计 §10 / §13 第 5 、6 项；UX 方案 §值模型）。
+ * Configuration.
  *
- * 三层值：**出厂默认 → 用户级默认（稀疏文件） → 本对话选择（overlay，见 settings.ts）**。
- * 本模块只负责前两层 + 降级，不读项目级配置（已删除该层）。
+ * Three layers: factory defaults, sparse user defaults on disk, and per-conversation
+ * choices (an overlay owned by `settings.ts`). This module owns the first two plus the
+ * degradation rules; there is no project-level layer.
  *
- * 写盘先校验，再同目录临时文件（0o600）+ 原子 rename；失败不覆盖原文件。
+ * Writes validate first, then write a same-directory temporary file (0o600) and rename
+ * it into place; a failed write never overwrites the previous file.
  *
- * 两条关键健壮性规则：
- *  1. **损坏配置不静默全关**（§13 第 5 项）：解析或校验失败时降级为「仅 terminal + 仅 error +
- *     只开 run_failed」，并留下可查的原因（状态总览会显示），而不是把通知悄悄关掉。
- *     理由：用户写错一个逗号就再也收不到失败通知，是这个插件最糟糕的失败模式。
- *  2. **稀疏写盘**：Ctrl+S 只写被保存的那一项（`writeUserDefault`），不把其余字段钉死在今天的默认值上。
+ * Two robustness rules that shape the code below:
+ *  1. A broken config must never silently disable all notifications. Parse or validation
+ *     failures degrade to "failed runs only, error level, default channel" and keep the
+ *     reason visible, because losing failure notifications over a stray comma is the
+ *     worst possible failure mode for this plugin.
+ *  2. Writes are sparse: Ctrl+S persists only the saved setting and never freezes the
+ *     remaining fields at today's defaults.
  */
 
 import { closeSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -34,7 +38,7 @@ export const CONFIG_VERSION = 1;
 
 const LEVELS: NotifyLevel[] = ["info", "warning", "error"];
 
-/** 规则名 → 配置键的映射（配置里用 camelCase，与 §10.2 一致）。 */
+/** Rule name to config key, using camelCase keys in the file. */
 const RULE_KEYS = [
   "runCompleted",
   "runFailed",
@@ -47,46 +51,47 @@ const RULE_KEYS = [
 const TOOL_FAILURE_MODES: ToolFailureMode[] = ["aggregate", "immediate"];
 
 /**
- * `ui_prompt_*` 允许出现在配置里的 kind。
- * `custom` **永久排除**（§18.5 修订 1：它同时被加载器/进度 UI 使用，与用户输入无关）。
+ * `ui_prompt_*` kinds that may appear in the config allow-list.
+ * `custom` is excluded permanently: the loader and progress UI emit it too, so it says
+ * nothing about user input.
  */
 export const ALLOWED_PROMPT_KINDS: UIPromptKind[] = ["select", "confirm", "input", "editor"];
 
 const ALL_PROMPT_KINDS: UIPromptKind[] = [...ALLOWED_PROMPT_KINDS, "custom"];
 
 export interface ConfigProblem {
-  /** 出问题的字段路径，例如 `delivery.timeoutMs` */
+  /** Field path that failed, for example `delivery.timeoutMs`. */
   path: string;
   message: string;
 }
 
 export interface ConfigLoadResult {
   config: NotificationConfig;
-  /** 实际生效的来源，用于状态总览与排障 */
+  /** Sources actually in effect, shown by the status view for diagnosis. */
   sources: string[];
-  /** 解析/校验中的致命问题（会导致降级） */
+  /** Fatal parse or validation problems that trigger degradation. */
   errors: ConfigProblem[];
-  /** 非致命问题（例如未知字段） */
+  /** Non-fatal problems, such as unknown fields. */
   warnings: ConfigProblem[];
-  /** true 表示已降级为安全子集 */
+  /** True when the safe subset is in effect. */
   degraded: boolean;
 }
 
 export interface ReadConfigOptions {
-  /** 用户级目录（`getAgentDir()`） */
+  /** User-level directory, from `getAgentDir()`. */
   agentDir: string;
 }
 
-/** 用户级配置文件路径（`~/.pi/agent/pi-notification/config.json`）。存的是**稀疏用户默认**。 */
+/** Path of the user config file. It stores sparse user defaults, not a full snapshot. */
 export function userConfigPath(agentDir: string): string {
   return path.join(agentDir, "pi-notification", "config.json");
 }
 
 /**
- * 默认配置。
+ * Factory defaults.
  *
- * 渠道默认为 `terminal`（阶段 1：系统桌面通知，零凭据/零网络/零依赖）。
- * `debug` 渠道仍然注册着，可在配置里手动改用它把通知写成日志（排障用）。
+ * The default channel is the terminal one: no credentials, no network, no dependencies.
+ * The debug channel stays registered so it can be selected in the file when diagnosing.
  */
 export function defaultConfig(): NotificationConfig {
   return {
@@ -96,52 +101,54 @@ export function defaultConfig(): NotificationConfig {
     rules: {
       runCompleted: { enabled: true, level: "info", channels: ["terminal"] },
       runFailed: { enabled: true, level: "error", channels: ["terminal"] },
-      // 用户按 Esc 时人就在终端旁，默认静默（§12.1 第 3 步）。
+      // Pressing Esc means the user is sitting at the machine, so this stays silent by default.
       runAborted: { enabled: false, level: "info", channels: ["terminal"] },
-      // 工具失败默认聚合成一条（§12.3），且当本 run 已有结果通知时不再重复发。
+      // Tool failures are aggregated into one message and skipped when the run already
+      // produced a result notification.
       toolFailed: { enabled: true, level: "warning", channels: ["terminal"], mode: "aggregate", threshold: 1 },
       compactFailed: { enabled: true, level: "error", channels: ["terminal"] },
-      // 与 run_completed 高度重叠，默认关闭（§12.4）。`custom` 永远不在白名单里。
+      // Overlaps heavily with run_completed, so it is off by default. `custom` can never be white-listed.
       waitingForUser: { enabled: false, level: "info", channels: ["terminal"], kinds: [...ALLOWED_PROMPT_KINDS] },
     },
     coalesce: {
-      // 同一逻辑运行（sessionId+runId）内只放行一条通知：防「一次运行多条事件」刷屏。
+      // One notification per logical run (sessionId + runId): several events must not flood the user.
       windowMs: 1500,
       toolFailureWindowMs: 10000,
-      // 同 kind 两次通知的最小间隔（用户连点两次、极短时间内的多次运行只提醒一次）。
+      // Minimum interval between two notifications of the same kind.
       cooldownMs: 3000,
     },
     quietHours: { enabled: false, start: "23:00", end: "08:00", exceptLevels: ["error"] },
     content: {
       includeDuration: true,
       includeToolFailureNames: true,
-      // 首段标识：会话名优先，未命名时回退到项目目录名；两者都是展示用元数据。
+      // Leading identity label: session name when available, else the project directory name.
       includeSessionLabel: true,
-      // 默认不外传 assistant 回复（可能带出文件内容/密钥）——§13 第 16 项。
+      // Assistant replies are not forwarded by default: they can carry file content or secrets.
       includeAssistantExcerpt: false,
       includeCost: true,
       maxMessageChars: 300,
     },
     delivery: {
       timeoutMs: 8000,
-      // 重试/熔断由 providers/decorators 执行（§17.2）。
+      // Retry and circuit breaking are applied by the reliability decorators.
       maxRetries: 1,
       concurrency: 1,
       queueLimit: 50,
       circuitBreakerFailures: 3,
     },
     providers: [{ id: "terminal", type: "terminal", enabled: true, options: {} }],
-    // session_shutdown 内可以等这么久（§18.4：退出路径必须带短超时）。
+    // Maximum wait allowed inside `session_shutdown`: the exit path must stay short.
     shutdownFlushMs: 200,
   };
 }
 
 /**
- * 安全降级配置：只保留「失败通知 + 终端渠道 + error 门槛」。
- * 配置损坏时用它继续工作，并让用户能从 `/notify status` 看到原因。
+ * Safe fallback config: failed-run notification only, error level, default channel.
+ * It is used when the config is broken so the plugin keeps working and the status view
+ * can still show what went wrong.
  *
- * 降级只留 `run_failed` 一条路径，是因为「配置写错就收不到失败通知」是最糟糕的失败模式；
- * 其余规则（含 S6 的工具失败/压缩失败）一律关掉，避免用一份坏配置产生噪音。
+ * Only `run_failed` stays on, because "a typo silences failure notifications" is the worst
+ * outcome; every other rule is switched off to avoid producing noise from a bad file.
  */
 export function degradedConfig(): NotificationConfig {
   const config = defaultConfig();
@@ -164,7 +171,7 @@ export function degradedConfig(): NotificationConfig {
 }
 
 // ---------------------------------------------------------------------------
-// 校验：逐字段严格检查（风格参考 pi-image-generation 的 model-config）
+// Validation: strict per-field checks
 // ---------------------------------------------------------------------------
 
 function checkBoolean(
@@ -233,7 +240,7 @@ function checkRules(
   for (const [key, ruleRaw] of Object.entries(value)) {
     const fieldPath = `rules.${key}`;
     if (!(RULE_KEYS as readonly string[]).includes(key)) {
-      // 允许未来规则名出现在配置里（前向兼容），但不生效
+      // Forward compatibility: a rule name from a newer version is ignored with a warning.
       warnings.push({ path: fieldPath, message: "未知规则名，已忽略（可能是更新版本写入的）" });
       continue;
     }
@@ -241,7 +248,8 @@ function checkRules(
       errors.push({ path: fieldPath, message: "必须是对象" });
       continue;
     }
-    // 从 **base** 继承，不是从出厂默认继承：单项保存/三层合并时，同规则的其它字段必须原样保留。
+    // Inherit from **base**, not from the factory defaults: when a single setting is saved or
+    // the three layers are merged, the siblings of that rule must survive untouched.
     const base = baseRules as unknown as Record<string, RuleConfig>;
     const rule: RuleConfig = structuredClone(base[key]);
     const target = rule as unknown as Record<string, unknown>;
@@ -274,7 +282,7 @@ function checkRules(
           if (unknown.length > 0) {
             errors.push({ path: `${fieldPath}.kinds`, message: `未知的 prompt kind: ${unknown.join(", ")}` });
           }
-          // `custom` 永久排除：即使写进配置也不生效（§18.5 修订 1）
+          // `custom` is excluded permanently: writing it into the file has no effect.
           if (requested.includes("custom")) {
             warnings.push({ path: `${fieldPath}.kinds`, message: "`custom` 永久排除（加载器/进度 UI 也会触发它），已忽略" });
           }
@@ -321,6 +329,12 @@ function checkProviders(value: unknown, errors: ConfigProblem[]): ProviderConfig
       errors.push({ path: `${fieldPath}.options`, message: "必须是对象" });
       return;
     }
+    // A non-boolean `enabled` (for example the string "false") used to be coerced to true, which
+    // silently turned a channel on; it must degrade loudly like every other boolean in this file.
+    if (item.enabled !== undefined && typeof item.enabled !== "boolean") {
+      errors.push({ path: `${fieldPath}.enabled`, message: `必须是布尔值，实际是 ${JSON.stringify(item.enabled)}` });
+      return;
+    }
     seen.add(id);
     providers.push({
       id,
@@ -333,7 +347,8 @@ function checkProviders(value: unknown, errors: ConfigProblem[]): ProviderConfig
 }
 
 /**
- * 把「用户提供的部分配置」叠到 base 上。任何字段非法都会记入 errors（由调用方决定是否降级）。
+ * Overlays the user-supplied partial config onto `base`. Illegal fields are collected in
+ * `errors`; the caller decides whether that means degradation.
  */
 export function mergeConfig(base: NotificationConfig, raw: unknown, source: string): {
   config: NotificationConfig;
@@ -417,7 +432,8 @@ export function mergeConfig(base: NotificationConfig, raw: unknown, source: stri
     if (!isPlainObject(raw.coalesce)) {
       errors.push({ path: "coalesce", message: "必须是对象" });
     } else {
-      // 0 是合法值 = 关闭该项过滤（测试与「每次运行都要提醒」的用户需要它）
+      // 0 is a valid value and switches that filter off; tests and users who want one
+      // notification per run rely on it.
       checkPositiveInt(raw.coalesce, "windowMs", config.coalesce as unknown as Record<string, unknown>, "coalesce.windowMs", errors, { min: 0, max: 600000 });
       checkPositiveInt(raw.coalesce, "toolFailureWindowMs", config.coalesce as unknown as Record<string, unknown>, "coalesce.toolFailureWindowMs", errors, { min: 0, max: 600000 });
       checkPositiveInt(raw.coalesce, "cooldownMs", config.coalesce as unknown as Record<string, unknown>, "coalesce.cooldownMs", errors, { min: 0, max: 600000 });
@@ -433,7 +449,7 @@ export function mergeConfig(base: NotificationConfig, raw: unknown, source: stri
 }
 
 // ---------------------------------------------------------------------------
-// 读盘（出厂默认 → 用户级默认）
+// Reading: factory defaults, then sparse user defaults
 // ---------------------------------------------------------------------------
 
 function readJsonFile(file: string): { ok: true; value: unknown } | { ok: false; missing: boolean; message: string } {
@@ -452,10 +468,11 @@ function readJsonFile(file: string): { ok: true; value: unknown } | { ok: false;
 }
 
 /**
- * 载入有效配置：内置默认值 → 用户级默认值（稀疏）。
+ * Loads the effective config: built-in defaults, then the sparse user file.
  *
- * 任何一层出现致命错误都会**整份降级**为安全子集（不静默全关），并保留原因。
- * 本对话覆盖不在这里 —— 由 `settings.ts` 的 `applyOverlay()` 叠在结果之上。
+ * A fatal problem in either layer degrades the whole config to the safe subset instead of
+ * switching notifications off, and keeps the reason for the status view. The
+ * per-conversation overlay is applied later by `settings.ts`.
  */
 export function loadConfig(options: ReadConfigOptions): ConfigLoadResult {
   const errors: ConfigProblem[] = [];
@@ -488,8 +505,10 @@ export type ConfigWriteResult =
   | { ok: false; problems: ConfigProblem[] };
 
 /**
- * 读用户文件**原文**（不合并默认值）。Ctrl+S 的稀疏写盘与「该项是否已被保存过」都靠它。
- * 文件不存在 → `raw: undefined`；文件损坏或根不是对象 → `ok: false`（调用方必须拒绝覆盖）。
+ * Reads the raw user file without merging defaults. This is what sparse writes and the
+ * "has this setting ever been saved?" check rely on.
+ * Missing file means `raw: undefined`; a corrupt file or a non-object root means `ok: false`
+ * and the caller must refuse to overwrite it.
  */
 export function readUserConfigRaw(
   agentDir: string,
@@ -505,18 +524,20 @@ export function readUserConfigRaw(
 }
 
 /**
- * 把单项补丁合并进用户文件并原子写盘（Ctrl+S）。
+ * Merges one patch into the user file and writes it atomically (Ctrl+S).
  *
- * 与 `writeUserConfig` 的区别：**写的是稀疏用户默认**（原文已有字段 + 本次这一个补丁），
- * 不把其余字段写成今天的默认值快照，因此用户没碰过的项仍然跟随出厂默认。
- * 损坏原文件 → 拒绝写入（否则会把安全降级结果固化成用户默认）。
+ * Unlike `writeUserConfig` this writes sparse user defaults: existing fields plus this one
+ * patch, without snapshotting the remaining fields at today's defaults, so settings the
+ * user never touched keep following the factory defaults. A corrupt file is never
+ * overwritten, because that would freeze the degraded result into the user defaults.
  */
 export function writeUserDefault(agentDir: string, patch: ConfigPatch): ConfigWriteResult {
   const file = userConfigPath(agentDir);
   const current = readUserConfigRaw(agentDir);
   if (!current.ok) return { ok: false, problems: current.problems };
   const sparse = mergePatch(current.raw ?? {}, patch);
-  // 写盘前用同一套严格校验（单项也走全量字段校验，非法值一律拒绝）。
+  // Validate with the same strict rules before writing: a single setting still goes through
+  // the full field validation, so an illegal value is always refused.
   const merged = mergeConfig(defaultConfig(), sparse, file);
   if (merged.errors.length > 0) return { ok: false, problems: merged.errors };
   const written = atomicWriteConfig(agentDir, `${JSON.stringify(sparse, null, 2)}\n`);
@@ -525,8 +546,8 @@ export function writeUserDefault(agentDir: string, patch: ConfigPatch): ConfigWr
 }
 
 /**
- * 写用户层完整快照（测试与迁移用）；调用方只能在成功之后更新内存态。
- * 新代码优先用 `writeUserDefault` 写单项。
+ * Writes a full user-level snapshot; used by tests and migrations. The caller may only
+ * update its in-memory state after this succeeds. New code should prefer `writeUserDefault`.
  */
 export function writeUserConfig(agentDir: string, raw: unknown): ConfigWriteResult {
   const file = userConfigPath(agentDir);
@@ -538,8 +559,9 @@ export function writeUserConfig(agentDir: string, raw: unknown): ConfigWriteResu
 }
 
 /**
- * 原子写盘：同目录临时文件用 `wx` 独占创建（`0o600`）→ 关闭 → rename；绝不先删目的文件。
- * 失败时保留原文件，临时文件尽力清理。
+ * Atomic write: a same-directory temporary file created exclusively (`wx`, 0o600), closed,
+ * then renamed. The destination is never deleted first, so a failure keeps the old file and
+ * only the temporary file created by this call is cleaned up.
  */
 function atomicWriteConfig(
   agentDir: string,
@@ -552,7 +574,7 @@ function atomicWriteConfig(
     mkdirSync(path.dirname(file), { recursive: true });
     const candidate = path.join(path.dirname(file), `.config-${randomUUID()}.tmp`);
     fd = openSync(candidate, "wx", 0o600);
-    temporary = candidate; // 只清理本次成功创建的文件
+    temporary = candidate; // Only ever clean up the file this call created.
     writeFileSync(fd, text, "utf8");
     closeSync(fd);
     fd = undefined;
@@ -567,12 +589,12 @@ function atomicWriteConfig(
   }
 }
 
-/** 会话级静默开关（§10.3 的环境变量覆盖）。 */
+/** Session-level silence switch, driven by an environment variable. */
 export function isDisabledByEnv(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.PI_NOTIFY_DISABLE === "1" || env.PI_NOTIFY_DISABLE === "true";
 }
 
-/** 供 `/notify status` 展示的简短描述。 */
+/** Short description shown by `/notify status`. */
 export function describeConfig(config: NotificationConfig): string {
   const enabledRules = RULE_KEYS.filter((key) => config.rules[key].enabled).map((key) => key);
   const providers = config.providers.filter((provider) => provider.enabled).map((provider) => `${provider.id}:${provider.type}`);

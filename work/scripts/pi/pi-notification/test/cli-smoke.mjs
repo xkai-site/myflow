@@ -1,22 +1,25 @@
 /**
- * 真实 CLI 冒烟（设计 §15 S1 完成判据：`pi -e` 能加载 / 退出无报错）。
+ * Real-CLI smoke test: `pi -e` loads the extension and exits without errors.
  *
- * 用**真的 `pi` 可执行文件**跑两条最便宜的路径，全部离线、零 LLM 调用：
+ * Two cheapest possible paths are run with the **real `pi` executable**, fully offline and with no
+ * LLM call:
  *
- *   G 纯 `/probe-cmd`：证明「纯命令不进入 agent 生命周期」在真实 CLI 下同样成立，
- *     因此配置了通知插件也不会为这类任务投递任何东西（§18.5 修订 2 的覆盖边界）。
- *   H 假 provider + 真实 prompt：证明真实 CLI 下判定链路端到端可用，
- *     且 quit 收尾（`session_shutdown(reason=quit)` 的短超时 flush）能落盘。
+ *   G bare `/probe-cmd`: proves that a pure command enters no agent lifecycle under the real CLI,
+ *     so a configured notification plugin delivers nothing for such a task.
+ *   H fake provider plus a real prompt: proves the judgement chain works end to end under the real
+ *     CLI and that the quit path really flushes (short-timeout flush in `session_shutdown`).
  *
- * 与插件相关的两条硬断言：
- *   - **stdout 是管道时一个转义字节都不许写**（`pi -p` 的输出是调用方的数据，不是终端）。
- *   - 非 TTY 下本地渠道降级为 noop，但必须留下 `channel_degraded` 记录说明原因。
- * 也因此本脚本**不会**弹出真实系统通知。
+ * Two hard assertions related to the plugin:
+ *   - With stdout piped not a single escape byte may be written: under `pi -p` that stream is the
+ *     caller's data, not a display.
+ *   - Outside a TTY the local channel degrades to noop but must leave a `channel_degraded`
+ *     record stating why.
+ * For the same reason this script never raises a real system notification.
  *
- * Git Bash 是硬约束环境：子进程一律带 `MSYS_NO_PATHCONV=1`，
- * 否则 `/probe-cmd` 会被 MSYS 改写成 Windows 路径而静默退化成普通 prompt（§18.1 U0）。
+ * Git Bash requires `MSYS_NO_PATHCONV=1` on every child process, otherwise `/probe-cmd` is
+ * rewritten into a Windows path and silently degrades into an ordinary prompt.
  *
- * 跳过方式：`PI_SKIP_CLI=1`。指定可执行文件：`PI_BIN=/path/to/pi`。
+ * Skip with `PI_SKIP_CLI=1`. Choose the executable with `PI_BIN=/path/to/pi`.
  */
 
 import assert from "node:assert/strict";
@@ -74,12 +77,12 @@ function readJsonl(file) {
     .map((line) => JSON.parse(line));
 }
 
-/** 一次真实 CLI 运行。返回 stdout/stderr/exit code 与两份 JSONL。 */
+/** Runs the real CLI once; returns stdout/stderr/exit code plus both JSONL logs. */
 function runPi({ label, args, userConfig, preserveConfig = false }) {
   const configDir = path.join(AGENT_DIR, "pi-notification");
   const configFile = path.join(configDir, "config.json");
   if (preserveConfig) {
-    // M3 跨进程持久化验收：保留上一进程实际写下的文件，不重新造配置。
+    // Cross-process persistence: keep the file the previous process actually wrote.
   } else if (userConfig === undefined) {
     fs.rmSync(configDir, { recursive: true, force: true });
   } else {
@@ -92,7 +95,7 @@ function runPi({ label, args, userConfig, preserveConfig = false }) {
   fs.writeFileSync(pluginLog, "");
   const env = {
     ...process.env,
-    // Git Bash 硬约束：避免 `/cmd` 被 MSYS 改写成 Windows 路径。
+    // Git Bash requirement: stop MSYS from rewriting `/cmd` as a Windows path.
     MSYS_NO_PATHCONV: "1",
     PI_CODING_AGENT_DIR: AGENT_DIR,
     PI_CODING_AGENT_SESSION_DIR: path.join(TMP, "sessions"),
@@ -123,15 +126,17 @@ function runPi({ label, args, userConfig, preserveConfig = false }) {
 const EXTENSIONS = ["-e", PROBE_ENTRY, "-e", PLUGIN_ENTRY];
 
 /**
- * provider 失败时，print 模式**自己**会 exit 1 并把错误打到 stderr（`print-mode.js` 的行为）。
- * 这不是插件的问题，所以分开断言：退出码允许 1，但插件自身不得记录 error、不得崩溃。
+ * When the provider fails, print mode exits 1 by itself and writes the error to stderr. That is
+ * not a plugin problem, so the assertions are kept separate: exit code 1 is allowed, but the
+ * plugin must not log an error or crash.
  */
 function assertFailedRunExit(label, run) {
   assert.equal(run.error, undefined, `${label}: 启动失败 ${run.error?.message ?? ""}`);
   assert.equal(run.status, 1, `${label}: provider 失败时 print 模式应以 1 退出，实际 ${run.status}`);
   assert.doesNotMatch(run.stderr, /(TypeError|RangeError|AssertionError|Unhandled)/, `${label}: stderr 出现崩溃
 ${run.stderr}`);
-  // 配置损坏时插件**应该**记 error 说明原因；不该出现的是"投递失败"这类自身故障。
+  // A broken config **should** be logged as an error; what must not appear is a plugin fault
+  // such as a failed delivery.
   const pluginErrors = run.plugin.filter((row) => row.event === "log" && row.level === "error");
   assert.ok(pluginErrors.length >= 1, `${label}: 降级必须留下可查的错误记录`);
   const deliveryErrors = pluginErrors.filter((row) => /投递/.test(String(row.message)));
@@ -172,7 +177,7 @@ await step("G 纯 /probe-cmd：可加载、零 agent 生命周期、零投递", 
     "G: 未走 quit 收尾",
   );
   assert.equal(run.plugin.filter((row) => row.event === "delivery").length, 0, "G: 纯命令不应投递");
-  // 硬纪律：stdout 是管道时绝不能写入 OSC/转义序列，否则会污染 `pi -p` 的输出
+  // Hard rule: with stdout piped, no OSC or escape sequence may be written into it.
   assert.ok(!run.stdout.includes("\u001b"), "G: stdout 被转义序列污染");
   assert.ok(!run.stdout.includes("]777"), "G: stdout 出现了 OSC 777");
 });
@@ -199,12 +204,12 @@ await step("H 假 provider + 真实 prompt：投递 1 条 run_completed", async 
   assert.equal(sent[0].ok, true);
   assert.equal(sent[0].level, "info");
 
-  // stdout 是被调用方读走的（这里是管道），不得混入任何终端控制序列。
+  // stdout belongs to the caller (here a pipe), so no terminal control sequence may enter it.
   assert.ok(!run.stdout.includes("\u001b"), "H: stdout 被转义序列污染");
   assert.ok(!run.stdout.includes("]777"), "H: stdout 出现了 OSC 777");
   assert.ok(run.stdout.includes("OK"), "H: stdout 应保持干净的模型输出");
 
-  // 非将本地通知降级为 noop，而是要在日志里说明原因，且不能报错
+  // The local channel must degrade to noop and say why in the log, without reporting an error.
   const degraded = run.plugin.filter((row) => row.event === "channel_degraded");
   assert.equal(degraded.length, 1, "H: 非 TTY 下应记录一次渠道降级");
   assert.match(degraded[0].reason, /TTY/);
@@ -220,13 +225,13 @@ await step("I /notify（单一入口）：真实 CLI 下可派发、退出干净
   const viewRecords = run.plugin.filter((row) => row.event === "notify_settings_view");
   assert.equal(viewRecords.length, 1, `I: /notify 未执行 [${run.plugin.map((r) => r.event)}]`);
   assert.equal(viewRecords[0].mode, "print", "I: 非 TUI 应记录模式而不是打开组件");
-  // 状态与配置路径走 stderr（stdout 归调用方）
+  // Status and config paths go to stderr; stdout stays with the caller.
   assert.match(run.stderr, /投递统计/);
   assert.match(run.stderr, /配置来源/);
   assert.match(run.stderr, /用户默认: /);
   assert.match(run.stderr, /设置界面仅 TUI 可用/);
 
-  // 纯命令不进入 agent 生命周期（与 G 同一不变量，只是换成了插件自己的命令）
+  // A pure command enters no agent lifecycle: same invariant as G, for the plugin's own command.
   const probeEvents = run.probe.map((row) => row.ev);
   assert.ok(probeEvents.includes("session_start"), "I: 探针未加载");
   for (const forbidden of ["agent_start", "settled_enter"]) {
@@ -330,7 +335,7 @@ await step("M 旧 /notify off 不再写盘（写盘只发生在设置界面的 C
 await step("M2 稀疏用户默认跨进程生效：预置的单项默认决定下一个进程的行为", async () => {
   const run = runPi({
     label: "sparse-default",
-    // 这就是 Ctrl+S 写出来的形状：只有用户固化过的字段
+    // This is the shape Ctrl+S writes: only the fields the user froze.
     userConfig: { rules: { runCompleted: { enabled: false } } },
     args: ["--no-session", "--approve", "--no-tools", "--model", "probe-fake/fake-model", ...EXTENSIONS, "-p", "只回复 OK"],
   });

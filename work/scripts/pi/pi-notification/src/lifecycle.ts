@@ -1,13 +1,15 @@
 /**
- * 运行状态机（设计 §12.1 / §17.3）。
+ * Run state machine: the only place that decides whether a run completed, failed,
+ * was aborted or is unknown. It consumes plain data and emits plain data: no
+ * delivery, no dedupe, no channel names and no `ctx` / `SessionManager` reference.
  *
- * **唯一**判定「一次运行是完成 / 失败 / 取消 / 无法判定」的地方。只吃纯数据、只吐纯数据：
- * 不投递、不去重、不认识任何渠道，也不持有 `ctx` / `SessionManager` 引用。
- *
- * 三个必须守住的语义（来自 §18 实测）：
- *  1. 出口只有 `agent_settled`。`agent_end` 会因为自动重试 / 压缩重试 / 排队续跑而多次触发。
- *  2. `agent_settled` 本身不等于成功：Esc 取消与 provider 报错也会 settle，必须看 `stopReason`。
- *  3. reload / 换会话会重建实例：旧实例在 `session_shutdown` 之后**不得**再产生任何结论。
+ * Three semantics that are easy to get wrong:
+ *  1. The only exit is `agent_settled`. `agent_end` fires again on automatic
+ *     retries, compaction retries and queued continuations.
+ *  2. `agent_settled` does not mean success: an Esc cancel and a provider error
+ *     settle too, so `stopReason` decides.
+ *  3. `reload` and session switches rebuild the instance, and an instance created
+ *     before `session_shutdown` must never produce another conclusion.
  */
 
 import type {
@@ -25,7 +27,7 @@ export interface LifecycleOptions {
   config: NotificationConfig;
   log: Logger;
   now(): number;
-  /** 实例标识，保证 reload 后新旧实例的 runId 不冲突（去重键自包含）。 */
+  /** Instance id, so run ids from before and after a reload can never collide. */
   instanceToken: string;
 }
 
@@ -36,43 +38,45 @@ export interface Lifecycle {
     sessionId: string;
     stopReason: AssistantStopReason | undefined;
     errorMessage?: string;
-    /** 本条 assistant 消息的 `usage.cost.total`（provider 不报时不给） */
+    /** `usage.cost.total` of this assistant message; omitted when the provider reports none. */
     usageCostUsd?: number;
-    /** 本条 assistant 消息的文本（**由 index 限长**；本层只做“保留最新非空一条”） */
+    /** Message text, already length-capped by the caller; this layer keeps the latest non-empty one. */
     text?: string;
   }): void;
   /**
-   * 一次工具执行结束。`isError === false` 时只做簿记（不累积）。
-   * 返回本次失败在当前 run 内的累积状态，供 `immediate` 模式判定（§12.3）。
+   * One finished tool execution. `isError === false` only touches bookkeeping.
+   * Returns the failure state accumulated in the current run, which `immediate`
+   * mode uses to decide whether to notify now.
    */
   onToolExecutionEnd(input: {
     sessionId: string;
     toolName: string;
     isError: boolean;
   }): ToolFailureEvent | null;
-  /** `session_compact_failed`（§12.1 第 3 步的输入之一）。返回当前 run 的 id（用于去重键）。 */
+  /** `session_compact_failed`. Returns the current run id, used to build the dedupe key. */
   onCompactFailed(input: { sessionId: string; reason: string; errorMessage?: string; aborted: boolean }): {
     sessionId: string;
     runId: string;
   } | null;
-  /** `ui_prompt_start`：记录「正在等用户」。不白名单化——那是 rules/config 的职责。 */
+  /** `ui_prompt_start`: records "a user is being awaited". Allow-listing is rules/config work. */
   onUiPromptStart(input: { sessionId: string; kind: string; title?: string }): void;
-  /** `ui_prompt_end`：复位。注意实测：嵌套 prompt 不产生内层 span，`kind` 报的是外层。 */
+  /** `ui_prompt_end`: resets. Nested prompts only emit the outer span, so `kind` is the outer one. */
   onUiPromptEnd(input: { sessionId: string; kind: string }): void;
-  /** 唯一出口。返回 null 表示结构性丢弃（陈旧实例 / 会话不匹配 / 非空闲）。 */
+  /** The only exit. `null` means a structural drop: stale instance, session mismatch or not idle. */
   onSettled(input: { sessionId: string; isIdle: boolean }): RunOutcome | null;
   onShutdown(reason: ShutdownReason): void;
   currentSessionId(): string | undefined;
-  /** 本实例内该会话的累计成本（`agent_settled` 的 `RunSummary` 用它做“累计”口径） */
+  /** Cost accumulated for this session inside this instance. */
   sessionCostUsd(): number;
-  /** 当前是否在等用户输入（`/notify status` 展示用） */
+  /** True while a user prompt is open; shown by `/notify status`. */
   isWaitingForUser(): boolean;
   isStale(): boolean;
 }
 
 /**
- * stopReason → 运行状态。
- * `pending` / `deferred` 不是终态语义，归入 unknown（默认不通知），避免把中间态当完成。
+ * stopReason to run status. `pending` and `deferred` are not final-state semantics and
+ * map to unknown (silent by default), so an intermediate state is never reported as
+ * completed.
  */
 function classify(stopReason: AssistantStopReason | undefined): RunStatus {
   if (stopReason === "error") return "failed";
@@ -93,25 +97,27 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
     stopReason?: AssistantStopReason;
     errorMessage?: string;
     sawAssistant: boolean;
-    /** 本 run 内 assistant usage 成本累计（多轮/重试都算在同一次运行里） */
+    /** Assistant usage accumulated in this run; extra turns and retries stay in the same run. */
     costUsd?: number;
-    /** 本 run 最后一条非空 assistant 文本 */
+    /** Last non-empty assistant text of this run. */
     assistantText?: string;
-    /** 本 run 内的工具失败：按 toolName 去重（§12.3），保留失败顺序 */
+    /** Tool failures in this run, deduplicated by tool name, in first-failure order. */
     toolFailures: Map<string, number>;
     compactFailed: boolean;
   } | undefined;
   /**
-   * 会话累计成本。**只在本实例内存里**：`/reload` 或换会话会重建实例，累计随之归零。
-   * 不读 SessionManager：那需要把会话内容搬进本层，与“只吃纯数据”的边界冲突。
+   * Session cost accumulated in instance memory only. A `/reload` or a session switch
+   * rebuilds the instance and resets it. Reading it from the session store would mean
+   * pulling session content into this layer, which breaks the plain-data boundary.
    */
   let sessionCostUsd = 0;
   /**
-   * 等待用户输入的深度计数。
-   * 实测（§18.5 修订 1）：嵌套/重叠 prompt **不会**产生内层 span，`ui_prompt_end.kind` 报的是外层，
-   * 因此不能用 “start.kind === end.kind” 配对——只做『开始 +1 / 结束 -1』的簿记。
-   * `custom` **不参与计数**：它不代表用户在输入（加载器/进度 UI 也会用它，还可能是长命 span），
-   * 计入后会让「正在等你输入」的状态一直挂着。
+   * Depth of open user prompts.
+   * Nested or overlapping prompts do not produce an inner span and `ui_prompt_end.kind`
+   * reports the outer one, so start/end cannot be paired by kind: this is a plain
+   * increment/decrement counter. `custom` is excluded because it does not mean the user
+   * is typing (the loader and progress UI use it, possibly for a long-lived span) and
+   * counting it would leave "waiting for you" stuck on.
    */
   let promptDepth = 0;
 
@@ -126,7 +132,7 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
     };
   }
 
-  /** 需要 run 上下文但可能没有 `agent_start`（例如运行中途接管）时，惰性建一个。 */
+  /** Lazily creates a run for events that need run context without an `agent_start`. */
   function ensureRun(sessionId: string): NonNullable<typeof activeRun> {
     if (!activeRun) {
       const created = newRun();
@@ -142,9 +148,9 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
   };
 
   /**
-   * 会话绑定。
-   * 正常路径由 `session_start` 绑定；若宿主未发出该事件（例如 SDK 未绑定扩展 UI 上下文），
-   * 则在首个事件上惰性绑定，保证骨架不会因为一个可选事件而整体失效。
+   * Session binding. Normally `session_start` binds it; when the host never emits that
+   * event (for example an SDK host without extension UI context), the first event binds
+   * lazily so one optional event cannot disable the whole plugin.
    */
   function accept(sessionId: string): boolean {
     if (stale) return false;
@@ -173,7 +179,7 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
 
     onAssistantMessage({ sessionId, stopReason, errorMessage, usageCostUsd, text }): void {
       if (!accept(sessionId)) return;
-      // 没有 agent_start 也允许记录（实例可能在中途接管），但不会伪造开始时间。
+      // Allowed without `agent_start` (the instance may take over mid-run), but never invents a start time.
       const run = ensureRun(sessionId);
       run.sawAssistant = true;
       run.stopReason = stopReason;
@@ -182,7 +188,7 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
         run.costUsd = (run.costUsd ?? 0) + usageCostUsd;
         sessionCostUsd += usageCostUsd;
       }
-      // 只保留最新的非空文本：settled 时它恰好是本 run 的最后一条 assistant 回复。
+      // Keep only the latest non-empty text: at settle time it is the final assistant reply.
       if (typeof text === "string" && text !== "") run.assistantText = text;
     },
 
@@ -190,7 +196,7 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
       if (!accept(sessionId)) return null;
       if (!isError) return null;
       const run = ensureRun(sessionId);
-      // §12.3：同一 run 内同一工具失败只计一次计数（并行工具模式下 `tool_execution_end` 乱序、会重复刷）
+      // One count per tool name per run: with parallel tools `tool_execution_end` arrives out of order.
       const count = (run.toolFailures.get(toolName) ?? 0) + 1;
       run.toolFailures.set(toolName, count);
       log.record({ event: "lifecycle_tool_failed", sessionId, runId: run.runId, toolName, count });
@@ -221,7 +227,7 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
 
     onUiPromptEnd({ sessionId, kind }): void {
       if (!accept(sessionId)) return;
-      // 嵌套时 Pi 只发外层 span，所以这里可能一次减到 0；不允许出现负数。
+      // Nested prompts emit only the outer span, so one end can drop the depth to 0; it must never go negative.
       if (kind !== "custom") promptDepth = Math.max(0, promptDepth - 1);
       log.record({ event: "lifecycle_prompt_end", sessionId, kind, depth: promptDepth });
     },
@@ -236,7 +242,8 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
         return null;
       }
       if (!isIdle) {
-        // 官方语义：settled 时若仍有其它扩展启动的 run 在跑，就不该报「完成了」。
+        // Pi semantics: when another extension's run is still going at settle time,
+        // reporting "completed" would be wrong.
         describe("not_idle");
         return null;
       }
@@ -282,7 +289,7 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
     onShutdown(reason: ShutdownReason): void {
       stale = true;
       activeRun = undefined;
-      // §18.5 修订 1：进程被强杀时可能不补发 `ui_prompt_end`，必须兜底复位。
+      // A hard kill can skip the final `ui_prompt_end`, so the depth is reset defensively.
       promptDepth = 0;
       log.record({ event: "lifecycle_shutdown", reason, sessionId: boundSessionId ?? null });
     },

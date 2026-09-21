@@ -1,15 +1,21 @@
 /**
- * 通知设置界面的**纯组件回归**（不依赖真实宿主、不写真实用户目录）。
+ * Pure component regression for the settings UI: no real host and no writes to the real user directory.
  *
- * 覆盖 UX 方案里那些「看着对但很容易做错」的点：
- *   R  渲染：父级行内联展示当前值/用户默认、标记列固定占位不抖动、行尾 ` · default` 永不被截断
- *   K  键盘：↑↓ 移动、Enter 进入/选择、Esc 返回并恢复父级焦点、Ctrl+S 被消费
- *   D  Ctrl+S：标记迁移 + 状态行动作反馈同时发生，且只写这一项（稀疏）
- *   C  集合字段：Enter 切换成员，可多行同时带 `✓ `；保存写整个数组
- *   I  数值/时间：预设候选 + `custom…` 输入框，非法值就地报错且不改变任何状态
- *   V  常驻与折叠：footer 恒显 `Ctrl+S  save as default`；Ctrl+T/R/O 三个折叠动作可用
+ * Covers the parts that look right but are easy to get wrong:
+ *   R  rendering: the parent row shows the current value and the saved default inline, marker columns
+ *      keep their place, and the trailing ` · default` is never truncated
+ *   K  keyboard: up/down movement, Enter to enter/select, Esc to go back and restore the parent focus,
+ *      Ctrl+S consumed by the component
+ *   D  Ctrl+S: the marker moves and the status line reports the action at the same time, while only
+ *      that one setting is written
+ *   C  collection fields: Enter toggles a member and several rows can carry `✓ `; saving writes the
+ *      whole array
+ *   I  numbers and times: preset candidates plus a `custom…` input row, where an illegal value reports
+ *      the problem in place without changing any state
+ *   V  persistent footer and folded actions: the footer always shows `Ctrl+S  save as default`, and
+ *      Ctrl+T/R/O stay available
  *
- * Git Bash 下与其它脚本一样带 `MSYS_NO_PATHCONV=1`：
+ * Like the other scripts it needs `MSYS_NO_PATHCONV=1` under Git Bash:
  *   MSYS_NO_PATHCONV=1 node test/settings-ui.mjs
  */
 
@@ -21,8 +27,8 @@ import { createRequire } from "node:module";
 
 import { resolvePiPackageEntry, resolveSdkEntry } from "./sdk-path.mjs";
 
-// ui.ts 依赖 @earendil-works/pi-tui（在 pi/SDK 加载器里能解析，裸 node 不能），
-// 所以用与 pi-image-generation 相同的 jiti + alias 方式加载源码。
+// ui.ts imports @earendil-works/pi-tui, which resolves inside the pi/SDK loader but not under bare
+// node, so the source is loaded through jiti with an alias.
 const sdkEntry = resolveSdkEntry();
 const { createJiti } = createRequire(sdkEntry)("jiti");
 const jiti = createJiti(import.meta.url, {
@@ -40,7 +46,7 @@ const settings = await jiti.import("../src/settings.ts");
 const ui = await jiti.import("../src/ui.ts");
 
 // ---------------------------------------------------------------------------
-// 按键（真实终端字节；`matchesKey` 的第二个参数才是按键标识）
+// Keys (real terminal bytes; `matchesKey` takes the key name as its second argument)
 // ---------------------------------------------------------------------------
 
 const KEY = {
@@ -58,7 +64,7 @@ const KEY = {
 };
 
 // ---------------------------------------------------------------------------
-// 测试脚手架
+// Test harness
 // ---------------------------------------------------------------------------
 
 let passed = 0;
@@ -80,7 +86,7 @@ async function step(name, run) {
 const agentDir = path.join(TMP, "agent");
 fs.mkdirSync(agentDir, { recursive: true });
 
-/** 每个用例一份干净的用户目录 + 一个组件实例（host 用真实的 config/settings 函数实现）。 */
+/** A clean user directory and a component instance per test; the host uses the real config and settings functions. */
 function makeHarness() {
   fs.rmSync(path.join(agentDir, "pi-notification"), { recursive: true, force: true });
   let overlay = settings.emptyOverlay();
@@ -165,15 +171,15 @@ function makeHarness() {
   };
 }
 
-/** 焦点行（含 `→ `）。 */
+/** The focused row (carries `→ `). */
 const focusRow = (lines) => lines.find((line) => line.startsWith("→ ")) ?? "";
-/** 某文本所在行。 */
+/** The row containing a given text. */
 const rowWith = (lines, needle) => lines.find((line) => line.includes(needle));
-/** 文本在行内的显示列（0-based）。 */
+/** Display column of a text inside a line, zero-based. */
 const columnOf = (line, needle) => tui.visibleWidth(line.slice(0, line.indexOf(needle)));
 
 // ---------------------------------------------------------------------------
-// R：渲染与标记列
+// R: rendering and marker columns
 // ---------------------------------------------------------------------------
 
 await step("R1 父级列表：每行内联展示当前值，未保存的用户默认显示为「未保存」", () => {
@@ -211,24 +217,25 @@ await step("R4 溢出策略：父级行宽度不够时先截值不动标记；�
   const item = settings.buildSettingItems(harness.host.config()).find((candidate) => candidate.id === "minLevel");
   assert.equal(harness.host.saveDefault(item, "warning").ok, true);
 
-  // 宽终端：两列完整（直接 saveDefault 后，当前值也随用户默认一起变成 warning）
+  // Wide terminal: both columns fit (after saveDefault the current value becomes warning too).
   const wide = rowWith(harness.render(60), "最低等级");
   assert.match(wide, /✓ warning/, `宽终端丢了当前值: ${JSON.stringify(wide)}`);
   assert.match(wide, /default warning/, `宽终端丢了 default 标记: ${JSON.stringify(wide)}`);
 
-  // 中等宽度（40）：标签必须完整（先保「认得出是哪一项」），default 列此时让位
+  // Medium width (40): the label must stay intact, so the default column yields.
   const medium = rowWith(harness.render(40), "最低等级");
   assert.ok(medium, "40 列下标签被截断了");
   assert.match(medium, /✓ warning/, "current 值列应保留");
 
-  // 窄终端（20）：降级为只显示当前值列（标签可能被截断，所以按行号取），且绝不超宽
+  // Narrow terminal (20): only the current-value column survives and nothing exceeds the width.
+  // The label may be truncated here, so the row is picked by index.
   const narrow = harness.render(20);
   assert.ok(narrow.every((line) => tui.visibleWidth(line) <= 20), "渲染行超过了给定宽度");
   const narrowRow = narrow[3]; // 第 2 个数据行 = 基础 · 最低等级
   assert.match(narrowRow, /✓ /, `窄终端至少应保留当前值标记: ${JSON.stringify(narrowRow)}`);
   assert.ok(!narrowRow.includes(" · default") || tui.visibleWidth(narrowRow) <= 20);
 
-  // 候选项行：宽度先分配给标记与尾标，` · default` 永不被截断
+  // Candidate rows: width goes to the markers and the suffix first, so ` · default` is never truncated.
   const candidateLines = harness.render(32);
   harness.press(KEY.down);
   harness.press(KEY.enter);
@@ -242,7 +249,7 @@ await step("R4 溢出策略：父级行宽度不够时先截值不动标记；�
 });
 
 // ---------------------------------------------------------------------------
-// K：键盘与焦点
+// K: keyboard and focus
 // ---------------------------------------------------------------------------
 
 await step("K1 ↑↓ 移动焦点；Enter 进入详情；Esc 返回后父级焦点不变", () => {
@@ -284,7 +291,7 @@ await step("K3 长列表滚动：焦点行始终在可视窗口内，位置提�
 });
 
 // ---------------------------------------------------------------------------
-// D：Ctrl+S
+// D: Ctrl+S
 // ---------------------------------------------------------------------------
 
 await step("D1 Ctrl+S：标记迁移到当前值行 + 状态行给出确认（两者都要有）", () => {
@@ -314,7 +321,7 @@ await step("D2 Ctrl+S 只写这一项（稀疏），其它字段不落进用户�
   harness.host.saveDefault(item, false);
   const raw = harness.userFile();
   assert.deepEqual(raw, { content: { includeCost: false } }, `用户文件应只含被保存的字段: ${JSON.stringify(raw)}`);
-  // 再保存另一项：两项都在，且其余字段仍不出现
+  // Saving a second setting keeps both and still leaves every other field out of the file.
   const second = settings.buildSettingItems(harness.host.config()).find((candidate) => candidate.id === "coalesce.windowMs");
   harness.host.saveDefault(second, 0);
   assert.deepEqual(harness.userFile(), { content: { includeCost: false }, coalesce: { windowMs: 0 } });
@@ -337,7 +344,7 @@ await step("D3 保存失败：不迁移标记、当前值仍生效、状态行�
 });
 
 // ---------------------------------------------------------------------------
-// C：集合字段
+// C: collection fields
 // ---------------------------------------------------------------------------
 
 await step("C1 集合字段可多行同时带 `✓ `，Enter 切换成员", () => {
@@ -346,7 +353,7 @@ await step("C1 集合字段可多行同时带 `✓ `，Enter 切换成员", () =
   const index = items.findIndex((item) => item.id === "quietHours.exceptLevels");
   for (let step = 0; step < index; step += 1) harness.press(KEY.down);
   harness.press(KEY.enter);
-  // 详情初始焦点落在「当前值」那一行（error），向上移到 warning 再加进去
+  // The detail view opens on the current-value row (error), then moves up to warning and adds it.
   harness.press(KEY.up);
   harness.press(KEY.enter);
   const lines = harness.render(80);
@@ -366,7 +373,7 @@ await step("C2 集合字段的 Ctrl+S 写整个数组", () => {
 });
 
 // ---------------------------------------------------------------------------
-// I：数值 / 时间 / custom…
+// I: numbers, times and custom input
 // ---------------------------------------------------------------------------
 
 await step("I1 数值项：预设候选 + 末尾 `custom…`；当前值不在预设里时补一行", () => {
@@ -386,7 +393,7 @@ await step("I2 custom… 输入：非法值就地报错且不改变当前值/用
   const index = items.findIndex((item) => item.id === "quietHours.start");
   for (let step = 0; step < index; step += 1) harness.press(KEY.down);
   harness.press(KEY.enter);
-  // 走到 custom… 行
+  // Walk down to the custom… row.
   let guard = 0;
   while (!focusRow(harness.render(80)).includes(settings.CUSTOM_ROW_LABEL) && guard < 40) {
     harness.press(KEY.down);
@@ -419,7 +426,7 @@ await step("I3 custom… 输入：合法值写入当前值", () => {
     guard += 1;
   }
   harness.press(KEY.enter);
-  // 清空预填值后输入 4321
+  // Clear the pre-filled value, then type 4321.
   for (let index2 = 0; index2 < 8; index2 += 1) harness.press(KEY.backspace);
   for (const character of "4321") harness.press(character);
   harness.press(KEY.enter);
@@ -428,7 +435,7 @@ await step("I3 custom… 输入：合法值写入当前值", () => {
 });
 
 // ---------------------------------------------------------------------------
-// V：footer 与折叠动作
+// V: footer and folded actions
 // ---------------------------------------------------------------------------
 
 await step("V1 footer 常驻：每个视图的末尾都含 `Ctrl+S  save as default`", () => {
@@ -483,7 +490,7 @@ await step("V3 Esc 在列表视图结束组件，并带回摘要", () => {
 });
 
 // ---------------------------------------------------------------------------
-// S：三层值模型（overlay 优先级、fork 不继承）
+// S: three-layer values (overlay precedence, no inheritance through fork)
 // ---------------------------------------------------------------------------
 
 await step("S1 applyOverlay：本对话覆盖 > 用户默认，未覆盖字段原样保留", () => {

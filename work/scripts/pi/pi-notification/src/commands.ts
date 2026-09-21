@@ -1,19 +1,22 @@
 /**
- * `/notify` 命令（设计 §10.3；UX 方案 §信息架构）。
+ * The `/notify` command.
  *
- * **唯一入口**：不带参数打开通知设置（TUI）；旧子命令已移除。
- * 原有能力仍在，只是折叠进设置界面：`Ctrl+T` 自检、`Ctrl+R` 重读、`Ctrl+O` 状态总览，
- * 非 TUI（print/json/rpc）则直接打印状态与配置文件路径。
+ * Single entry point: without arguments it opens the settings UI in the TUI; the old
+ * subcommands are gone. Their capabilities still exist, folded into that UI (Ctrl+T self-test,
+ * Ctrl+R re-read, Ctrl+O status). Outside the TUI (print/json/rpc) it prints the status and the
+ * config file paths instead.
  *
- * 三个值的归属在这里落地：
- *  - 出厂默认：只读（config.ts）
- *  - 用户级默认：Ctrl+S → `writeUserDefault`（**单项稀疏写盘**）
- *  - 本对话：Enter → 会话覆盖（overlay）→ 由 index.ts 应用并写 `pi.appendEntry`
+ * Where each value belongs:
+ *  - factory defaults: read-only, from `config.ts`;
+ *  - user defaults: Ctrl+S through `writeUserDefault`, a single sparse write;
+ *  - this conversation: Enter writes the session overlay, which the extension applies and
+ *    persists as a session entry.
  *
- * 官方 `ctx.ui.notify` **不能**作为外部投递成功的证据（§1.8）。
+ * `ctx.ui.notify` is not evidence that an external delivery succeeded: it only reports to the
+ * host's own UI.
  *
- * 注意（§2.2 第 6 点）：用 `ctx.mode === "tui"` 而不是 `hasUI` 守卫终端 UI —— RPC 下 hasUI 也为真，
- * 但那里的对话框语义不同，`ctx.ui.custom` 在 RPC 下不可用。`ui.notify` 在 print/json 下是 no-op。
+ * Guard terminal UI with `ctx.mode === "tui"` rather than `hasUI`, because `hasUI` is also true
+ * over RPC where `ctx.ui.custom` is unavailable; `ui.notify` is a no-op under print/json.
  */
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
@@ -38,19 +41,19 @@ export interface CommandDeps {
   configLoad(): ConfigLoadResult;
   service(): NotificationService;
   agentDir(): string;
-  /** 重新读盘并应用当前会话覆盖（不重建扩展/生命周期） */
+  /** Re-reads the config and applies the current session overlay, without rebuilding the extension. */
   reload(ctx: ExtensionCommandContext): void;
-  /** 会话级静默标志（`--no-notify`） */
+  /** Session-level silence flag, set by `--no-notify`. */
   isSilenced(): boolean;
-  /** 首次启用时载入的会话 id，用于展示 */
+  /** Session id loaded at first enable, used for display. */
   sessionId(): string | undefined;
-  /** 当前是否在等用户输入（S6 的 waiting 状态） */
+  /** True while a user prompt is open. */
   isWaitingForUser?(): boolean;
-  /** 本对话覆盖（可变引用；命令层只读它，写走 setOverlay） */
+  /** Session overlay; the command layer only reads it, writes go through `setOverlay`. */
   overlay(): SessionOverlay;
-  /** 写入本对话覆盖：应用生效配置 + 落会话条目 */
+  /** Writes the overlay: applies the effective config and persists a session entry. */
   setOverlay(next: SessionOverlay): void;
-  /** 原始用户文件（稀疏用户默认的存在性），每次调用都重新读盘 */
+  /** Raw user file, re-read on every call, used for the presence of sparse user defaults. */
   userRaw(): unknown;
 }
 
@@ -85,28 +88,30 @@ function formatStatus(deps: CommandDeps): string {
   return lines.join("\n");
 }
 
-/** print/json 的 notify 是 no-op；用 stderr 保持 stdout 协议干净。 */
+/** print/json notify is a no-op, so stderr keeps the stdout protocol clean. */
 function report(ctx: ExtensionCommandContext, text: string, type: "info" | "warning" | "error" = "info"): void {
   ctx.ui.notify(text, type);
   if (ctx.mode === "print" || ctx.mode === "json") process.stderr.write(`${text}\n`);
 }
 
 function configView(config: NotificationConfig): string {
-  // 渠道 options 可含任意 header/query 凭据；不要靠正则猜密钥名。
+  // Provider options may hold arbitrary header or query credentials; never guess secret names
+  // with a regex.
   const visible = { ...config, providers: config.providers.map(({ options: _options, ...provider }) => ({ ...provider, options: "[隐藏，请在配置文件查看]" })) };
   return sanitize(JSON.stringify(visible, null, 2), 12000);
 }
 
-/** 会话被强制静默时，界面不应能把它打开，也不该把它写进用户默认。 */
+/** While the session is force-silenced the UI must not be able to turn notifications on. */
 function forcedOff(deps: CommandDeps): boolean {
   return deps.isSilenced() || isDisabledByEnv();
 }
 
 /**
- * 把界面的写入请求接到真实的配置/持久化上。
+ * Connects the UI write requests to the real config and persistence.
  *
- * - Enter（setValue）→ 本对话覆盖（内存 + 会话条目），立即生效、跨 `/reload` 与同一对话恢复保留；
- * - Ctrl+S（saveDefault）→ 单项稀疏写盘（只写这一项），随后重读配置让“当前值/用户默认”都新鲜。
+ * Enter (setValue) writes the session overlay, effective immediately and preserved across
+ * `/reload` for the same conversation. Ctrl+S (saveDefault) performs one sparse write and then
+ * re-reads the config so both the current value and the user default are fresh.
  */
 function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): SettingsHost {
   const applyPatch = (item: Parameters<SettingsHost["setValue"]>[0], value: ItemValue): { ok: true; message: string } | { ok: false; message: string } => {
@@ -139,8 +144,9 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
       const patch = item.patch(value);
       const filePatch = patch.kind === "providers"
         ? {
-          // 渠道是数组字段：写盘要写整个数组，取「当前生效」的那一份（含本对话的开关），
-          // 这样 Ctrl+S 的语义才是“把当前值固化为用户默认”。
+          // Providers are an array field: the whole array is written, taken from the effective
+          // config (including this conversation's switches), so Ctrl+S really means "freeze the
+          // current value as the user default".
           providers: deps.config().providers.map((provider) => (
             provider.id === patch.id ? { ...provider, enabled: patch.value } : { ...provider }
           )),
@@ -152,7 +158,7 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
         deps.log.record({ event: "notify_default_write_failed", item: item.id, problems });
         return { ok: false, message: `保存失败，用户文件未改动：${problems.join("; ")}` };
       }
-      deps.reload(ctx); // 成功落盘后才重读，让用户默认与当前值一起刷新
+      deps.reload(ctx); // Re-read only after a successful write, so both layers refresh together.
       deps.log.record({ event: "notify_default_saved", item: item.id, path: patch.kind === "providers" ? `providers.${patch.id}.enabled` : patch.path });
       return { ok: true, message: `已保存为默认 · ${sanitize(userConfigPath(deps.agentDir()), 2000)}` };
     },
@@ -170,8 +176,8 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
           channels: config.rules.runCompleted.channels,
           meta: { sessionId: deps.sessionId() ?? "manual", runId: String(now), level: "info" },
         },
-        // 自检绕过静默时段/合并/冷却：否则刚跑完一个任务再自检会被冷却吃掉，
-        // 用户会把它误读成「渠道坏了」。
+        // Self-tests bypass quiet hours, coalescing and cooldown: otherwise a self-test right
+        // after a run would be swallowed by the cooldown and read as a broken channel.
         { bypassFilters: true },
       );
       const selection = selectTerminalChannel(createDefaultTerminalIo().environment());
@@ -201,7 +207,8 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
 export async function handleNotifyCommand(args: string, ctx: ExtensionCommandContext, deps: CommandDeps): Promise<void> {
   const trimmed = (args ?? "").trim();
 
-  // 单一入口：子命令已移除。给一句明确指路，而不是静默什么都不做。
+  // Single entry point: subcommands were removed, so point the user somewhere instead of
+  // silently doing nothing.
   if (trimmed !== "") {
     deps.log.record({ event: "notify_usage", args: sanitize(trimmed, 100) });
     report(ctx, `通知设置已收敛为单一入口：直接输入 /notify 打开设置。\n状态总览 Ctrl+O、自检 Ctrl+T、重读配置 Ctrl+R 都在设置界面里。`, "warning");
@@ -209,7 +216,8 @@ export async function handleNotifyCommand(args: string, ctx: ExtensionCommandCon
   }
 
   if (ctx.mode !== "tui") {
-    // 非 TUI 不打开组件（RPC 下 custom() 不可用），只打印状态与路径，且不写盘。
+    // Non-TUI never opens the component (custom() is unavailable over RPC); it prints the status
+    // and paths and writes nothing.
     deps.log.record({ event: "notify_settings_view", mode: ctx.mode });
     report(ctx, `${formatStatus(deps)}\n\n设置界面仅 TUI 可用；用户级默认文件: ${sanitize(userConfigPath(deps.agentDir()), 2000)}\n当前生效值（渠道 options 隐藏）:\n${configView(deps.config())}`);
     return;
@@ -237,5 +245,5 @@ export async function handleNotifyCommand(args: string, ctx: ExtensionCommandCon
   });
 }
 
-/** 供非 TUI 分支复用（状态文本与脱敏视图）。 */
+/** Reused by the non-TUI branches: sanitized status text and config view. */
 export { formatStatus as formatNotifyStatus, configView as notifyConfigView };

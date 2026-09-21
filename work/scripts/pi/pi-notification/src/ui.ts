@@ -1,18 +1,23 @@
 /**
- * 通知设置界面（UX 方案 §信息架构 / §列表与标记规则 / §键盘与 Ctrl+S）。
+ * Settings UI.
  *
- * 两级列表：
- *  - **配置项列表**：一行一项，内联展示「当前值」与「用户级默认值」，不进入详情就能读到状态。
- *  - **候选项列表**：一行一个候选值，标记位固定占位（焦点 2 列 + 当前值 2 列），
- *    行尾 ` · default` 是独立的「用户级默认」通道，可与 `✓`/`→ ` 共存。
+ * Two levels:
+ *  - the setting list: one row per setting, showing the current value and the saved user
+ *    default inline so the state is readable without opening a detail view;
+ *  - the candidate list: one row per candidate value with fixed marker columns (two columns
+ *    for focus, two for the current value); the trailing ` · default` is a separate channel
+ *    and can coexist with the markers.
  *
- * 本模块只有渲染与按键；写盘/生效/静默判定都在命令层（见 commands.ts 的 SettingsHost 实现），
- * 因此可以脱离宿主直接驱动（test/settings-ui.mjs 就是这么测的）。
+ * This module only renders and handles keys; persistence, activation and the silence checks
+ * live in the command layer, so the component can be driven without a host.
  *
- * 三条刻意的设计：
- *  1. 标记单元格不带颜色，保证 `✓` 出现/消失时文本不横向跳动（等宽由终端保证）。
- *  2. 行尾 ` · default` 与焦点/当前值列**先于**值文本分配宽度，溢出只截断值，不吞标记。
- *  3. Ctrl+S 只在组件持有输入时消费（不注册全局快捷键），与宿主 app.models.save 的同名键不冲突。
+ * Three deliberate choices:
+ *  1. Marker cells carry no colour, so a marker appearing or disappearing never shifts text
+ *     horizontally.
+ *  2. The trailing ` · default` and the marker columns are given width before the value text;
+ *     overflow truncates the value and never swallows a marker.
+ *  3. Ctrl+S is consumed only while the component holds input; no global shortcut is
+ *     registered, so it cannot collide with the host's own save binding.
  */
 
 import { CURSOR_MARKER, decodeKittyPrintable, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
@@ -29,13 +34,13 @@ import {
 } from "./settings.ts";
 import type { NotificationConfig } from "./types.ts";
 
-/** 只用到的主题能力（方法签名，避免绑死 SDK 的调色板类型）。 */
+/** Only the theme capabilities used here, as method signatures, to stay SDK-palette agnostic. */
 export interface SettingsTheme {
   fg(color: "accent" | "muted" | "dim" | "success" | "error" | "warning" | "text", text: string): string;
   bold(text: string): string;
 }
 
-/** 注入的按键解析器（真实宿主给 KeybindingsManager，测试给桩）。 */
+/** Injected key parser: the host passes its keybindings manager, tests pass a stub. */
 export interface SettingsKeybindings {
   matches(data: string, keybinding: string): boolean;
 }
@@ -43,19 +48,19 @@ export interface SettingsKeybindings {
 export type ItemValue = SettingValue | SettingValue[];
 
 export interface SettingsHost {
-  /** 生效配置（已含本对话覆盖） */
+  /** Effective config, including this conversation's overlay. */
   config(): NotificationConfig;
-  /** 原始用户文件（稀疏用户默认的「存在性/取值」） */
+  /** Raw user file, used for the presence and value of sparse user defaults. */
   userRaw(): unknown;
-  /** Enter：写入本对话覆盖并立即生效 */
+  /** Enter: writes the per-conversation overlay, effective immediately. */
   setValue(item: SettingItem, value: ItemValue): { ok: boolean; message: string };
-  /** Ctrl+S：固化为用户级默认（单项稀疏写盘） */
+  /** Ctrl+S: freezes the value as a user default with a single sparse write. */
   saveDefault(item: SettingItem, value: ItemValue): { ok: boolean; message: string };
-  /** Ctrl+T：发送测试通知 */
+  /** Ctrl+T: sends a test notification. */
   test(): { ok: boolean; message: string };
-  /** Ctrl+R：重新读盘（不重载扩展） */
+  /** Ctrl+R: re-reads the config without reloading the extension. */
   reload(): { ok: boolean; message: string };
-  /** Ctrl+O：状态总览文本（分页只读） */
+  /** Ctrl+O: read-only, paged status text. */
   statusLines(): string[];
 }
 
@@ -63,14 +68,15 @@ interface FooterHint {
   text: string;
 }
 
-/** 列表可视行数（组件自己控制高度，不依赖终端高度）。 */
+/** Visible list rows; the component sizes itself instead of reading the terminal height. */
 const BODY_ROWS = 12;
-/** 焦点列与当前值列各占 2 个终端显示列，未命中也要占位。 */
+/** Focus and current-value cells are two display columns each and stay reserved when unset. */
 const FOCUS_CELL = (focused: boolean): string => (focused ? "→ " : "  ");
 const CURRENT_CELL = (current: boolean): string => (current ? "✓ " : "  ");
-/** 父级列表：列可见性的整表阀值（≥30 两列、16–29 只留当前值、<16 只留标签）。 */
+/** Parent list: width thresholds for column visibility (>=30 shows both, 16-29 only the
+ * current value, <16 only the label). */
 const DETAIL_MIN_WIDTH = 28;
-/** 窄于这个宽度就放弃行尾 ` · default`（先保焦点/当前值标记与值文本）。 */
+/** Below this width the trailing ` · default` is dropped to keep the markers and the value. */
 const DEFAULT_SUFFIX_MIN_WIDTH = 18;
 
 const FOOTER_HINTS: FooterHint[] = [
@@ -101,9 +107,9 @@ export interface NotifySettingsComponentOptions {
 }
 
 export interface NotifySettingsSummary {
-  /** 通过 Ctrl+S 成功写盘的次数 */
+  /** Number of successful Ctrl+S writes. */
   savedDefaults: number;
-  /** 在本对话里改过值的次数 */
+  /** Number of values changed in this conversation. */
   changed: number;
 }
 
@@ -133,11 +139,7 @@ export class NotifySettingsComponent {
     this.refresh();
   }
 
-  // -------------------------------------------------------------------------
-  // 状态
-  // -------------------------------------------------------------------------
-
-  /** 重建配置项列表（配置可能被 Ctrl+R 重读，渠道也可能变化）。 */
+  /** Rebuilds the setting list: Ctrl+R may have re-read the config and changed providers. */
   private refresh(): void {
     const focusedId = this.items[this.listFocus]?.id;
     this.items = buildSettingItems(this.host.config());
@@ -157,7 +159,7 @@ export class NotifySettingsComponent {
     return this.items[this.listFocus];
   }
 
-  /** 当前值（本对话生效值）。 */
+  /** Current value, as effective in this conversation. */
   private value(item: SettingItem): unknown {
     return item.read(this.host.config());
   }
@@ -170,7 +172,7 @@ export class NotifySettingsComponent {
     return userDefaultValue(this.host.userRaw(), item);
   }
 
-  /** 是把「当前值」提交给 host 的统一入口（集合项在那里切成数组）。 */
+  /** Single entry point for submitting the current value; collection kinds are turned into an array there. */
   private commit(item: SettingItem, value: ItemValue, viaSave: boolean): void {
     const result = viaSave ? this.host.saveDefault(item, value) : this.host.setValue(item, value);
     if (result.ok) {
@@ -186,15 +188,12 @@ export class NotifySettingsComponent {
     this.invalidate();
   }
 
-  // -------------------------------------------------------------------------
-  // 候选项
-  // -------------------------------------------------------------------------
-
   private candidates(item: SettingItem): Candidate[] {
     const config = this.host.config();
     const rows: Candidate[] = item.candidates(config).map((candidate) => ({ value: candidate.value, label: candidate.label }));
     if (item.kind !== "collection") {
-      // 当前值/用户默认可能不在预设集里：补一行，保证标记位总有落脚处。
+      // The current value or the saved default may be outside the preset list: add a row so the
+      // marker column always has somewhere to land.
       const known = new Set(rows.map((row) => String(row.value)));
       for (const extra of [this.value(item), this.defaultValue(item)]) {
         if (extra === undefined || known.has(String(extra))) continue;
@@ -205,10 +204,6 @@ export class NotifySettingsComponent {
     if (item.parseInput) rows.push({ value: "", label: CUSTOM_ROW_LABEL, custom: true });
     return rows;
   }
-
-  // -------------------------------------------------------------------------
-  // 渲染
-  // -------------------------------------------------------------------------
 
   render(width: number): string[] {
     if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
@@ -256,7 +251,7 @@ export class NotifySettingsComponent {
     return truncateToWidth(this.theme.fg("dim", hints.join("   ")), width);
   }
 
-  /** 列表位置提示（超出可视窗口时才有）——不占用列表行宽，所以不会被截断。 */
+  /** Position hint, present only when the list overflows; it never takes row width. */
   private positionInfo(): string | undefined {
     const visible = Math.min(BODY_ROWS, this.totalRows());
     const total = this.totalRows();
@@ -302,7 +297,7 @@ export class NotifySettingsComponent {
     return this.window(rows, this.detailScroll(view.focus, rows.length));
   }
 
-  /** 详情页的滚动位置由焦点推导：焦点总在可视窗口内。 */
+  /** The detail view derives its scroll offset from the focused row, which then stays visible. */
   private detailScroll(focus: number, total: number): number {
     if (total <= BODY_ROWS) return 0;
     const half = Math.floor(BODY_ROWS / 2);
@@ -326,7 +321,7 @@ export class NotifySettingsComponent {
     return this.window(rows, this.statusOffset);
   }
 
-  /** 取焦点所在的窗口（位置提示走 hintLine，不用挤占行宽）。 */
+  /** Slice around the focused row; the position hint lives in the hint line, not on these rows. */
   private window(rows: string[], scroll: number): string[] {
     if (rows.length <= BODY_ROWS) return rows;
     const start = Math.min(Math.max(0, scroll), Math.max(0, rows.length - BODY_ROWS));
@@ -334,12 +329,15 @@ export class NotifySettingsComponent {
   }
 
   /**
-   * 父级行：`→ 分组 · 标签   ✓ 当前值   default 用户默认`。
+   * Parent row: `→ group · label   ✓ current value   default saved value`.
    *
-   * 降级顺序（先保「能认出来是哪一项」，再保标记，最后才截值）：
-   *  1. 标签至少留 14 列（或它的完整长度），剩下的宽度先给 `✓ 当前值`、再给 `default X`；
-   *  2. 两列放不下时只留 `✓ 当前值`（用户默认仍在详情页与宽终端可见）；
-   *  3. 还放不下就截值，但保留 `✓ ` / `default ` 前缀，所以标记不会被“截掉”。
+   * Degradation order, keeping "which setting is this" first, then the markers, then the value:
+   *  1. keep at least 14 columns for the label (or its full width), then give width to
+   *     `✓ current` and afterwards to `default X`;
+   *  2. when both do not fit, keep only `✓ current`; the saved default stays visible in the
+   *     detail view and on wide terminals;
+   *  3. only then truncate the value, keeping the `✓ ` / `default ` prefixes so a marker is
+   *     never cut away.
    */
   private itemRow(item: SettingItem, index: number, width: number): string {
     const focused = index === this.listFocus;
@@ -364,8 +362,9 @@ export class NotifySettingsComponent {
   }
 
   /**
-   * 候选项行：焦点列 + 当前值列（各 2 列，固定占位）+ 值 [+ 附加信息] + 行尾 ` · default`。
-   * 宽度先分配给标记与尾标，值文本拿剩余宽度并用 `…` 截断。
+   * Candidate row: focus and current-value cells (two columns each, always reserved), then the
+   * value with optional detail, then a trailing ` · default`. Markers and suffix are given width
+   * first; the label takes what is left and is truncated with an ellipsis.
    */
   private candidateRow(item: SettingItem, candidate: Candidate, index: number, focusIndex: number, width: number): string {
     const config = this.host.config();
@@ -384,7 +383,7 @@ export class NotifySettingsComponent {
     return truncateToWidth(`${head}${" ".repeat(pad)}${suffix}`, width);
   }
 
-  /** 候选项是不是「用户级默认那一项」（集合按成员判断）。 */
+  /** True when this candidate is the saved user default; collections match by membership. */
   private isDefaultCandidate(item: SettingItem, candidate: Candidate, current: unknown): boolean {
     if (!this.hasDefault(item)) return false;
     const fallback = this.defaultValue(item);
@@ -392,13 +391,10 @@ export class NotifySettingsComponent {
       return Array.isArray(fallback) && fallback.includes(candidate.value as SettingValue);
     }
     if (fallback === candidate.value) return true;
-    // 数值/时间：默认值可能不在预设集里，靠 format 对齐（新补的行会走到这里）
+    // Numbers and times: the saved default may be outside the preset list, so align by the
+    // formatted text; rows added for exactly that case land here.
     return current !== undefined && item.format(fallback) === candidate.label && isCurrentValue(item.kind, current, candidate.value as SettingValue);
   }
-
-  // -------------------------------------------------------------------------
-  // 输入
-  // -------------------------------------------------------------------------
 
   handleInput(data: string): void {
     if (this.view.kind === "input") {
@@ -418,7 +414,8 @@ export class NotifySettingsComponent {
       return;
     }
     if (matchesKey(data, Key.ctrl("r"))) {
-      // 重读会改变生效配置 → 重建列表，但保持当前视图与焦点。
+      // Re-reading changes the effective config, so the list is rebuilt while the current
+      // view and focus are preserved.
       const result = this.host.reload();
       this.refresh();
       this.report(result);
@@ -467,7 +464,8 @@ export class NotifySettingsComponent {
     }
   }
 
-  /** 进入详情时把焦点放到当前值那一行（用户最可能想改的就是它）。 */
+  /** On entering the detail view, focus the row holding the current value: that is what users
+   * most often want to change. */
   private initialDetailFocus(item: SettingItem): number {
     const current = this.value(item);
     const index = this.candidates(item)
@@ -588,7 +586,7 @@ export class NotifySettingsComponent {
     }
   }
 
-  /** Ctrl+S：把焦点项的当前值固化为用户级默认。 */
+  /** Ctrl+S: freezes the focused item's current value as the user default. */
   private saveFocusedDefault(): void {
     const item = this.view.kind === "detail" || this.view.kind === "input"
       ? this.itemById(this.view.itemId)
@@ -603,7 +601,7 @@ export class NotifySettingsComponent {
     this.cachedLines = undefined;
   }
 
-  /** 测试与排障用：当前视图与焦点。 */
+  /** Current view and focus; used by tests and for debugging. */
   debugState(): { view: View; listFocus: number; items: string[]; message?: { text: string; tone: Tone } } {
     return {
       view: this.view,
@@ -614,7 +612,7 @@ export class NotifySettingsComponent {
   }
 }
 
-/** 供命令层交给 `ctx.ui.custom()` 的工厂。 */
+/** Factory handed to `ctx.ui.custom()` by the command layer. */
 export function createNotifySettingsComponent(
   options: NotifySettingsComponentOptions,
 ): NotifySettingsComponent {

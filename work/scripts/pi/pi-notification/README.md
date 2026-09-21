@@ -413,15 +413,22 @@ macOS 只走 OSC 777，因此 Apple Terminal 不会显示；原生横幅（`osas
 ```bash
 cd work/scripts/pi/pi-notification
 
-MSYS_NO_PATHCONV=1 npm test                        # 全部六套（128 条断言）
-MSYS_NO_PATHCONV=1 node test/terminal-channel.mjs   # 终端渠道：选择/渲染/注入面/TTY 纪律（不需要 SDK，10 条）
-MSYS_NO_PATHCONV=1 node test/service-coalesce.mjs   # 投递服务：门槛/去重/静默/合并/冷却/队列/超时（注入假时钟，22 条）
-MSYS_NO_PATHCONV=1 node test/webhook-channel.mjs    # Webhook + 装饰器（回环 HTTP 服务，不出网，13 条）
-MSYS_NO_PATHCONV=1 node test/settings-ui.mjs        # 设置界面纯组件：渲染/标记列/溢出/键盘/Ctrl+S/三层值（23 条）
+MSYS_NO_PATHCONV=1 npm test                        # 全部十套（165 步）
+MSYS_NO_PATHCONV=1 node test/config-validation.mjs  # 配置校验矩阵：字段边界/降级/稀疏与原子写盘（不需要 SDK，13 步）
+MSYS_NO_PATHCONV=1 node test/settings-patch.mjs     # 稀疏补丁与配置项助手：合并语义/overlay 形状/用户默认（不需要 SDK，8 步）
+MSYS_NO_PATHCONV=1 node test/registry-log.mjs       # 渠道注册降级 + 脱敏/清洗/日志 sink（不需要 SDK，8 步）
+MSYS_NO_PATHCONV=1 node test/lifecycle-state.mjs    # 状态机结构性丢弃与投递服务边界（注入假时钟，13 步）
+MSYS_NO_PATHCONV=1 node test/terminal-channel.mjs   # 终端渠道：选择/渲染/注入面/TTY 纪律（不需要 SDK，10 步）
+MSYS_NO_PATHCONV=1 node test/service-coalesce.mjs   # 投递服务：门槛/去重/静默/合并/冷却/队列/超时（注入假时钟，17 步）
+MSYS_NO_PATHCONV=1 node test/webhook-channel.mjs    # Webhook + 装饰器（回环 HTTP 服务，不出网，13 步）
+MSYS_NO_PATHCONV=1 node test/settings-ui.mjs        # 设置界面纯组件：渲染/标记列/溢出/键盘/Ctrl+S/三层值（23 步）
 MSYS_NO_PATHCONV=1 node test/host-lifecycle.mjs     # 真实宿主会话：判定/去重/阻塞/配置/单一入口与三层值（50 步）
-MSYS_NO_PATHCONV=1 node test/cli-smoke.mjs          # 真实 pi 进程（G–N，10 条）
+MSYS_NO_PATHCONV=1 node test/cli-smoke.mjs          # 真实 pi 进程（G–N，10 步）
 PI_SKIP_CLI=1 node test/cli-smoke.mjs               # 只想跑纯 SDK 时跳过
 ```
+
+前四个脚本只依赖纯函数与 Node 内置模块（不加载宿主、不出网、不写真实用户目录），可以单独秒级跑完；
+`host-lifecycle.mjs` 与 `cli-smoke.mjs` 会真的启动会话/进程，是完整验收的主要部分。
 
 Git Bash 下 **务必带 `MSYS_NO_PATHCONV=1`**：MSYS 会把 `/probe-cmd` 这类参数改写成
 `C:/Program Files/Git/probe-cmd`，命令会静默退化成普通 prompt 并真的调用一次模型（费钱且结论错）。

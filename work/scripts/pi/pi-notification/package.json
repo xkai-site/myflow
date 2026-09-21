@@ -6,7 +6,11 @@
   "license": "MIT",
   "private": true,
   "scripts": {
-    "test": "node test/terminal-channel.mjs && node test/service-coalesce.mjs && node test/webhook-channel.mjs && node test/settings-ui.mjs && node test/host-lifecycle.mjs && node test/cli-smoke.mjs",
+    "test": "node test/config-validation.mjs && node test/settings-patch.mjs && node test/registry-log.mjs && node test/lifecycle-state.mjs && node test/terminal-channel.mjs && node test/service-coalesce.mjs && node test/webhook-channel.mjs && node test/settings-ui.mjs && node test/host-lifecycle.mjs && node test/cli-smoke.mjs",
+    "test:config": "node test/config-validation.mjs",
+    "test:patch": "node test/settings-patch.mjs",
+    "test:registry": "node test/registry-log.mjs",
+    "test:lifecycle": "node test/lifecycle-state.mjs",
     "test:terminal": "node test/terminal-channel.mjs",
     "test:service": "node test/service-coalesce.mjs",
     "test:webhook": "node test/webhook-channel.mjs",

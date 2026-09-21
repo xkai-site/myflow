@@ -1,19 +1,20 @@
 /**
- * Pi 插件入口（设计 §5 / §6 / §8）。
+ * Plugin entry point: thin wiring only (register, convert shapes, forward). No judgement logic
+ * and no network access here.
  *
- * 薄接线层：只做「注册 + 形状转换 + 转发」，不做业务判定、不碰网络。
+ * Registered hooks, all notification-only: session_start, agent_start, message_end (read-only),
+ * agent_settled, session_shutdown, tool_execution_end, session_compact_failed, ui_prompt_start
+ * and ui_prompt_end; plus one command (`/notify`) and one CLI flag (`--no-notify`).
  *
- * 注册的 hook（全部纯通知型，§1.3）：
- *   session_start / agent_start / message_end(只读) / agent_settled / session_shutdown
- *   + S6：tool_execution_end / session_compact_failed / ui_prompt_start / ui_prompt_end
- * 以及 1 个命令（`/notify`）与 1 个 CLI 开关（`--no-notify`）。
- *
- * 三条实测硬约束（§18.4 / §18.5）：
- *  - 出口只有 `agent_settled`；**不注册 `agent_end`**（会被重试/压缩/续跑多次触发）。
- *  - `agent_settled` handler **只入队后立即返回**，handler 体内零 `await`（它会阻塞下一次 run）。
- *  - `session_shutdown` 收尾投递带短超时；旧实例在 shutdown 之后不再产生任何结论。
- *  其余新 hook 同样遵守「只入队」纪律：`tool_execution_end` 与 `ui_prompt_*` 也可能在
- *  用户交互的路径上，handler 内一旦 await 就会把延迟传导给用户。
+ * Three hard constraints:
+ *  - The only exit is `agent_settled`; `agent_end` must never be registered because retries,
+ *    compaction retries and queued continuations fire it more than once per run.
+ *  - The `agent_settled` handler enqueues and returns with no `await` in its body, because it
+ *    blocks the next run.
+ *  - `session_shutdown` flushes with a short budget, and the instance it belonged to must not
+ *    produce further conclusions.
+ *  - The newer hooks follow the same enqueue-only discipline: `tool_execution_end` and the
+ *    `ui_prompt_*` pair sit on interactive paths, where awaiting would relay the delay to the user.
  */
 
 import {
@@ -56,7 +57,7 @@ import {
 } from "../src/settings.ts";
 import type { AssistantStopReason, Notifier, NotificationConfig, RunSummary, UIPromptKind } from "../src/types.ts";
 
-/** 实例标识：保证 reload 后新旧实例的 runId / 去重键不冲突。 */
+/** Instance token: keeps run ids and dedupe keys distinct across a reload. */
 const INSTANCE_TOKEN = Math.random().toString(36).slice(2, 8);
 
 function isAssistantStopReason(value: unknown): value is AssistantStopReason {
@@ -67,8 +68,9 @@ function isAssistantStopReason(value: unknown): value is AssistantStopReason {
 }
 
 /**
- * 只保留文本片段、最多 200 个 code point 的 assistant 回复样本。
- * 展示长度（§19 的 10 个字）由 `rules` 决定；这里限长只是**不让运行期状态无界增长**。
+ * Keeps only text parts, at most 200 code points, as an assistant reply sample.
+ * The display length is decided by the rules layer; the cap here only stops per-run state from
+ * growing without bound.
  */
 function assistantText(content: unknown): string | undefined {
   if (!Array.isArray(content)) return undefined;
@@ -83,8 +85,9 @@ function assistantText(content: unknown): string | undefined {
 }
 
 /**
- * 上下文占比：`getContextUsage()` 与 `model.contextWindow` 都拿得到才算，拿不到就省略——
- * 不猜一个数字出来（本地模型/未知模型没有可靠的窗口大小）。
+ * Context usage percentage, omitted unless both `getContextUsage()` and `model.contextWindow`
+ * are available: guessing a number would be worse than showing nothing, since local and unknown
+ * models have no reliable window size.
  */
 function contextPercentOf(ctx: ExtensionContext): number | undefined {
   try {
@@ -97,7 +100,7 @@ function contextPercentOf(ctx: ExtensionContext): number | undefined {
   }
 }
 
-/** `ui_prompt_*` 的 kind（只接受已知值，避免把未知字符串写进白名单比较）。 */
+/** `ui_prompt_*` kinds; unknown strings are rejected so they cannot reach an allow-list comparison. */
 function asPromptKind(value: unknown): UIPromptKind | undefined {
   return value === "select" || value === "confirm" || value === "input" || value === "editor" || value === "custom"
     ? value
@@ -107,23 +110,26 @@ function asPromptKind(value: unknown): UIPromptKind | undefined {
 export default function piNotification(pi: ExtensionAPI): void {
   const log = createLogger();
 
-  // 用户级默认在工厂里读（§5）：失败也要完成注册，保证 `/notify` 一定可用。
+  // Read the user defaults in the factory, and finish registration even when that fails so
+  // `/notify` is always available.
   let load: ConfigLoadResult = loadConfig({ agentDir: getAgentDir() });
   const config: NotificationConfig = load.config;
   if (isDisabledByEnv()) config.enabled = false;
 
   /**
-   * 「本对话选择」（UX 方案 §值模型）：Enter 改的值写在这里，不落用户文件。
-   * 生效配置 = 出厂默认 → 用户默认（磁盘） → 本对话覆盖，在 `adoptConfig` 里一次性叠加。
+   * Per-conversation choices: Enter writes here and never to the user file.
+   * The effective config is factory defaults, then user defaults from disk, then this overlay,
+   * combined in one pass inside `adoptConfig`.
    */
   let overlay: SessionOverlay = emptyOverlay();
 
   const registry = createRegistry({ log });
 
   /**
-   * 可靠性参数从**当前**配置派生（`session_start` 会重新读盘，所以用 thunk 而不是快照）。
-   * 单次尝试的 deadline 必须小于外层 `delivery.timeoutMs / (maxRetries+1)`，否则第一次尝试
-   * 就吃完了整个预算，重试会在已 abort 的 signal 上立刻失败（等于没重试）。
+   * Reliability options are derived from the **current** config (`session_start` re-reads it), so
+   * they are thunks rather than a snapshot. The per-attempt deadline must stay below
+   * `delivery.timeoutMs / (maxRetries + 1)`, otherwise the first attempt consumes the whole budget
+   * and the retry fails immediately on an already aborted signal, which is the same as no retry.
    */
   const reliability = () => {
     const maxRetries = Math.max(0, Math.floor(config.delivery.maxRetries));
@@ -136,16 +142,16 @@ export default function piNotification(pi: ExtensionAPI): void {
       breakerCooldownMs: 30000,
     };
   };
-  /** 所有渠道共享同一套可靠性包装（§17.2：超时/重试/熔断/脱敏只实现一次）。 */
+  /** Every channel shares one reliability stack, so timeout, retry, breaker and redaction exist once. */
   const reliable = (notifier: Notifier): Notifier => withReliability(notifier, reliability, log);
 
-  // 阶段 1 渠道：系统桌面通知（OSC 777 / OSC 99 / Windows toast）
+  // Default channel: desktop notification through OSC 777, OSC 99 or a Windows toast.
   registry.register("terminal", (id) =>
     reliable(createTerminalNotifier(id, { log, maxChars: config.content.maxMessageChars })));
-  // 排障用渠道：把通知写成一行日志，不碰终端
+  // Diagnostic channel: writes the notification as one log line instead of touching the output.
   registry.register("debug", (id) =>
     reliable(createDebugNotifier(id, { log, maxChars: config.content.maxMessageChars })));
-  // 阶段 2 渠道：通用 HTTP POST（唯一需要凭据与网络的类型）
+  // Generic HTTP POST channel, the only type that needs credentials and the network.
   registry.register("webhook", (id, options) =>
     reliable(createWebhookNotifier(id, (options ?? {}) as WebhookOptions, { log, maxChars: config.content.maxMessageChars })));
 
@@ -159,17 +165,17 @@ export default function piNotification(pi: ExtensionAPI): void {
 
   let currentSessionId: string | undefined;
   /**
-   * 会话名（`/name`）：只作正文标识。
-   * `session_start` 时从 `pi.getSessionName()` 取初值，之后跟随 `session_info_changed`。
+   * Session name from `/name`, used only as a body label: read at `session_start` and kept up to
+   * date by `session_info_changed`.
    */
   let sessionName: string | undefined;
-  /** 项目目录名：会话名缺失时作为降级标识（`ctx.cwd` 的 basename）。 */
+  /** Project directory name, used as the fallback label when the session has no name. */
   let projectName: string | undefined;
-  /** 让 `/compact`、`ui_prompt` 这类「没有 run 上下文」的通知也有稳定去重键（与 run 键隔离）。 */
+  /** Stable dedupe keys for notifications that have no run context, kept separate from run keys. */
   let promptSeq = 0;
   let compactSeq = 0;
 
-  /** 旧 ctx 在换会话/重载后会 throw，因此所有 ctx 取值都要防御。 */
+  /** A stale `ctx` throws after a session switch or reload, so every access is defended. */
   function sessionIdOf(ctx: ExtensionContext | undefined): string | undefined {
     try {
       return ctx?.sessionManager?.getSessionId();
@@ -182,28 +188,30 @@ export default function piNotification(pi: ExtensionAPI): void {
     try {
       run();
     } catch (error) {
-      // 绝不向 Hook 外抛（§13 第 11 项）：宁可少发通知，也不阻断 Pi。
+      // Never throw into a hook: fewer notifications beats blocking Pi.
       log.log("error", `${where} 处理失败（已忽略）`, {
         error: error instanceof Error ? error.message : String(error),
       });
     }
   }
 
-  /** 配置被重新合并后同步到内存态（service 的渠道表惰性派生，见 service.ts）。 */
+  /** Copies a re-merged config into the in-memory object the service and lifecycle already hold. */
   function adoptConfig(next: ConfigLoadResult, reason: string): void {
-    // 先把本对话覆盖叠上去：覆盖只包含用户改过的项，其余字段从磁盘层继承。
+    // Layer the per-conversation overlay first: it only holds fields the user changed, so every
+    // other field is inherited from the config on disk.
     const applied = applyOverlay(next.config, overlay);
     const merged: ConfigLoadResult = applied.problems.length > 0
       ? { ...next, config: applied.config, warnings: [...next.warnings, ...applied.problems] }
       : { ...next, config: applied.config };
     if (applied.problems.length > 0) {
-      // 覆盖本身失效（例如用户手动把文件改成互斥值）：整体忽略覆盖，通知投递不受影响。
+      // The overlay itself is no longer valid (for example the file now holds a conflicting value):
+      // ignore it as a whole so delivery is unaffected.
       log.log("warning", "本对话覆盖已失效，已忽略（详见状态总览）");
     }
     load = merged;
     const effective = merged.config;
     if (isDisabledByEnv()) effective.enabled = false;
-    // 原地替换字段：service / rules 持有的是同一个对象引用
+    // Replaced field by field: the service and lifecycle hold a reference to this same object.
     config.enabled = effective.enabled;
     config.minLevel = effective.minLevel;
     config.rules = effective.rules;
@@ -232,14 +240,15 @@ export default function piNotification(pi: ExtensionAPI): void {
     }
   }
 
-  /** session_start 与 Ctrl+R 共用读盘；不重建生命周期。 */
+  /** Shared by `session_start` and Ctrl+R; it never rebuilds the lifecycle. */
   function reloadConfig(_ctx: ExtensionContext, reason: string): void {
     adoptConfig(loadConfig({ agentDir: getAgentDir() }), reason);
   }
 
   /**
-   * 从会话条目恢复本对话覆盖（Enter 的成果）。
-   * 过滤规则（含 `/fork` 复制条目的情况）在 `restoreOverlayFromEntries` 里，并有单测覆盖。
+   * Restores this conversation's overlay, the result of Enter.
+   * The filtering rules, including entries copied by `/fork`, live in `restoreOverlayFromEntries`
+   * and are covered by unit tests.
    */
   function restoreOverlay(ctx: ExtensionContext, sessionId: string): void {
     try {
@@ -252,7 +261,7 @@ export default function piNotification(pi: ExtensionAPI): void {
     }
   }
 
-  /** 写一条新覆盖快照到会话（每次覆盖都是完整快照，恢复时取最后一条）。 */
+  /** Each overlay is a full snapshot, so a restore simply takes the last matching entry. */
   function persistOverlay(): void {
     if (isEmptyOverlay(overlay)) return;
     try {
@@ -263,14 +272,14 @@ export default function piNotification(pi: ExtensionAPI): void {
         at: Date.now(),
       });
     } catch (error) {
-      // 没有会话文件等情况下 appendEntry 可能不可用：内存覆盖仍然生效。
+      // Without a session file `appendEntry` may be unavailable; the in-memory overlay still applies.
       log.log("warning", "本对话覆盖未能写入会话（仅本次进程内有效）", {
         error: error instanceof Error ? error.message : String(error),
       });
     }
   }
 
-  /** 界面 Enter：写入本对话覆盖 → 落会话条目 → 重新叠加生效配置（不改用户文件）。 */
+  /** Enter in the UI: write the overlay, persist a session entry, then re-apply the effective config. */
   function setOverlay(next: SessionOverlay): void {
     overlay = next;
     persistOverlay();
@@ -312,14 +321,14 @@ export default function piNotification(pi: ExtensionAPI): void {
           },
         });
       } catch (error) {
-        // 命令里的异常不能冒泡（§13 第 11 项）
+        // Exceptions from the command must not escape.
         log.log("error", "notify 命令失败（已忽略）", {
           error: error instanceof Error ? error.message : String(error),
         });
         try {
           ctx.ui.notify("pi-notification: 命令执行失败，详见状态总览（Ctrl+O）或诊断日志", "error");
         } catch {
-          // ui 不可用则忽略
+          // Ignore when the UI is unavailable.
         }
       }
     },
@@ -333,10 +342,11 @@ export default function piNotification(pi: ExtensionAPI): void {
       try {
         sessionName = pi.getSessionName() || undefined;
       } catch {
-        sessionName = undefined; // 取不到就当未命名，不影响其它能力
+        sessionName = undefined; // Treat an unreadable name as unnamed; nothing else is affected.
       }
       try {
-        // 磁盘根目录的 basename 是空串，会被 rules 当作“没有”，不会产出空方括号。
+        // A filesystem root basename is an empty string, which the rules treat as absent, so no
+        // empty brackets are ever produced.
         projectName = basename(ctx.cwd) || undefined;
       } catch {
         projectName = undefined;
@@ -359,7 +369,8 @@ export default function piNotification(pi: ExtensionAPI): void {
       });
 
       if (load.degraded && ctx.mode === "tui") {
-        // 不静默全关：明确告诉用户"通知没坏，但配置有问题"（§13 第 5 项）
+        // Degrading must not silently switch everything off: say that notifications still work and
+        // only the config is broken.
         ctx.ui.notify("pi-notification: 配置有误，已降级为仅发送失败通知。用 /notify status 查看原因。", "warning");
       }
     });
@@ -373,8 +384,8 @@ export default function piNotification(pi: ExtensionAPI): void {
     });
   });
 
-  // 只读：捕获 assistant 的 stopReason / errorMessage。**不得返回任何值**，
-  // 否则会进入消息替换链（§1.3 / §13 第 17 项）。
+  // Read-only: captures the assistant stopReason and errorMessage. It must not return a value,
+  // otherwise the message would enter the replacement chain.
   pi.on("message_end", (event, ctx) => {
     guard("message_end", () => {
       const message = event.message as {
@@ -398,7 +409,8 @@ export default function piNotification(pi: ExtensionAPI): void {
     });
   });
 
-  // 只读：会话名变化时刷新正文标识（`/name`）。**不记名字本身**，只记“有没有名字”。
+  // Read-only: refreshes the body label when the session name changes. The name itself is never
+  // recorded, only whether one exists.
   pi.on("session_info_changed", (event) => {
     guard("session_info_changed", () => {
       const name = typeof event.name === "string" && event.name.trim() !== "" ? event.name : undefined;
@@ -407,18 +419,18 @@ export default function piNotification(pi: ExtensionAPI): void {
     });
   });
 
-  // S6：工具失败。与 settled 同样只做「累积 + 入队」，不 await。
+  // Tool failures: like settle, this only accumulates and enqueues, never awaits.
   pi.on("tool_execution_end", (event, ctx) => {
     guard("tool_execution_end", () => {
       if (pi.getFlag("no-notify") === true) return;
-      if (event.isError !== true) return; // 成功执行不产生任何通知
+      if (event.isError !== true) return; // A successful execution never produces a notification.
       const sessionId = sessionIdOf(ctx);
       if (!sessionId) return;
       const toolName = typeof event.toolName === "string" ? event.toolName : "";
       if (toolName === "") return;
       const failure = lifecycle.onToolExecutionEnd({ sessionId, toolName, isError: true });
       if (!failure) return;
-      // `aggregate`（默认）不在这一刻发：等到 settled 由 `evaluateSettlement` 统一出题。
+      // The default `aggregate` mode stays quiet here and lets `evaluateSettlement` decide at settle time.
       const rule = config.rules.toolFailed;
       if (rule.mode !== "immediate") return;
       if (failure.count < rule.threshold) return;
@@ -436,8 +448,8 @@ export default function piNotification(pi: ExtensionAPI): void {
     });
   });
 
-  // S6：压缩失败。手工 `/compact` 没有 run 可 settle，所以必须在**当下**投递，
-  // 否则这条最重要的上下文告警永远不会出现。
+  // Compact failure: a manual `/compact` has no run that can settle, so it must be delivered right
+  // now, otherwise this most important context warning would never appear.
   pi.on("session_compact_failed", (event, ctx) => {
     guard("session_compact_failed", () => {
       if (pi.getFlag("no-notify") === true) return;
@@ -468,7 +480,8 @@ export default function piNotification(pi: ExtensionAPI): void {
     });
   });
 
-  // S6：等待用户输入。白名单与 `custom` 永久排除由 rules/config 把关，这里只做形状转换。
+  // Waiting for user input: the allow-list and the permanent exclusion of `custom` are enforced by
+  // the rules and config layers; this handler only converts shapes.
   pi.on("ui_prompt_start", (event, ctx) => {
     guard("ui_prompt_start", () => {
       if (pi.getFlag("no-notify") === true) return;
@@ -479,12 +492,13 @@ export default function piNotification(pi: ExtensionAPI): void {
       lifecycle.onUiPromptStart({ sessionId, kind, ...(title ? { title } : {}) });
       const rule = config.rules.waitingForUser;
       if (!rule.enabled) return;
-      if (kind === "custom") return; // §18.5 修订 1：永久排除
+      if (kind === "custom") return; // Permanently excluded: the loader and progress UI emit it too.
       promptSeq += 1;
       const request = evaluateWaitingForUser(
         {
           sessionId,
-          // 专用 runId：不与会话里的 run 共用合并窗口，否则「等待确认」可能被完成通知合并掉
+          // Dedicated run id: sharing the session's coalescing window could swallow a waiting
+          // prompt into a completion notification.
           runId: `${INSTANCE_TOKEN}-prompt-${promptSeq}`,
           kind,
           ...(title ? { title } : {}),
@@ -500,12 +514,13 @@ export default function piNotification(pi: ExtensionAPI): void {
     guard("ui_prompt_end", () => {
       const sessionId = sessionIdOf(ctx);
       if (!sessionId) return;
-      // 不可依赖 `start.kind === end.kind` 配对：嵌套时只发外层 span（§18.5 修订 1）。
+      // Start and end cannot be paired by kind: nested prompts emit only the outer span.
       lifecycle.onUiPromptEnd({ sessionId, kind: asPromptKind(event.kind) ?? "custom" });
     });
   });
 
-  // ⚠️ 唯一出口，且必须**同步返回**：handler 会被 await，任何网络投递都会拖慢用户的下一次输入。
+  // The only exit, and it must return synchronously: the handler is awaited, so any network
+  // delivery would delay the user's next input.
   pi.on("agent_settled", (_event, ctx) => {
     guard("agent_settled", () => {
       if (pi.getFlag("no-notify") === true) return;
@@ -519,7 +534,8 @@ export default function piNotification(pi: ExtensionAPI): void {
       }
       const outcome = lifecycle.onSettled({ sessionId, isIdle });
       if (!outcome) return;
-      // 会话级元数据在这里组装（rules 是纯函数：不读 ctx、也不读时钟）。
+      // Session-level metadata is assembled here because the rules layer is pure: it reads neither
+      // `ctx` nor a clock.
       const percent = contextPercentOf(ctx);
       const summary: RunSummary = {
         runStatus: outcome.status,
@@ -530,10 +546,11 @@ export default function piNotification(pi: ExtensionAPI): void {
         cumulativeCostUsd: lifecycle.sessionCostUsd(),
         ...(percent !== undefined ? { contextPercent: percent } : {}),
       };
-      // 一个运行最多一条：「结果通知」优先，聚合的工具失败只在没有结果时兜底（§12.1 第 4 步）。
+      // At most one notification per run: the result wins, and aggregated tool failures only act as
+      // a fallback when there is no result notification.
       const request = evaluateSettlement({ outcome, summary }, config);
       if (!request) return;
-      service.submit(request); // 同步入队，立即返回
+      service.submit(request); // Synchronous enqueue, then return immediately.
     });
   });
 
@@ -541,10 +558,10 @@ export default function piNotification(pi: ExtensionAPI): void {
     try {
       lifecycle.onShutdown(event.reason);
       if (event.reason === "quit") {
-        // 唯一允许等待的收尾路径，且必须有预算（§18.4）。
+        // The only shutdown path allowed to wait, and it must stay within its budget.
         await service.flush(config.shutdownFlushMs);
       } else {
-        // reload/new/resume/fork：不要给「已经离开的会话」继续弹通知。
+        // reload/new/resume/fork: a conversation that has been left must not raise more notifications.
         service.discardPending(event.reason);
       }
     } catch (error) {
@@ -556,7 +573,7 @@ export default function piNotification(pi: ExtensionAPI): void {
       try {
         await service.dispose();
       } catch {
-        // 幂等释放失败不再冒泡
+        // A failed idempotent release must not bubble either.
       }
     }
   });

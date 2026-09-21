@@ -1,22 +1,25 @@
 /**
- * S1.5 / S3 / S5 / M3 / UX 回归脚本。
+ * Host regression: drives a real session in-process through the `@earendil-works/pi-coding-agent` SDK
+ * and asserts five groups of invariants:
  *
- * 用真实宿主（`@earendil-works/pi-coding-agent` SDK）在**本进程内**驱动真实会话，断言五组不变量：
+ *   judgement and dedupe (A-F): a pure command produces no lifecycle, one run delivers exactly one
+ *     notification, settle does not block the next run, a reload never duplicates a delivery, and a
+ *     failing run is reported
+ *   channel discipline (H): outside a TTY not a single byte is written, and every skip leaves an
+ *     auditable record
+ *   config loading (I1-I9): the file really is read, thresholds, rules and channels really take
+ *     effect, a broken config degrades instead of silently disabling everything, and the removed
+ *     project-level layer is never read even when the file exists
+ *   single entry point and three value layers (J1-J14): `/notify` only opens the settings UI, Enter
+ *     only changes the current conversation, Ctrl+S writes one sparse field, an overlay survives a
+ *     reload but never a fork, and forced silence cannot be bypassed
  *
- *   判定与去重（A–F）：纯命令不产生生命周期、一次运行只投递一条、settled 内不阻塞、
- *                      reload 后不重复投递、失败判定落地
- *   渠道纪律（H）：非 TTY 时一个字节都不写，且必须留下可审计的跳过记录
- *   配置读盘（I1–I8）：文件真的被读、门槛/规则/渠道真的生效、**非法配置降级而不是静默全关**、
- *                     项目级配置**已删除**（文件存在也不读）
- *   单一入口与三层值（J1–J12）：/notify 只开设置界面、Enter 只改本对话、Ctrl+S 单项稀疏落盘、
- *                     会话覆盖跨 reload 保留且不跨 fork 继承、被强制静默时不可绕过
+ * Isolation, per host:
+ *   - its own `PI_CODING_AGENT_DIR`, so user-level config never bleeds across hosts;
+ *   - its own `PI_NOTIFY_LOG_FILE` and `PROBE_LOG`, so log cursors cannot drift between hosts;
+ *   - fully offline: the fake provider emits events directly and a fetch trap proves it.
  *
- * 隔离设计（每个 host 独立）：
- *   - 自己的 `PI_CODING_AGENT_DIR`（用户级配置互不串味）
- *   - 自己的 `PI_NOTIFY_LOG_FILE` / `PROBE_LOG`（游标不会跨 host 漂移——上一版就是这么炸的）
- *   - 全程离线：假 provider 直接产出事件流，不发任何网络请求（挂 fetch 陷阱自证）
- *
- * Git Bash 下请这样跑（`MSYS_NO_PATHCONV=1` 是硬约束，见设计 §18.1 U0）：
+ * Under Git Bash this script requires `MSYS_NO_PATHCONV=1`:
  *   MSYS_NO_PATHCONV=1 node test/host-lifecycle.mjs
  */
 
@@ -37,18 +40,19 @@ const BLOCKING_ENTRY = path.join(PLUGIN_DIR, "test", "fixtures", "blocking-ext.t
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "pi-notify-host-"));
 const BLOCK_MS = 1500;
 
-// 进程级固定环境（per-host 的三个变量在 makeHost 里设置）
+// Process-wide fixed environment (the three per-host variables are set inside makeHost).
 process.env.PI_OFFLINE = "1";
 process.env.PI_SKIP_VERSION_CHECK = "1";
 process.env.PROBE_BLOCK_MS = String(BLOCK_MS);
-// 钉住终端机制：本机是 win32，auto 会走 Windows toast —— 自动化里绝不能真弹系统通知。
-// 选择逻辑本身（含 win32→toast）由 test/terminal-channel.mjs 穷举断言。
+// Pin the terminal mechanism: this machine is win32, where `auto` would raise a Windows toast, and
+// an automated run must never pop a real system notification. The selection logic itself, including
+// win32 to toast, is asserted exhaustively by test/terminal-channel.mjs.
 process.env.PI_NOTIFY_CHANNEL = "osc777";
 delete process.env.PI_NOTIFY_DISABLE;
 
-// 网络陷阱：任何一次**外部**网络访问都会让本次回归失败（证明"离线"不是靠运气）。
-// 例外：回环地址（127.0.0.1）——S7 的 webhook 端到端断言需要本机 HTTP 服务，
-// 它不经过任何外部网络，也不依赖互联网。
+// Network trap: any **external** access fails the regression, so being offline is enforced rather
+// than assumed. Loopback is the exception: the webhook end-to-end assertion needs a local HTTP
+// server, which uses no external network.
 const networkAttempts = [];
 const realFetch = globalThis.fetch;
 const LOOPBACK_RE = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/;
@@ -60,12 +64,13 @@ globalThis.fetch = (input, init) => {
 };
 
 // ---------------------------------------------------------------------------
-// stdout：捕获通知序列（并阻止它们真的打到开发者终端上）
+// stdout: capture the notification sequences and keep them off the developer's screen
 // ---------------------------------------------------------------------------
 
 const stdoutChunks = [];
 const realStdoutWrite = process.stdout.write.bind(process.stdout);
-// 用 RegExp 构造函数写转义，避免源码里出现裸 ESC/BEL 控制字符（不可见且易被编辑器破坏）。
+// Escapes are built with the RegExp constructor so no raw ESC/BEL control byte appears in this
+// source file, where it would be invisible and easily damaged by an editor.
 const OSC777_RE = new RegExp("\\u001b\\]777;notify;[^\\u0007]*\\u0007", "g");
 const OSC99_RE = new RegExp("\\u001b\\]99;[^\\u0007]*\\u001b\\\\", "g");
 
@@ -86,7 +91,7 @@ function setStdoutTTY(value) {
 }
 
 let stdoutCursor = 0;
-/** 取出自上次调用以来新写入的 OSC 通知（777 / 99）。 */
+/** OSC notifications written since the previous call (777 and 99). */
 function nextOscNotifications() {
   const text = stdoutChunks.join("");
   const delta = text.slice(stdoutCursor);
@@ -103,7 +108,7 @@ const sdk = await import(sdkUrl(resolveSdkEntry()));
 const configModule = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "config.ts")).href);
 
 // ---------------------------------------------------------------------------
-// 工具
+// Helpers
 // ---------------------------------------------------------------------------
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -137,7 +142,7 @@ function cursor(reader) {
 const events = (list) => list.map((row) => row.ev);
 const deliveries = (list) => list.filter((row) => row.event === "delivery");
 
-/** 从 OSC 777 原始序列里取出 body（正文内容字段的断言用）。 */
+/** Extracts the body from a raw OSC 777 sequence, used to assert on body content. */
 const OSC777_HEAD = new RegExp("^\\u001b\\]777;notify;");
 const OSC777_TAIL = new RegExp("\\u0007$");
 function oscBody(sequence) {
@@ -146,10 +151,11 @@ function oscBody(sequence) {
 }
 
 /**
- * 等异步投递落地。
+ * Waits for asynchronous delivery to land.
  *
- * 这不是"偷懒的 sleep"：`agent_settled` 的 handler 按硬约束**只入队**，投递发生在其后的独立任务里，
- * 所以读日志前必须先等投递完成。判据是"日志文件连续 100ms 没有增长"，最多等 3s。
+ * This is not a lazy sleep: the `agent_settled` handler only enqueues, and delivery happens in a
+ * separate task afterwards, so the log has to be given time to settle. The criterion is "the log
+ * file has not grown for 100ms", with a 3s ceiling.
  */
 async function waitForFileQuiet(file) {
   let size = fs.existsSync(file) ? fs.statSync(file).size : 0;
@@ -169,11 +175,11 @@ async function waitForFileQuiet(file) {
 }
 
 /**
- * 等某个探针事件出现。
+ * Waits for a probe event to appear.
  *
- * S6 的工具失败必须是"真的在运行中"发生的：先用 `PROBE_DELAY_MS` 让假 provider 晚一点回包，
- * 再等 `agent_start` 落地，然后把 `tool_execution_end` 送进插件（此刻 run 仍在进行中）。
- * 不靠 sleep 猜时机，靠探针文件的实际内容。
+ * A tool failure has to happen while the run is still going: `PROBE_DELAY_MS` makes the fake provider
+ * answer later, then `agent_start` is awaited and `tool_execution_end` is fed to the plugin while the
+ * run is still active. Timing comes from the probe file, never from a sleep.
  */
 async function waitForProbeEvent(host, ev, timeoutMs = 3000) {
   const count = () => readJsonl(host.probeFile).filter((row) => row.ev === ev).length;
@@ -204,7 +210,7 @@ async function step(name, run) {
   }
 }
 
-/** `ExtensionUIContext` 的最小桩：本插件只用 `notify`，但绑定 UI 才会触发 session_start。 */
+/** Minimal `ExtensionUIContext` stub: the plugin only uses `notify`, but binding a UI is what triggers session_start. */
 function stubUiContext(notices) {
   return {
     select: async () => undefined,
@@ -222,7 +228,7 @@ function stubUiContext(notices) {
     setFooter: () => {},
     setHeader: () => {},
     setTitle: () => {},
-    // 默认：没有人驱动组件时不应有人等它；需要驱动的用例传 ui.custom。
+    // Default: nobody waits for the component unless a test drives it through `ui.custom`.
     custom: async () => undefined,
     pasteToEditor: () => {},
     getEditorText: () => "",
@@ -239,11 +245,12 @@ function stubUiContext(notices) {
 }
 
 /**
- * 无头驱动 `ctx.ui.custom()`：把设置界面当成普通组件，按真实终端字节递按键。
+ * Drives `ctx.ui.custom()` headlessly: the settings UI is treated as an ordinary component fed with
+ * real terminal bytes.
  *
- * 注意：命令层传给 `custom()` 的是 `{ render, handleInput, invalidate }` 包装对象，
- * 所以这里只能看到渲染结果（而这也正是要断言的东西）。键位匹配用最小桩——
- * 真正的 `matchesKey` 行为在 `test/settings-ui.mjs` 里用真库覆盖。
+ * The command layer hands `custom()` an `{ render, handleInput, invalidate }` wrapper, so only the
+ * rendered result is observable here, which is exactly what is asserted. Key matching uses a minimal
+ * stub; the real `matchesKey` behaviour is covered with the actual library in test/settings-ui.mjs.
  */
 const KEY_SEQUENCES = {
   "tui.select.up": ["\x1b[A", "\x1bOA"],
@@ -290,7 +297,7 @@ async function makeHost({ label, extensions, projectTrusted = true, userConfig, 
   fs.writeFileSync(probeFile, "");
   fs.writeFileSync(pluginFile, "");
 
-  /** 用户级配置必须**在会话建立之前**写入：插件在工厂（loader.reload）与 session_start 两次读盘。 */
+  /** User-level config must be written **before** the session starts: the plugin reads it twice, in the factory and at session_start. */
   const userConfigFile = configModule.userConfigPath(agentDir);
   const userConfigRaw = userConfig === undefined
     ? undefined
@@ -300,7 +307,7 @@ async function makeHost({ label, extensions, projectTrusted = true, userConfig, 
     fs.writeFileSync(userConfigFile, userConfigRaw);
   }
 
-  // 每个 host 独立：用户级配置目录 + 两份日志（避免游标跨 host 漂移）
+  // Per host: its own user config directory plus two log files, so cursors cannot drift between hosts.
   process.env.PI_CODING_AGENT_DIR = agentDir;
   process.env.PI_CODING_AGENT_SESSION_DIR = path.join(root, "sessions");
   process.env.PROBE_LOG = probeFile;
@@ -366,20 +373,20 @@ async function makeHost({ label, extensions, projectTrusted = true, userConfig, 
     probe,
     plugin,
     userConfigPath: configModule.userConfigPath(agentDir),
-    /** 测试自己写下的用户级配置原文（用于断言插件未改写它） */
+    /** Raw user-level config written by the test, used to assert the plugin did not rewrite it. */
     userConfigRaw,
-    /** 针对某个 host 解析项目级配置文件路径（本插件已不读它，但测试要证明这一点） */
+    /** Resolves the project-level config path so a test can prove the plugin never reads it. */
     projectConfigPath(...segments) {
       return path.join(root, ".pi", "pi-notification", ...segments);
     },
     driver,
 
-    /** 把事件直接送进真实的扩展 runner（S6 的 hook 回归就靠它）。 */
+    /** Feeds an event straight into the real extension runner; used by the hook regressions. */
     emit(event) {
       return session.extensionRunner.emit(event);
     },
 
-    /** 让假 provider 下次回包晚 `ms` 毫秒（给"运行中"留出一个可观测窗口）。 */
+    /** Delays the fake provider's next reply, opening a window in which the run is still active. */
     setModelDelay(ms) {
       if (ms === undefined) delete process.env.PROBE_DELAY_MS;
       else process.env.PROBE_DELAY_MS = String(ms);
@@ -389,14 +396,14 @@ async function makeHost({ label, extensions, projectTrusted = true, userConfig, 
       await waitForFileQuiet(pluginFile);
     },
 
-    /** 清空所有游标，使下一次读取只包含"从现在开始"发生的事情。 */
+    /** Clears every cursor so the next read contains only what happens from now on. */
     resetCursors() {
       probe();
       plugin();
       nextOscNotifications();
     },
 
-    /** 跑一段逻辑，返回这段期间的探针/插件/OSC 增量。 */
+    /** Runs a block and returns the probe, plugin and OSC deltas it produced. */
     async during(run) {
       await host.drain();
       host.resetCursors();
@@ -421,14 +428,15 @@ async function makeHost({ label, extensions, projectTrusted = true, userConfig, 
       return model;
     },
 
-    /** 发一条 prompt，返回该次运行的增量（含投递与 OSC）。 */
+    /** Sends a prompt and returns that run's delta, deliveries and OSC included. */
     async prompt(text = "hi") {
       return host.during(() => session.prompt(text));
     },
 
     /**
-     * 发一条 prompt，并在**运行中**注入一次工具失败（真实 `tool_execution_end`）。
-     * 注入点由探针的 `agent_start` 事件定位，不靠猜测的 sleep。
+     * Sends a prompt and injects one tool failure while the run is still going, through a real
+     * `tool_execution_end`. The injection point is located by the probe's `agent_start` event, not
+     * by a guessed sleep.
      */
     async promptWithToolFailures(toolNames = ["bash"], text = "hi") {
       return host.during(async () => {
@@ -449,7 +457,7 @@ async function makeHost({ label, extensions, projectTrusted = true, userConfig, 
       });
     },
 
-    /** 走 Pi 真实命令分发（纯命令不产生 agent 生命周期）。 */
+    /** Goes through Pi's real command dispatch; a pure command produces no agent lifecycle. */
     async command(text) {
       const delta = await host.during(() => session.prompt(text));
       return { ...delta, notice: notices.at(-1) };
@@ -460,13 +468,13 @@ async function makeHost({ label, extensions, projectTrusted = true, userConfig, 
       fs.writeFileSync(host.userConfigPath, typeof raw === "string" ? raw : JSON.stringify(raw, null, 2));
     },
 
-    /** 读回用户级默认文件（稀疏写盘断言用）。 */
+    /** Reads back the user-level default file, used for the sparse-write assertions. */
     readUserConfigRaw() {
       const raw = configModule.readUserConfigRaw(host.agentDir);
       return raw.ok ? raw.raw : undefined;
     },
 
-    /** 项目级配置文件（断言“存在也不读”）：本插件已删除该层，但仍然要把文件写出来。 */
+    /** Writes the project-level config file to prove it is ignored: the layer was removed but the file still gets created. */
     writeProjectConfig(raw) {
       const file = path.join(host.root, ".pi", "pi-notification", "config.json");
       fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -478,7 +486,7 @@ async function makeHost({ label, extensions, projectTrusted = true, userConfig, 
       try {
         fs.unlinkSync(host.userConfigPath);
       } catch {
-        // 不存在即视为已清理
+        // A missing file counts as already cleaned up.
       }
     },
 
@@ -497,7 +505,7 @@ function assertNoPluginErrors(host) {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 0：清洗与脱敏（纯函数）
+// Phase 0: sanitizing and redaction (pure functions)
 // ---------------------------------------------------------------------------
 
 console.log("S1.5 / S3 / S5 / M3 回归：pi-notification");
@@ -505,7 +513,8 @@ console.log("S1.5 / S3 / S5 / M3 回归：pi-notification");
 const { sanitize, redact } = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "log.ts")).href);
 
 await step("P0 控制字符清洗 / 脱敏", () => {
-  // OSC 序列整段删除（含载荷）：只删控制字符会留下 `]777;notify;...` 作为可见正文。
+  // Whole OSC sequences are deleted, payload included: removing only the control bytes would leave
+  // `]777;notify;...` behind as visible text.
   assert.equal(sanitize("\u001b]777;notify;a\u0007b"), "b");
   assert.equal(sanitize("done\u001b[31m!\u001b[0m"), "done!");
   assert.equal(sanitize("a\r\nb"), "a\nb");
@@ -515,18 +524,18 @@ await step("P0 控制字符清洗 / 脱敏", () => {
   assert.ok([...sanitize("z".repeat(400))].length <= 300);
   assert.doesNotMatch(redact("apiKey=sk-abcdefgh12345678"), /sk-abcdefgh12345678/);
   assert.doesNotMatch(redact("Authorization: Bearer supersecretvalue"), /supersecretvalue/);
-  // 脱敏目标是「家目录」本身，文件名属于有效诊断信息，应当保留。
+  // The target is the home directory itself; the file name is useful diagnostic information and stays.
   assert.equal(redact(`open ${os.homedir()}/.pi/agent/auth.json`), "open ~/.pi/agent/auth.json");
 });
 
 // ---------------------------------------------------------------------------
-// Host 1：判定 / 去重 / 阻塞 / reload
+// Host 1: judgement, dedupe, blocking and reload
 // ---------------------------------------------------------------------------
 
 /**
- * 判定/去重/阻塞/reload 四组断言关心的是**判定语义**，不是冷却策略：
- * 关掉 S4 的合并/冷却（两个 0），否则“两次运行 → 两次通知”会被冷却吃掉。
- * S4 自己的行为由后面的 `coalesce` 宿主（默认值）与 `test/service-coalesce.mjs` 负责。
+ * These four groups are about judgement semantics, not cooldown policy: coalescing and cooldown are
+ * switched off (both zero), otherwise "two runs, two notifications" would be eaten by the cooldown.
+ * Cooldown behaviour itself is covered by the `coalesce` host below and by test/service-coalesce.mjs.
  */
 const NO_COALESCE = { version: 1, coalesce: { windowMs: 0, cooldownMs: 0 } };
 
@@ -576,9 +585,10 @@ await step("B 一次成功运行恰好投递 1 条 run_completed（并真的写�
 });
 
 await step("C settled 内不阻塞：下一次 run 在 250ms 内启动（取 3 次最小值）", async () => {
-  // 刻意不用 host.prompt()：它会先 drain（等日志安静），那会把"settled→下一次 run"的间隔
-  // 污染成一个等待周期，测出来的是等待而不是阻塞。
-  // 取多次最小值：单次采样会被 GC/调度抖动影响（曾经出现过 265ms 的假失败）。
+  // `host.prompt()` is deliberately avoided because it drains first, which would turn the
+  // "settle to next run" interval into a waiting period and measure the wait instead of blocking.
+  // The minimum of several samples is taken because a single sample is skewed by GC and scheduling
+  // jitter, which once produced a false failure at 265ms.
   const samples = [];
   const deliveriesPerRun = [];
   for (let i = 0; i < 3; i += 1) {
@@ -660,8 +670,9 @@ await step("E 无扩展异常、无网络访问、未改写配置文件", async 
   assert.deepEqual(host.runtimeErrors, [], "扩展运行期出现异常");
   assertNoPluginErrors(host);
   assert.deepEqual(networkAttempts, [], "出现了外部网络访问");
-  // SDK 自己会写 auth.json / models-store.json；这里断言的是**插件**没有写入任何东西。
-  // `pi-notification/` 目录是测试自己预置的配置目录（不再是插件写入的迹象）。
+  // The SDK writes auth.json and models-store.json itself; what is asserted here is that the
+  // **plugin** wrote nothing. The `pi-notification/` directory is the config directory this test
+  // pre-seeded, so it is no longer a sign of a plugin write.
   const sdkOwned = new Set(["models.json", "auth.json", "models-store.json", "pi-notification"]);
   const unexpected = fs.readdirSync(host.agentDir).filter((name) => !sdkOwned.has(name));
   assert.deepEqual(unexpected, [], "插件在 agentDir 里留下了文件");
@@ -675,7 +686,7 @@ await step("E 无扩展异常、无网络访问、未改写配置文件", async 
 });
 
 // ---------------------------------------------------------------------------
-// Host 2：阻塞对照组（证明 C 的测量真的能识别阻塞）
+// Host 2: blocking control group, proving the measurement in C can detect blocking
 // ---------------------------------------------------------------------------
 
 const control = await makeHost({
@@ -701,13 +712,14 @@ await step(`对照 settled 内阻塞 ${BLOCK_MS}ms → 下一次 run 显著推�
 });
 
 // ---------------------------------------------------------------------------
-// Host 3：配置读盘（S5 最小版）—— 文件真的被读、非法配置降级而不是静默全关
+// Host 3: config loading - the file is really read, and a broken config degrades instead of
+// silently disabling everything
 // ---------------------------------------------------------------------------
 
 const configured = await makeHost({ label: "config", extensions: [PROBE_ENTRY, PLUGIN_ENTRY] });
 await configured.useModel("probe-fake", "fake-model");
 
-/** 改配置 → reload（reload 会重发 session_start，插件在那里重新读盘）→ 跑一次成功运行。 */
+/** Rewrites the config, reloads (which re-emits session_start where the plugin re-reads) and runs one successful run. */
 async function runWithConfig(raw) {
   if (raw === null) configured.removeUserConfig();
   else configured.writeUserConfig(raw);
@@ -797,10 +809,10 @@ await step("I8 配置里引用未定义渠道 → 保留记录，不伪装成功
 await configured.dispose();
 
 // ---------------------------------------------------------------------------
-// Host 4：项目级配置层**已删除** —— 文件存在也不读（UX 方案 §值模型）
+// Host 4: the project-level config layer was removed, so an existing file is still not read
 // ---------------------------------------------------------------------------
 
-/** 插件所有 config_loaded 记录（含 session_start 期间产生的，不只是某次运行的增量）。 */
+/** Every config_loaded record of the plugin, including those from session_start rather than just one run. */
 function configLoads(host) {
   return readJsonl(host.pluginFile).filter((row) => row.event === "config_loaded");
 }
@@ -809,7 +821,8 @@ await step("I9 项目级配置已删除：即使项目被信任、文件就在�
   const label = "project-ignored";
   const host = await makeHost({ label, extensions: [PROBE_ENTRY, PLUGIN_ENTRY], projectTrusted: true });
   await host.useModel("probe-fake", "fake-model");
-  // 先写一个“本该改变行为”的项目级配置：minLevel=error 会让成功通知消失。
+  // First write a project-level config that ought to change behaviour: minLevel=error would make a
+  // successful notification disappear.
   const file = host.writeProjectConfig({ version: 1, minLevel: "error", enabled: false });
   const delta = await host.during(() => host.session.reload());
   assert.ok(configLoads(host).length >= 1, "缺少 config_loaded 记录");
@@ -817,7 +830,8 @@ await step("I9 项目级配置已删除：即使项目被信任、文件就在�
     configLoads(host).every((row) => !JSON.stringify(row.sources).includes(".pi")),
     "配置来源里出现了项目级路径，说明该层没被删掉",
   );
-  // 项目文件在磁盘上，但插件不读它：成功通知仍按用户级/出厂默认发出。
+  // The project file exists on disk but the plugin never reads it, so the success notification still
+  // follows the user-level and factory defaults.
   assert.equal(fs.existsSync(file), true);
   const run = await host.prompt("hi");
   assert.equal(run.deliveries.length, 1, "项目级配置被读了（成功通知应该还在）");
@@ -826,10 +840,11 @@ await step("I9 项目级配置已删除：即使项目被信任、文件就在�
 });
 
 // ---------------------------------------------------------------------------
-// Host 5：单一入口与三层值 —— /notify 只开设置界面；Enter 只改本对话；Ctrl+S 单项落盘
+// Host 5: single entry point and the three value layers - `/notify` only opens the settings UI,
+// Enter only changes this conversation, Ctrl+S writes one sparse field
 // ---------------------------------------------------------------------------
 
-/** 真实终端字节（驱动 ui.custom 里的组件）。 */
+/** Real terminal bytes, used to drive the component inside `ui.custom`. */
 const K = {
   up: "\x1b[A",
   down: "\x1b[B",
@@ -841,12 +856,12 @@ const K = {
   ctrlO: "\x0f",
 };
 
-/** 依次按下的键，最后必须有一到两个 Esc 把组件关掉（详情页的 Esc 只返回上一级）。 */
+/** Keys pressed in order; the trailing Escapes close the component, since Esc in a detail view only goes one level up. */
 const CLOSE = [K.esc, K.esc];
 
 /**
- * 导航到某个配置项并进入详情。
- * 项顺序 = `buildSettingItems()` 的顺序（settings.ts 是唯一来源），所以按键次数是确定的。
+ * Navigates to one setting and opens its detail view. The item order is the `buildSettingItems()`
+ * order, which settings.ts owns, so the number of key presses is deterministic.
  */
 async function keysToItem(id, after = []) {
   const settingsModule = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "settings.ts")).href);
@@ -856,15 +871,15 @@ async function keysToItem(id, after = []) {
   return [...Array.from({ length: index }, () => K.down), K.enter, ...after, ...CLOSE];
 }
 
-/** 只看移动焦点到某个配置项（不进入详情）：Ctrl+S 在列表上就作用于焦点项。 */
+/** Moves the focus to one setting without opening it: on the list Ctrl+S applies to the focused item. */
 async function keysToList(id, after = []) {
   const keys = await keysToItem(id, []);
   return [...keys.slice(0, keys.length - CLOSE.length), ...after, K.esc];
 }
 
 /**
- * 读用户默认文件里的「稀疏内容」：剥掉用例预置的 NO_COALESCE 字段，
- * 这样断言可以直接写「Ctrl+S 只写了这一项」。
+ * Reads the sparse content of the user default file, stripping the NO_COALESCE fields the tests
+ * pre-seeded, so an assertion can simply state "Ctrl+S wrote only this one item".
  */
 function readSparse(host) {
   const raw = host.readUserConfigRaw();
@@ -880,8 +895,8 @@ function readSparse(host) {
 }
 
 /**
- * 折叠进设置界面后的两个动作（原来是 `/notify reload` 与 `/notify status`）。
- * 用真实的 `Ctrl+R` / `Ctrl+O` 驱动，保持“走真实路径”的约束。
+ * The two actions folded into the settings UI, formerly `/notify reload` and `/notify status`.
+ * They are driven with the real Ctrl+R and Ctrl+O to keep the "exercise the real path" constraint.
  */
 async function reloadViaUi(host) {
   host.driver.setKeys([K.ctrlR, K.esc]);
@@ -915,7 +930,7 @@ await step("J1 非 TUI：/notify 只打印状态与配置路径（凭据隐藏�
   assert.ok(delta.plugin.some((row) => row.event === "notify_settings_view"));
   const after = fs.existsSync(commander.userConfigPath) ? fs.readFileSync(commander.userConfigPath, "utf8") : undefined;
   assert.equal(after, before, "非 TUI 的 /notify 不该写盘");
-  // 纯命令不得产生 agent 生命周期（与断言 A 同一不变量）
+  // A pure command must not produce an agent lifecycle; same invariant as assertion A.
   for (const forbidden of ["agent_start", "settled_enter"]) {
     assert.ok(!events(delta.probe).includes(forbidden), `/notify 却出现了 ${forbidden}`);
   }
@@ -943,7 +958,7 @@ const settings = await makeHost({
 });
 await settings.useModel("probe-fake", "fake-model");
 
-/** 用一组按键打开设置界面（真实命令分发 + 真实组件）。 */
+/** Opens the settings UI with a key sequence, through real command dispatch and the real component. */
 async function driveSettings(keys) {
   settingsDriver.setKeys(keys);
   settingsDriver.opened = false;
@@ -977,7 +992,8 @@ await step("J4 footer 常驻：每一帧末尾都有 `Ctrl+S  save as default` �
 
 await step("J5 Enter 只改本对话：立即生效，但用户文件一个字节都不写", async () => {
   const before = fs.readFileSync(settings.userConfigPath, "utf8");
-  // 运行完成规则 开关：true → false（焦点进入详情时落在当前值那行，按一次 down 到 false）
+  // runCompleted enabled: true to false; entering the detail view focuses the current-value row, so one
+  // press of down reaches false.
   const keys = await keysToItem("rules.runCompleted.enabled", [K.down, K.enter]);
   const delta = await driveSettings(keys);
   assert.match(settingsDriver.renders.at(-3).join("\n"), /已应用（仅本对话）/, "缺少轻量确认");
@@ -1000,7 +1016,8 @@ await step("J6 本对话覆盖跨 /reload 保留（同一 sessionId 恢复）", 
 });
 
 await step("J7 Ctrl+S：只写这一项到用户默认文件，且标记与状态行同时给出反馈", async () => {
-  // 列表上直接 Ctrl+S 作用于焦点项（本对话当前值 = false，正是要固化的值）
+  // Ctrl+S on the list applies to the focused item; the current value in this conversation is already
+  // false, which is what should be frozen.
   const saved = await driveSettings(await keysToList("rules.runCompleted.enabled", [K.ctrlS]));
   assert.ok(
     saved.plugin.some((row) => row.event === "notify_default_saved" && row.item === "rules.runCompleted.enabled"),
@@ -1051,7 +1068,7 @@ await step("J10 Ctrl+T 真的走一遍投递链路（折叠的旧 /notify test�
 
 await step("J11 渠道开关：Ctrl+S 写整个 providers 数组，下一次运行零投递", async () => {
   const before = fs.readFileSync(settings.userConfigPath, "utf8");
-  // 先把渠道关掉（Enter），再 Ctrl+S 固化（列表级）
+  // Turn the channel off with Enter first, then freeze it with Ctrl+S from the list.
   const delta = await driveSettings(await keysToItem("provider:terminal", [K.down, K.enter, K.ctrlS]));
   assert.equal(delta.deliveries.length, 0);
   const raw = settings.readUserConfigRaw();
@@ -1060,7 +1077,8 @@ await step("J11 渠道开关：Ctrl+S 写整个 providers 数组，下一次运�
   assert.equal(raw.providers[0].enabled, false);
   assert.equal((await settings.prompt()).deliveries.length, 0, "渠道已关却仍在投递");
   assert.deepEqual(settings.runtimeErrors, []);
-  // 还原文件，避免影响后面的断言；重置按键队列，避免残留按键被下一次打开重放
+  // Restore the file so later assertions are unaffected, and clear the key queue so no leftover key
+  // is replayed when the UI is opened again.
   fs.writeFileSync(settings.userConfigPath, before);
   settingsDriver.setKeys([]);
 });
@@ -1074,7 +1092,7 @@ await step("J12 写盘失败：状态行报错、标记不迁移、内存里当�
   assert.ok(!frame.includes(" · default") || !frame.includes("已保存为默认"));
   assert.deepEqual(settings.runtimeErrors, []);
   fs.writeFileSync(settings.userConfigPath, before);
-  // 坏文件恢复后行为正常
+  // After the broken file is repaired the behaviour is normal again.
   assert.equal((await settings.prompt()).deliveries.length, 0);
 });
 
@@ -1125,7 +1143,7 @@ await settings.dispose();
 
 
 // ---------------------------------------------------------------------------
-// Host：内容字段（M4 / 设计 §19）—— 会话名 / 成本 / 上下文占比 / assistant 摘录
+// Host: content fields - session label, cost, context usage and assistant excerpt
 // ---------------------------------------------------------------------------
 
 const CONTENT_CONFIG = {
@@ -1143,7 +1161,7 @@ const contentHost = await makeHost({
 });
 await contentHost.useModel("probe-fake", "fake-model");
 
-/** 每个内容字段断言都要控制假 provider 的输出，用完必清（否则会泄漏到后面的 host）。 */
+/** Every content-field assertion controls the fake provider's output and must clean up afterwards, otherwise it leaks into later hosts. */
 async function withEnv(values, run) {
   const saved = new Map();
   for (const [key, value] of Object.entries(values)) {
@@ -1161,7 +1179,7 @@ async function withEnv(values, run) {
   }
 }
 
-/** 跑一次成功运行，返回该次终端通知的正文。 */
+/** Runs one successful run and returns the body of that run's terminal notification. */
 async function runBody(toolFailures = []) {
   const delta = toolFailures.length > 0
     ? await contentHost.promptWithToolFailures(toolFailures)
@@ -1177,19 +1195,20 @@ await step("R1 内容字段默认值与字段替换：no-op 字段已删，新�
   assert.equal(content.includeCost, true);
   assert.ok(!("includeSessionName" in content), "首段标识已更名为 includeSessionLabel（语义含项目目录名回退）");
   assert.ok(!("includePromptExcerpt" in content), "已删除的 no-op 字段不得复活（它会静默失效）");
-  // 旧配置里残留这个字段：不再是“有效字段”，但也不该因为一个已删字段而整份降级。
+  // A leftover field from an older config: it is no longer meaningful, but one removed field must not
+  // degrade the whole config.
   assert.deepEqual(
     configModule.mergeConfig(configModule.defaultConfig(), { version: 1, content: { includePromptExcerpt: true } }, "test").errors,
     [],
   );
-  // 新字段的类型错误必须照旧降级（严格校验不得因为新增字段而放松）。
+  // A wrong type in a new field must still degrade: strict validation must not loosen as fields are added.
   for (const content of [{ includeAssistantExcerpt: "yes" }, { includeSessionLabel: 1 }, { includeCost: null }]) {
     assert.ok(configModule.mergeConfig(configModule.defaultConfig(), { content }, "test").errors.length > 0, JSON.stringify(content));
   }
 });
 
 await step("R2 首段标识：未命名时回退项目目录名，`/name` 后会话名优先，可整栏关闭", async () => {
-  // 本 host 的 cwd 是 TMP/content，所以未命名时应回退成 [content]。
+  // This host's cwd is TMP/content, so an unnamed session must fall back to [content].
   const fallback = await runBody();
   assert.ok(fallback.startsWith(`[${contentHost.label}]`), `未命名时应回退到项目目录名: ${fallback}`);
 
@@ -1200,7 +1219,7 @@ await step("R2 首段标识：未命名时回退项目目录名，`/name` 后会
   assert.equal(changed.hasName, true);
   assert.ok(!JSON.stringify(changed).includes("重构登录"), "日志不得记下会话名本身");
 
-  // 两个来源都不想要时，整栏关掉。
+  // Turning both sources off removes the whole column.
   contentHost.writeUserConfig({ ...CONTENT_CONFIG, content: { includeAssistantExcerpt: true, includeSessionLabel: false } });
   await reloadViaUi(contentHost);
   const off = await runBody();
@@ -1210,7 +1229,7 @@ await step("R2 首段标识：未命名时回退项目目录名，`/name` 后会
 });
 
 await step("R3 assistant 摘录：默认关闭；开启后 10 字截断 + 截断标记 + 悬空标点去除", async () => {
-  // 默认关闭：用折叠后的 Ctrl+R 重读不含该字段的配置，而不是另建 host。
+  // Off by default: the folded Ctrl+R re-reads a config without that field instead of building another host.
   contentHost.writeUserConfig({ version: 1, coalesce: { windowMs: 0, cooldownMs: 0 } });
   await reloadViaUi(contentHost);
   await withEnv({ PROBE_ASSISTANT_TEXT: "0123456789ABCDEF" }, async () => {
@@ -1224,12 +1243,14 @@ await step("R3 assistant 摘录：默认关闭；开启后 10 字截断 + 截断
     assert.ok(body.includes("0123456789…"), `应带出前 10 个字符并标出截断: ${body}`);
     assert.ok(!body.includes("0123456789A"), `摘录超过 10 个字符: ${body}`);
   });
-  // 恰好 10 字：没有截断，就不该补 `…`（不能把模型的完整句子说成被截断）。
+  // Exactly 10 characters: nothing was cut, so no ellipsis may be added; a complete short sentence
+  // must not be reported as truncated.
   await withEnv({ PROBE_ASSISTANT_TEXT: "0123456789" }, async () => {
     const body = await runBody();
     assert.ok(body.includes("0123456789") && !body.includes("…"), `完整短句不该补截断标记: ${body}`);
   });
-  // 悬空标点：第 10 个字符恰好是标点时要去掉（“已修复，改”这种尾巴读起来像坏了）。
+  // Dangling punctuation: when the tenth character is punctuation it is dropped, because a tail like
+  // "fixed login, changed" reads as if something broke.
   await withEnv({ PROBE_ASSISTANT_TEXT: "abcdefghi。后面还有更多内容" }, async () => {
     const body = await runBody();
     assert.ok(body.includes("abcdefghi…"), `截断处的悬空标点应去掉: ${body}`);
@@ -1237,7 +1258,8 @@ await step("R3 assistant 摘录：默认关闭；开启后 10 字截断 + 截断
   await withEnv({ PROBE_ASSISTANT_TEXT: "a\nb" }, async () => {
     assert.ok((await runBody()).includes("a b"), "换行应归一为空格（否则会撑破单行通知）");
   });
-  // 注入面：模型回复可能包含伪造通知的序列，摘录必须先经 sanitize 再入正文。
+  // Injection surface: a model reply can contain sequences that forge a notification, so the excerpt
+  // is sanitized before it enters the body.
   await withEnv({ PROBE_ASSISTANT_TEXT: "x\u001b]777;notify;evil\u0007y" }, async () => {
     const body = await runBody();
     assert.ok(body.includes("xy"), `转义序列应整段删除（含载荷）: ${JSON.stringify(body)}`);
@@ -1247,15 +1269,16 @@ await step("R3 assistant 摘录：默认关闭；开启后 10 字截断 + 截断
 
 await step("R4 成本：本次 + 会话累计；includeCost=false 时两者一起消失", async () => {
   await withEnv({ PROBE_COST_USD: "0.0123" }, async () => {
-    // 第一次运行：本次与累计相同，只显示一次（避免“累计”重复同一数字）。
+    // First run: this run and the cumulative total are equal, so the value is shown once instead of
+    // repeating the same number as "cumulative".
     const first = await runBody();
     assert.ok(first.includes("成本 $0.0123"), `缺少本次成本: ${first}`);
     assert.ok(!first.includes("累计"), `首次运行不该重复累计值: ${first}`);
-    // 第二次运行：累计跨 run 累加（同一实例会话内）。
+    // Second run: the total accumulates across runs inside one instance.
     const second = await runBody();
     assert.ok(second.includes("成本 $0.0123（累计 $0.0246）"), `累计口径不对: ${second}`);
   });
-  // 关闭后成本与上下文占比一起消失（同一开关管两个字段）。
+  // With the switch off, cost and context usage disappear together: one switch governs both fields.
   contentHost.writeUserConfig({ ...CONTENT_CONFIG, content: { includeAssistantExcerpt: true, includeCost: false } });
   await reloadViaUi(contentHost);
   await withEnv({ PROBE_COST_USD: "0.0123", PROBE_CONTEXT_TOKENS: "42000" }, async () => {
@@ -1277,10 +1300,10 @@ await step("R5 上下文占比：拿得到才算，低于 1% 不显示", async (
 await contentHost.dispose();
 
 // ---------------------------------------------------------------------------
-// Host 8：S4 合并窗口 / 冷却 —— 默认值在真实宿主下真的生效
+// Host 8: coalescing window and cooldown - the defaults really take effect under a real host
 // ---------------------------------------------------------------------------
 
-await step("L0 默认参数的合并/冷却与设计 §10.2 一致", () => {
+await step("L0 默认参数的合并/冷却与出厂默认一致", () => {
   const config = configModule.defaultConfig();
   assert.equal(config.coalesce.windowMs, 1500);
   assert.equal(config.coalesce.cooldownMs, 3000);
@@ -1317,15 +1340,17 @@ await step("L2 cooldownMs=0 后恢复「每次运行各发一条」（参数真�
 await coalesceHost.dispose();
 
 // ---------------------------------------------------------------------------
-// Host 9：S6 工具失败 / 压缩失败 / 等待输入
+// Host 9: tool failures, compaction failure and waiting for user input
 //
-// 工具失败是在**运行中**注入真实 `tool_execution_end`（靠探针 `agent_start` 定位注入点，
-// 不靠 sleep 猜时机）：`PROBE_DELAY_MS` 让假 provider 晚 250ms 回包，窗口足够大。
+// A tool failure is injected as a real `tool_execution_end` **while the run is still active** (located
+// by the probe's `agent_start`, not by a guessed sleep): `PROBE_DELAY_MS` makes the fake provider
+// answer 250ms later, which leaves a wide enough window.
 // ---------------------------------------------------------------------------
 
 const S6_BASE = {
   version: 1,
-  // 关掉冷却/合并，先把“hook 行为”本身测清楚（冷却由 L1/L2 与 K3 负责）
+  // Cooldown and coalescing off, so hook behaviour itself is what gets pinned down; cooldown is covered
+  // by L1/L2 and K3.
   coalesce: { windowMs: 0, cooldownMs: 0 },
   rules: {
     toolFailed: { enabled: true, level: "warning", channels: ["terminal"] },
@@ -1344,7 +1369,7 @@ const s6 = await makeHost({
 await s6.useModel("probe-fake", "fake-model");
 s6.setModelDelay(250);
 
-/** 改配置 → reload（重新读盘）→ 返回 reload 期间的插件增量。 */
+/** Rewrites the config, reloads (re-reading from disk) and returns the plugin delta produced by the reload. */
 async function reconfigure(host, raw) {
   host.writeUserConfig(raw);
   return host.during(() => host.session.reload());
@@ -1372,7 +1397,8 @@ await step("K2 运行结果不通知时，聚合的工具失败自己发一条�
 await step("K3 immediate 模式：工具一失败就提醒，同 run 的后续事件被合并窗口吸收", async () => {
   await reconfigure(s6, {
     ...S6_BASE,
-    // 同一 run 的后续事件（第二个工具、运行结果）靠默认 1500ms 窗口吸收
+    // Later events of the same run, a second tool and the run result, are absorbed by the default
+    // 1500ms window.
     coalesce: { windowMs: 1500, cooldownMs: 0 },
     rules: {
       ...S6_BASE.rules,
@@ -1432,12 +1458,14 @@ await step("K5 等待输入：真 select 触发一条；custom 永久排除；en
   assert.equal(ends.length, 1, "select 返回后应产生 1 个 end span");
   assert.equal(ends[0].depth, 0, "end 应把等待计数复位");
 
-  // §18.5 修订 1：custom 与用户输入无关（加载器/进度 UI 也会用它），永久排除
+  // `custom` says nothing about user input because the loader and progress UI emit it too, so it is
+  // excluded permanently.
   const custom = await s6.during(() => s6.emit({ type: "ui_prompt_start", reason: "ui_prompt", kind: "custom" }));
   assert.equal(custom.deliveries.length, 0, "custom 提示不得产生通知");
   assert.equal(custom.notifies, 0);
 
-  // 嵌套 prompt 不会产生内层 span，end 报的是外层 kind：不得靠 kind 配对
+  // A nested prompt produces no inner span and the end reports the outer kind, so the two cannot be
+  // paired by kind.
   await s6.emit({ type: "ui_prompt_start", reason: "ui_prompt", kind: "confirm", title: "确认 X" });
   const waiting = await statusViaUi(s6);
   assert.match(waiting, /正在等你输入/, "status 应反映 waiting 状态");
@@ -1460,7 +1488,7 @@ s6.setModelDelay(undefined);
 await s6.dispose();
 
 // ---------------------------------------------------------------------------
-// Host 10：S7 Webhook —— 验收 §17.3：「新增 1 个文件 + registry 1 行 + 配置 1 条」
+// Host 10: webhook end to end - adding a channel means one new file, one registry line and one config entry
 // ---------------------------------------------------------------------------
 
 const hookRequests = [];
@@ -1562,22 +1590,23 @@ await step("M2 非法 webhook 配置降级为 noop，绝不发到错地方", asy
   assert.deepEqual(networkAttempts, [], "出现了外部网络访问");
 });
 
-await step("M3 §17.3 反回退：lifecycle/rules 不碰渠道名，service 不认识 webhook", () => {
+await step("M3 反回退：lifecycle/rules 不碰渠道名，service 不认识 webhook", () => {
   const read = (rel) => fs.readFileSync(path.join(PLUGIN_DIR, rel), "utf8");
-  // 只看真正的 import 语句：注释里提到 `providers/*` 是在说明这条约束，不算违规。
+  // Only real import statements are inspected: a comment mentioning `providers/*` documents this
+  // constraint and is not a violation.
   const importsProviders = /from\s+"[^"]*providers\//;
   for (const rel of ["src/lifecycle.ts", "src/rules.ts"]) {
     const source = read(rel);
-    assert.doesNotMatch(source, importsProviders, `${rel} 不得 import providers/*（§17.3 规则 1）`);
-    assert.doesNotMatch(source, /terminal|webhook/, `${rel} 不得出现渠道名（§17.3 规则 2）`);
+    assert.doesNotMatch(source, importsProviders, `${rel} 不得 import providers/*`);
+    assert.doesNotMatch(source, /terminal|webhook/, `${rel} 不得出现渠道名`);
   }
-  // `debug` 只是日志级别名，不作为渠道名检查
+  // `debug` is also a log level name, so it is not checked as a channel name.
   assert.doesNotMatch(read("src/service.ts"), /terminal|webhook/, "service 不得出现渠道名");
   assert.doesNotMatch(read("extensions/index.ts"), /pi\.on\(\s*"agent_end"/, "不得注册 agent_end（硬约束 1）");
   assert.doesNotMatch(
     read("src/providers/webhook.ts"),
     /from "\.\.\/(lifecycle|rules|config)\.ts"/,
-    "渠道不得 import 判定/配置层（§17.3 规则 3）",
+    "渠道不得 import 判定/配置层",
   );
 });
 
@@ -1586,7 +1615,7 @@ await new Promise((resolve) => hookServer.close(resolve));
 delete process.env.PI_NOTIFY_TEST_WEBHOOK_SECRET;
 
 // ---------------------------------------------------------------------------
-// 收尾
+// Teardown
 // ---------------------------------------------------------------------------
 
 globalThis.fetch = realFetch;

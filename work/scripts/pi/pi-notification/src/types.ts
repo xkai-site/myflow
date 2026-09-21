@@ -1,14 +1,9 @@
 /**
- * 共享契约（对应设计 §11 / §17.4）。
- *
- * 本文件是唯一的跨层契约来源：
- *   lifecycle / rules  ->  NotificationRequest  ->  service  ->  Notifier[]
- * 不携带任何 `ctx` / `SessionManager` / Pi 类型引用，避免旧实例语境泄漏。
+ * Shared contracts; the only cross-layer type source in this plugin:
+ * lifecycle / rules -> NotificationRequest -> service -> Notifier[]
+ * Deliberately free of Pi `ctx` / `SessionManager` references: a stale session's
+ * context must never be able to leak into these structures.
  */
-
-// ---------------------------------------------------------------------------
-// 等级与基本枚举
-// ---------------------------------------------------------------------------
 
 export type NotifyLevel = "info" | "warning" | "error";
 
@@ -16,7 +11,7 @@ export type LogLevel = NotifyLevel | "debug";
 
 export type RunStatus = "completed" | "failed" | "aborted" | "unknown";
 
-/** 与 Pi 的 assistant stopReason 对齐（`O/docs/session-format.md`）。 */
+/** Mirrors Pi's assistant `stopReason` values. */
 export type AssistantStopReason =
   | "pending"
   | "stop"
@@ -28,7 +23,7 @@ export type AssistantStopReason =
 
 export type ShutdownReason = "quit" | "reload" | "new" | "resume" | "fork";
 
-/** 稳定的规则标识；用它做去重/冷却/日志键，**不用文案做键**。 */
+/** Stable rule identity: dedupe, cooldown and log keys use this, never the message text. */
 export type NotificationKind =
   | "run_completed"
   | "run_failed"
@@ -38,17 +33,13 @@ export type NotificationKind =
   | "waiting_for_user";
 
 /**
- * Pi 的 `ui_prompt_*` kind（`O/dist/core/extensions/types.d.ts`）。
- * `custom` **永久排除**（§18.5 修订 1：加载器也会触发它，与用户输入无关）。
+ * Pi's `ui_prompt_*` kinds. `custom` is excluded everywhere: the loader and the
+ * progress UI emit it as well, so it does not mean the user is being awaited.
  */
 export type UIPromptKind = "select" | "confirm" | "input" | "editor" | "custom";
 
-/** 工具失败的通知策略（设计 §12.3）。 */
+/** How tool failures are announced. */
 export type ToolFailureMode = "aggregate" | "immediate";
-
-// ---------------------------------------------------------------------------
-// index.ts 产出的最小事实（不含 ctx）
-// ---------------------------------------------------------------------------
 
 export type SignalKind =
   | "run_started"
@@ -63,7 +54,7 @@ export type SignalKind =
 export interface SignalEvent {
   kind: SignalKind;
   sessionId: string;
-  /** epoch ms（由注入 clock 提供） */
+  /** epoch ms, from the injected clock */
   at: number;
   assistant?: {
     stopReason: AssistantStopReason | undefined;
@@ -84,17 +75,13 @@ export interface SignalEvent {
     aborted: boolean;
   };
   settled?: {
-    /** 官方语义：是否真的空闲（除非另一扩展又启动了新 run） */
+    /** Pi semantics: idle unless another extension has started a new run. */
     isIdle: boolean;
   };
   shutdown?: {
     reason: ShutdownReason;
   };
 }
-
-// ---------------------------------------------------------------------------
-// 运行判定结果（lifecycle 的唯一产出）
-// ---------------------------------------------------------------------------
 
 export interface ToolFailure {
   toolName: string;
@@ -103,31 +90,31 @@ export interface ToolFailure {
 
 export interface RunOutcome {
   sessionId: string;
-  /** 实例内自增，用于去重键 */
+  /** Monotonic per instance; part of dedupe keys. */
   runId: string;
   status: RunStatus;
   startedAt: number;
   durationMs: number;
-  /** 最终 assistant 的 stopReason；无法确定时 undefined */
+  /** Final assistant stopReason; undefined when it cannot be determined. */
   stopReason?: AssistantStopReason;
-  /** 已脱敏 */
+  /** Already redacted. */
   errorMessage?: string;
   toolFailures: ToolFailure[];
   compactFailed?: boolean;
-  /** 本 run 内 assistant usage 的成本累计；provider 不报 usage 时 undefined */
+  /** Cost accumulated from assistant usage in this run; undefined when usage is never reported. */
   costUsd?: number;
-  /** 最后一条 assistant 文本的前若干字符（已由 index 限长与去空，尚未清洗） */
+  /** Leading characters of the last assistant text (length-capped upstream, not yet sanitized). */
   assistantExcerpt?: string;
 }
 
-/** 一次失败的 `tool_execution_end` 累积结果（lifecycle 产出，rules 消费）。 */
+/** Accumulated result for a failing `tool_execution_end` (produced by lifecycle, consumed by rules). */
 export interface ToolFailureEvent {
   sessionId: string;
   runId: string;
   toolName: string;
-  /** 本 run 内该工具**去重后**的失败次数（设计 §12.3：同 run 内同工具只计一次计数） */
+  /** Failure count for this tool, deduplicated per tool name within the run. */
   count: number;
-  /** 本 run 至今的失败工具汇总：immediate 模式的文案直接用这个（§12.3「N 个工具失败: …」） */
+  /** All failures seen so far in this run; `immediate` mode renders from this list. */
   accumulated: ToolFailure[];
 }
 
@@ -135,34 +122,31 @@ export interface RunSummary {
   runStatus: RunStatus;
   durationMs: number;
   toolFailures: ToolFailure[];
-  /** 会话名（`/name`）；未命名时 undefined */
+  /** Session name from `/name`; undefined when the session is unnamed. */
   sessionName?: string;
-  /** 项目目录名（`ctx.cwd` 的 basename）；用作会话名缺失时的降级标识 */
+  /** Basename of `ctx.cwd`; fallback label when the session has no name. */
   projectName?: string;
-  /** 本实例内该会话的累计成本（`/reload` 或换会话后重置） */
+  /** Cost accumulated in this instance for the session; reset by `/reload` or a session change. */
   cumulativeCostUsd?: number;
   contextPercent?: number;
 }
-
-// ---------------------------------------------------------------------------
-// 规则层
-// ---------------------------------------------------------------------------
 
 export interface NotificationRequest {
   level: NotifyLevel;
   kind: NotificationKind;
   title: string;
   body: string;
-  /** 允许跨会话合并/冷却的稳定键 */
+  /** Stable key used for dedupe and coalescing. */
   dedupeKey: string;
   /**
-   * 可选：这一条专用的合并窗口。缺省用 `config.coalesce.windowMs`。
-   * 工具失败的 immediate 模式用它把并行失败聚合成一条（`coalesce.toolFailureWindowMs`）。
+   * Per-request coalescing window; defaults to `config.coalesce.windowMs`.
+   * `immediate` tool failures pass `coalesce.toolFailureWindowMs` so parallel
+   * failures still collapse into one message.
    */
   coalesceWindowMs?: number;
-  /** provider id 列表 */
+  /** Provider ids to deliver to. */
   channels: string[];
-  /** 仅用于投递与日志，不含原始 prompt / 完整回复 */
+  /** Delivery and logging metadata only; never the raw prompt or full reply. */
   meta: {
     sessionId: string;
     runId: string;
@@ -172,26 +156,22 @@ export interface NotificationRequest {
   };
 }
 
-/** 纯函数，无 IO。 */
+/** Pure function, no IO. */
 export type RuleEvaluator = (
   input: { outcome: RunOutcome; summary?: RunSummary },
   config: NotificationConfig,
 ) => NotificationRequest | null;
 
-// ---------------------------------------------------------------------------
-// Provider 契约（渠道解耦的关键）
-// ---------------------------------------------------------------------------
-
 export interface Notifier {
   readonly id: string;
   readonly type: string;
-  /** 校验自身配置；返回错误字符串表示不可用。不得抛异常。 */
+  /** Validates its own options; a returned string means unusable. Must not throw. */
   validate(options: unknown): string | undefined;
-  /** 可选：渠道特定格式化；缺省走通用 title/body。 */
+  /** Optional channel-specific payload; falls back to the generic title/body. */
   format?(req: NotificationRequest): unknown;
-  /** 单次投递。必须尊重 signal，不自行重试（重试由 decorator 负责）。 */
+  /** One delivery attempt. Must honour `signal` and must not retry: retries live in a decorator. */
   send(req: NotificationRequest, signal: AbortSignal): Promise<void>;
-  /** 幂等释放。不得依赖 Pi 的 ctx。 */
+  /** Idempotent release; must not depend on Pi's `ctx`. */
   dispose(): Promise<void>;
 }
 
@@ -199,7 +179,7 @@ export type NotifierFactory = (id: string, options: unknown) => Notifier;
 
 export interface NotifierRegistry {
   register(type: string, factory: NotifierFactory): void;
-  /** 未注册 → NoopNotifier + 警告（Null Object，消灭调用点的 if） */
+  /** Unregistered or invalid factories degrade to a NoopNotifier so callers need no null checks. */
   create(id: string, type: string, options: unknown): Notifier;
 }
 
@@ -207,35 +187,32 @@ export interface DeliveryResult {
   providerId: string;
   ok: boolean;
   attempts: number;
-  /** 已脱敏 */
+  /** Already redacted. */
   error?: string;
   durationMs: number;
 }
 
-// ---------------------------------------------------------------------------
-// 服务层
-// ---------------------------------------------------------------------------
-
 export interface NotificationService {
   /**
-   * 立即返回（入队）。绝不 await 网络。
-   * `bypassFilters` 仅供 `/notify test` 这类自检使用：绕过静默时段/合并/冷却（但不绕过去重与门槛），
-   * 否则「自检没收到」会被误读成渠道坏了。
+   * Enqueues and returns immediately; never awaits the network.
+   * `bypassFilters` is for self-tests such as `/notify test`: it skips quiet hours,
+   * coalescing and cooldown but still honours dedupe and thresholds, so a missing
+   * self-test notification cannot be mistaken for a broken channel.
    */
   submit(req: NotificationRequest, options?: { bypassFilters?: boolean }): void;
-  /** 仅 quit 等收尾场景使用，带预算。 */
+  /** For shutdown paths only; bounded by `timeoutMs`. */
   flush(timeoutMs: number): Promise<void>;
-  /** 丢弃未投递项（reload/new/resume/fork）。 */
+  /** Drops queued and in-flight deliveries (reload/new/resume/fork). */
   discardPending(reason: string): void;
-  /** 幂等 */
+  /** Idempotent. */
   dispose(): Promise<void>;
-  /** 只读快照，供 `/notify status` 展示（不触发任何投递） */
+  /** Read-only counters for `/notify status`; never triggers a delivery. */
   snapshot(): ServiceSnapshot;
-  /** 使用同一个注入时钟计算本地静默时段（与等级例外无关）。 */
+  /** Evaluated with the injected clock, in local time; level exceptions are applied elsewhere. */
   isQuietHours(): boolean;
 }
 
-/** `/notify status` 需要的运行统计；全部在内存里，不持久化（设计 §13 第 16 项）。 */
+/** In-memory runtime counters for `/notify status`; never persisted. */
 export interface ServiceSnapshot {
   queued: number;
   active: number;
@@ -243,18 +220,14 @@ export interface ServiceSnapshot {
   failed: number;
   deduped: number;
   dropped: number;
-  /** 被「同一运行只放行一条」窗口合并掉的数量（S4） */
+  /** Notifications dropped by the per-run coalescing window. */
   coalesced: number;
-  /** 被同 kind 冷却窗口拦下的数量（S4） */
+  /** Notifications dropped by the per-kind cooldown window. */
   cooled: number;
   lastAttemptAt?: number;
   lastOkAt?: number;
   lastError?: string;
 }
-
-// ---------------------------------------------------------------------------
-// 配置（§10.2 的 S1 子集）
-// ---------------------------------------------------------------------------
 
 export interface RuleConfig {
   enabled: boolean;
@@ -264,12 +237,12 @@ export interface RuleConfig {
 
 export interface ToolFailureRuleConfig extends RuleConfig {
   mode: ToolFailureMode;
-  /** `immediate` 模式下，同一工具失败达到该次数即通知（设计 §12.3） */
+  /** In `immediate` mode: notify once a tool reaches this many failures. */
   threshold: number;
 }
 
 export interface WaitingForUserRuleConfig extends RuleConfig {
-  /** 白名单 kind；`custom` 永远不在此列表（§18.5 修订 1） */
+  /** Allowed prompt kinds; `custom` can never appear here. */
   kinds: UIPromptKind[];
 }
 
@@ -283,7 +256,7 @@ export interface ProviderConfig {
 export interface NotificationConfig {
   version: 1;
   enabled: boolean;
-  /** 全局门槛：低于此级别的通知一律不发 */
+  /** Global threshold: notifications below this level are never delivered. */
   minLevel: NotifyLevel;
   rules: {
     runCompleted: RuleConfig;
@@ -293,16 +266,16 @@ export interface NotificationConfig {
     compactFailed: RuleConfig;
     waitingForUser: WaitingForUserRuleConfig;
   };
-  /** 合并/冷却（设计 §10.2 / §12.1 第 5 步）；0 表示关闭该项过滤 */
+  /** Coalescing and cooldown; a value of 0 disables that filter. */
   coalesce: {
-    /** 同一「逻辑运行」（sessionId+runId）内只放行一条通知 */
+    /** At most one notification per logical run (sessionId + runId). */
     windowMs: number;
-    /** 工具失败聚合窗口；仅用于 immediate 模式的判定说明与日志 */
+    /** Aggregation window for `immediate` tool failures. */
     toolFailureWindowMs: number;
-    /** 同一 kind 两次入队之间的最小间隔 */
+    /** Minimum interval between two enqueues of the same kind. */
     cooldownMs: number;
   };
-  /** 本地时间，左闭右开；跨午夜；start=end 表示全天。 */
+  /** Local time, half-open interval, may wrap past midnight; start=end means all day. */
   quietHours: {
     enabled: boolean;
     start: string;
@@ -312,11 +285,11 @@ export interface NotificationConfig {
   content: {
     includeDuration: boolean;
     includeToolFailureNames: boolean;
-    /** 正文首段标识：会话名优先，未命名时回退到项目目录名；两者都无则省略 */
+    /** Leading identity label: session name, else project directory name, else omitted. */
     includeSessionLabel: boolean;
-    /** assistant 最终回复的前若干字符（默认关闭：可能带出文件内容/密钥） */
+    /** Leading characters of the final assistant reply; off by default (may carry file content or secrets). */
     includeAssistantExcerpt: boolean;
-    /** 成本（本次 + 会话累计）与上下文占比 */
+    /** Cost (this run and session total) plus context usage percentage. */
     includeCost: boolean;
     maxMessageChars: number;
   };
@@ -325,21 +298,17 @@ export interface NotificationConfig {
     maxRetries: number;
     concurrency: number;
     queueLimit: number;
-    /** 连续失败多少次后熔断该渠道（decorators，设计 §13 第 1 项） */
+    /** Consecutive failures before a channel is tripped open; 0 disables the breaker. */
     circuitBreakerFailures: number;
   };
   providers: ProviderConfig[];
-  /** session_shutdown(reason=quit) 内允许的最大等待预算（§18.4 硬约束） */
+  /** Maximum wait budget inside `session_shutdown(reason=quit)`; the exit path must stay short. */
   shutdownFlushMs: number;
 }
 
-// ---------------------------------------------------------------------------
-// 注入依赖（便于测试注入 fake clock / 观测 sink）
-// ---------------------------------------------------------------------------
-
 export interface Logger {
   log(level: LogLevel, message: string, meta?: Record<string, unknown>): void;
-  /** 结构化记录（仅写 `PI_NOTIFY_LOG_FILE`），供回归脚本断言。 */
+  /** Structured record, written only when `PI_NOTIFY_LOG_FILE` is set; used by regression scripts. */
   record(entry: Record<string, unknown>): void;
 }
 

@@ -1,14 +1,14 @@
 /**
- * 回归测试探针（**测试夹具，不是插件的一部分**）。
+ * Regression probe; a test fixture, not part of the plugin.
  *
- * 提供三样东西：
- *  1. 两个离线假 provider：`probe-fake`（成功 stop）与 `probe-fail`（error）。
- *     用 `createAssistantMessageEventStream()` 直接产出事件，**零网络、零 LLM 调用**。
- *  2. `/probe-cmd` 命令：用于验证「纯命令不产生 agent 生命周期」（§18.2 第 1 项）。
- *  3. 事件打点：把 hook 触发情况连同单调时钟写到 `PROBE_LOG`（JSONL），供断言读取。
+ * It provides three things:
+ *  1. two offline fake providers, `probe-fake` (stops successfully) and `probe-fail` (errors), which
+ *     emit events through `createAssistantMessageEventStream()` with no network and no LLM call;
+ *  2. the `/probe-cmd` command, used to verify that a pure command produces no agent lifecycle;
+ *  3. event tracing: hook activity plus a monotonic timestamp is appended to `PROBE_LOG` as JSONL.
  *
- * 打点是断言"settled 后多久启动下一次 run"的唯一时钟来源，因此 `mono` 用 `process.hrtime`，
- * 而不是墙上时钟。
+ * That trace is the only clock source for asserting how soon the next run starts, so `mono` uses
+ * `process.hrtime` rather than wall-clock time.
  */
 
 import { appendFileSync } from "node:fs";
@@ -19,9 +19,9 @@ const INSTANCE = process.env.PROBE_INSTANCE ?? Math.random().toString(36).slice(
 const T0 = process.hrtime.bigint();
 
 /**
- * 目标日志文件**每次调用时读取**，不在模块加载时缓存：
- * 同一个进程里可能先后建多个 host（回归脚本就是这么做的），而扩展模块会被缓存复用，
- * 若在模块作用域缓存路径，第二个 host 的探针就会写到第一个 host 的文件里。
+ * The target log file is read on **every call** rather than cached at module load: several hosts can
+ * be created one after another in the same process, and a cached path would make the second host's
+ * probe write into the first host's file.
  */
 function logFile(): string | undefined {
   return process.env.PROBE_LOG;
@@ -44,7 +44,7 @@ function log(ev, extra = {}) {
       ...extra,
     })}\n`, "utf8");
   } catch {
-    // 打点失败不得影响被测行为
+    // Tracing failures must not affect the behaviour under test.
   }
 }
 
@@ -61,10 +61,12 @@ function mockModel(id) {
 }
 
 function assistantMessage(model, overrides) {
-  // M4 内容字段（§19）的测试旋钮：都是**每次调用时读 env**，与 PROBE_DELAY_MS 同一套做法，
-  // 这样同一个进程里的多个 host 可以各给各的值（模块只加载一次）。
+  // Test knobs for the content fields: also read from the environment on every call, like
+  // PROBE_DELAY_MS, so several hosts in one process can each supply their own values (the module is
+  // loaded only once).
   const costUsd = Number(process.env.PROBE_COST_USD ?? 0) || 0;
-  // 输入 token 同时是 `ctx.getContextUsage()` 的来源（与 model.contextWindow=100000 配比例）。
+  // The input token count is also what `ctx.getContextUsage()` reports, scaled against
+  // model.contextWindow=100000.
   const inputTokens = Number(process.env.PROBE_CONTEXT_TOKENS ?? 1) || 1;
   return {
     role: "assistant",
@@ -86,7 +88,7 @@ function assistantMessage(model, overrides) {
   };
 }
 
-/** 假 assistant 的正文；测试用 `PROBE_ASSISTANT_TEXT` 换成可控字符串（含换行/控制字符）。 */
+/** Body of the fake assistant message; `PROBE_ASSISTANT_TEXT` substitutes a controlled string including newlines and control characters. */
 function assistantText() {
   return process.env.PROBE_ASSISTANT_TEXT ?? "OK";
 }
@@ -145,8 +147,8 @@ export default function probeExtension(pi) {
     },
   });
 
-  // 走 Pi **真实**的 UI prompt 路径（runner 会包一层 `withUIPrompt`）：
-  // 用于验证 `ui_prompt_start/end` 的真触发（kind=select、title 带过来）。
+  // Goes through Pi's **real** UI prompt path (the runner wraps `withUIPrompt`), which is what makes
+  // the `ui_prompt_start/end` triggers real: kind=select and the title is carried through.
   pi.registerCommand("probe-prompt", {
     description: "probe: 触发一次真实的 select 提示（不会真的阻塞：桩 UI 直接返回 undefined）",
     handler: async (_args, ctx) => {

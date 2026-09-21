@@ -1,11 +1,12 @@
 /**
- * 阻塞对照组（**测试夹具**）。
+ * Blocking control fixture.
  *
- * 与通知插件一起加载后，`agent_settled` 内故意 `await` 一段时间。
- * 如果被测的「settled 内不阻塞」断言真的有效，那么装上它之后
- * `settled_enter → 下一次 agent_start` 的间隔必须显著变大。
+ * Loaded next to the notification plugin, it deliberately awaits inside `agent_settled`. If the
+ * "settle does not block" assertion is really effective, installing this must widen the interval
+ * between `settled_enter` and the next `agent_start` significantly.
  *
- * 没有这个对照组，那条断言只是"看起来过了"，无法证明测量本身能识别阻塞。
+ * Without this control group that assertion would only look like it passed; it would not show that
+ * the measurement can detect blocking at all.
  */
 
 const BLOCK_MS = Number(process.env.PROBE_BLOCK_MS ?? 2000);

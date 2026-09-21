@@ -6,6 +6,14 @@ import {
 } from "./dashscope-videos.ts";
 import type { CompletedTask, ResolvedVideoRequest, SubmittedTask, VideoProviderConfig } from "./types.ts";
 
+/**
+ * Config validation only allows the known adapter ids, so reaching this means the type and the
+ * implementation drifted apart. Throwing beats a promise that silently resolves to `undefined`.
+ */
+function unsupportedAdapter(adapter: never): never {
+	throw new Error(`Unsupported video adapter: ${String(adapter)}`);
+}
+
 export async function submitVideoTask(
 	request: ResolvedVideoRequest,
 	options: AdapterRuntimeOptions = {},
@@ -13,6 +21,8 @@ export async function submitVideoTask(
 	switch (request.provider.adapter) {
 		case "dashscope":
 			return submitDashscopeTask(request, options);
+		default:
+			throw unsupportedAdapter(request.provider.adapter);
 	}
 }
 
@@ -24,6 +34,8 @@ export async function pollVideoTask(
 	switch (provider.adapter) {
 		case "dashscope":
 			return pollDashscopeTask(provider, taskId, options);
+		default:
+			throw unsupportedAdapter(provider.adapter);
 	}
 }
 
@@ -35,5 +47,7 @@ export async function cancelVideoTask(
 	switch (provider.adapter) {
 		case "dashscope":
 			return cancelDashscopeTask(provider, taskId, options);
+		default:
+			throw unsupportedAdapter(provider.adapter);
 	}
 }

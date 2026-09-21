@@ -1,12 +1,13 @@
 /**
- * 投递服务（设计 §8 / §12.1 第 5、6 步 / §17.2）。
+ * Delivery service: threshold filtering, dedupe, quiet hours, coalescing window and
+ * cooldown, bounded queue, concurrent delivery, timeout and idempotent dispose.
+ * It only cares that a notification goes out; it does not know where events come from
+ * and knows channels only by `providerId`.
  *
- * 职责：门槛过滤 → 去重 → 静默时段 → **合并窗口 + 冷却（S4）** → 有界队列 → 并发投递 → 超时 → 幂等 dispose。
- * 只关心「通知要发出去」，**不关心事件从哪来**，也不认识任何具体渠道（只认 `providerId`）。
- *
- * 硬约束（§18.4）：
- *  - `submit()` 是**同步**函数，绝不 await 网络、绝不抛异常；投递在独立任务里跑。
- *  - `flush(timeoutMs)` 只在 quit 收尾使用（有预算）。
+ * Hard constraints:
+ *  - `submit()` is synchronous, never awaits the network and never throws; delivery
+ *    runs as an independent task.
+ *  - `flush(timeoutMs)` is only for shutdown paths and always has a budget.
  */
 
 import { sanitizeError } from "./log.ts";
@@ -32,15 +33,16 @@ export interface ServiceOptions {
 
 const LEVEL_RANK: Record<NotifyLevel, number> = { info: 0, warning: 1, error: 2 };
 
-/** 去重键保留上限：避免长时间进程内无界增长。 */
+/** Cap on remembered dedupe keys, so a long-lived process cannot grow without bound. */
 const DEDUPE_LIMIT = 512;
 
 export function createService(options: ServiceOptions): NotificationService {
   const { config, registry, log, now } = options;
   const notifiers = new Map<string, Notifier>();
   /**
-   * 渠道表惰性派生：配置可能在 session_start 时被重新合并（项目级覆盖），
-   * 所以不能在构造时把配置快照死。数组引用变化即视为配置已刷新，顺便清掉渠道缓存。
+   * Provider table, derived lazily: config can be merged again at `session_start`, so the
+   * configuration must not be snapshotted in the constructor. A new `providers` array
+   * reference means the config was refreshed, which also drops the cached channels.
    */
   let providersSource: NotificationConfig["providers"] | undefined;
   let providers = new Map<string, NotificationConfig["providers"][number]>();
@@ -56,10 +58,11 @@ export function createService(options: ServiceOptions): NotificationService {
   const queue: NotificationRequest[] = [];
   const seen = new Map<string, true>();
   /**
-   * S4 门槛过滤（§12.1 第 5 步，设计 §10.2 的 `coalesce`）：
-   *  - `coalesceUntil`：「同一逻辑运行（sessionId+runId）只放行一条」；
-   *  - `cooldownUntil`：「同一 kind 的最小间隔」。
-   * 两个表只在**真正入队**时推进，所以被拦下的通知不会把窗口越推越远。
+   * Threshold filtering:
+   *  - `coalesceUntil`: at most one notification per logical run (sessionId + runId);
+   *  - `cooldownUntil`: minimum interval per kind.
+   * Both tables advance only when a request is actually enqueued, so a dropped
+   * notification never pushes the window further out for the next one.
    */
   const coalesceUntil = new Map<string, number>();
   const cooldownUntil = new Map<string, number>();
@@ -85,7 +88,7 @@ export function createService(options: ServiceOptions): NotificationService {
     for (const resolve of waiters) resolve();
   };
 
-  /** 窗口表的有界性：过期项直接剔除，保留量超过上限时整表重建。 */
+  /** Keeps the window tables bounded: expired entries are dropped once the limit is exceeded. */
   function pruneWindow(table: Map<string, number>, nowMs: number): void {
     if (table.size <= DEDUPE_LIMIT) return;
     for (const [key, until] of table) {
@@ -93,7 +96,7 @@ export function createService(options: ServiceOptions): NotificationService {
     }
   }
 
-  /** 本地时间的 [start,end)，跨午夜；相同端点表示全天。 */
+  /** Local-time half-open interval, may wrap past midnight; equal endpoints mean all day. */
   function isQuietHours(): boolean {
     const quiet = config.quietHours;
     if (!quiet.enabled) return false;
@@ -106,18 +109,19 @@ export function createService(options: ServiceOptions): NotificationService {
   }
 
   /**
-   * 静默时段 → 合并窗口 → 冷却。返回 true 表示被拦下（调用方直接 return）。
-   * 两个窗口都只在**已放行**时推进：被拦下的通知不应延长别人的等待。
+   * Quiet hours, then coalescing window, then cooldown. Returning true means the request
+   * was dropped and the caller should return. Both windows advance only for requests that
+   * were allowed through.
    */
   function filtered(req: NotificationRequest): boolean {
     if (isQuietHours() && !config.quietHours.exceptLevels.includes(req.level)) {
       log.record({ event: "quiet_hours_drop", kind: req.kind, dedupeKey: req.dedupeKey });
-      return true; // 不推进合并/冷却窗口
+      return true; // Do not advance the coalescing or cooldown window.
     }
     const nowMs = now();
-    // 通知自带的窗口优先（工具失败 immediate 模式用 `toolFailureWindowMs` 聚合并行失败），
-    // 但**已在窗口内的 key 一律合并**：窗口一旦被（任一条通知）打开，同一运行的后续通知
-    // 都应该被吸进去，而不是取决于它自己带没带窗口。
+    // A request may carry its own window (immediate tool failures combine parallel failures),
+    // but any key already inside a window is always coalesced: once a window is open, later
+    // notifications of the same run belong in it regardless of their own window.
     const ownWindowMs = req.coalesceWindowMs !== undefined
       ? (Number.isFinite(req.coalesceWindowMs) ? Math.max(0, Math.floor(req.coalesceWindowMs)) : 0)
       : (Number.isFinite(config.coalesce?.windowMs) ? config.coalesce.windowMs : 0);
@@ -149,7 +153,8 @@ export function createService(options: ServiceOptions): NotificationService {
   }
 
   function notifierFor(providerId: string): Notifier {
-    // 先检测配置刷新，再查缓存；/notify reload 可保留相同 id 但更改类型/开关。
+    // Refresh the provider table before consulting the cache: `/notify reload` may keep the
+    // same id while changing its type or enabled flag.
     const provider = providersById().get(providerId);
     const cached = notifiers.get(providerId);
     if (cached) return cached;
@@ -176,7 +181,7 @@ export function createService(options: ServiceOptions): NotificationService {
       : controller.signal;
     const startedAt = now();
     try {
-      // S1 只投递一次；重试/熔断留给 S4 的 decorator（§17.5）。
+      // One attempt only; retry and circuit breaking live in the reliability decorators.
       for (const providerId of req.channels) {
         const notifier = notifierFor(providerId);
         let result: DeliveryResult;
@@ -232,7 +237,7 @@ export function createService(options: ServiceOptions): NotificationService {
       active += 1;
       void deliver(req)
         .catch(() => {
-          // deliver() 内部已逐渠道 try/catch；这里只是最后一道保险，绝不让 Promise 逃逸。
+          // deliver() already catches per channel; this is the last guard so no promise escapes.
         })
         .finally(() => {
           active -= 1;
@@ -255,7 +260,7 @@ export function createService(options: ServiceOptions): NotificationService {
       queue.push(req);
       return;
     }
-    // 队列满：丢弃等级最低的**最新**一项（§13 第 4 项），不无限增长。
+    // Queue full: drop the newest lowest-level entry instead of growing without bound.
     let victimIndex = -1;
     let victimRank = Number.POSITIVE_INFINITY;
     for (let i = queue.length - 1; i >= 0; i -= 1) {
@@ -308,7 +313,8 @@ export function createService(options: ServiceOptions): NotificationService {
           const oldest = seen.keys().next();
           if (!oldest.done) seen.delete(oldest.value);
         }
-        // `/notify test` 这类自检绕过静默时段/合并/冷却，否则「测试通知没来」会被误读成渠道坏了。
+        // Self-tests such as `/notify test` bypass quiet hours, coalescing and cooldown;
+        // otherwise a missing test notification would be read as a broken channel.
         if (options?.bypassFilters !== true && filtered(req)) return;
         enqueue(req);
         log.record({
@@ -320,7 +326,7 @@ export function createService(options: ServiceOptions): NotificationService {
         });
         pump();
       } catch (error) {
-        // 通知链路的任何异常都不得冒泡回 Pi 的 hook（§13 第 11 项）。
+        // No exception from the notification path may escape into a Pi hook.
         log.log("error", "提交通知时发生异常（已忽略）", {
           error: sanitizeError(error instanceof Error ? error.message : String(error)),
         });
