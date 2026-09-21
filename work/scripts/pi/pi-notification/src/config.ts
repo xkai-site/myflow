@@ -22,6 +22,10 @@ import type {
   NotifyLevel,
   ProviderConfig,
   RuleConfig,
+  ToolFailureMode,
+  ToolFailureRuleConfig,
+  UIPromptKind,
+  WaitingForUserRuleConfig,
 } from "./types.ts";
 
 export const CONFIG_VERSION = 1;
@@ -29,7 +33,24 @@ export const CONFIG_VERSION = 1;
 const LEVELS: NotifyLevel[] = ["info", "warning", "error"];
 
 /** 规则名 → 配置键的映射（配置里用 camelCase，与 §10.2 一致）。 */
-const RULE_KEYS = ["runCompleted", "runFailed", "runAborted"] as const;
+const RULE_KEYS = [
+  "runCompleted",
+  "runFailed",
+  "runAborted",
+  "toolFailed",
+  "compactFailed",
+  "waitingForUser",
+] as const;
+
+const TOOL_FAILURE_MODES: ToolFailureMode[] = ["aggregate", "immediate"];
+
+/**
+ * `ui_prompt_*` 允许出现在配置里的 kind。
+ * `custom` **永久排除**（§18.5 修订 1：它同时被加载器/进度 UI 使用，与用户输入无关）。
+ */
+export const ALLOWED_PROMPT_KINDS: UIPromptKind[] = ["select", "confirm", "input", "editor"];
+
+const ALL_PROMPT_KINDS: UIPromptKind[] = [...ALLOWED_PROMPT_KINDS, "custom"];
 
 export interface ConfigProblem {
   /** 出问题的字段路径，例如 `delivery.timeoutMs` */
@@ -86,6 +107,18 @@ export function defaultConfig(): NotificationConfig {
       runFailed: { enabled: true, level: "error", channels: ["terminal"] },
       // 用户按 Esc 时人就在终端旁，默认静默（§12.1 第 3 步）。
       runAborted: { enabled: false, level: "info", channels: ["terminal"] },
+      // 工具失败默认聚合成一条（§12.3），且当本 run 已有结果通知时不再重复发。
+      toolFailed: { enabled: true, level: "warning", channels: ["terminal"], mode: "aggregate", threshold: 1 },
+      compactFailed: { enabled: true, level: "error", channels: ["terminal"] },
+      // 与 run_completed 高度重叠，默认关闭（§12.4）。`custom` 永远不在白名单里。
+      waitingForUser: { enabled: false, level: "info", channels: ["terminal"], kinds: [...ALLOWED_PROMPT_KINDS] },
+    },
+    coalesce: {
+      // 同一逻辑运行（sessionId+runId）内只放行一条通知：防「一次运行多条事件」刷屏。
+      windowMs: 1500,
+      toolFailureWindowMs: 10000,
+      // 同 kind 两次通知的最小间隔（用户连点两次、极短时间内的多次运行只提醒一次）。
+      cooldownMs: 3000,
     },
     content: {
       includeDuration: true,
@@ -96,10 +129,11 @@ export function defaultConfig(): NotificationConfig {
     },
     delivery: {
       timeoutMs: 8000,
-      // S1 只投递一次；重试/熔断留给 S4。
+      // 重试/熔断由 providers/decorators 执行（§17.2）。
       maxRetries: 1,
       concurrency: 1,
       queueLimit: 50,
+      circuitBreakerFailures: 3,
     },
     providers: [{ id: "terminal", type: "terminal", enabled: true, options: {} }],
     // session_shutdown 内可以等这么久（§18.4：退出路径必须带短超时）。
@@ -110,6 +144,9 @@ export function defaultConfig(): NotificationConfig {
 /**
  * 安全降级配置：只保留「失败通知 + 终端渠道 + error 门槛」。
  * 配置损坏时用它继续工作，并让用户能从 `/notify status` 看到原因。
+ *
+ * 降级只留 `run_failed` 一条路径，是因为「配置写错就收不到失败通知」是最糟糕的失败模式；
+ * 其余规则（含 S6 的工具失败/压缩失败）一律关掉，避免用一份坏配置产生噪音。
  */
 export function degradedConfig(): NotificationConfig {
   const config = defaultConfig();
@@ -118,6 +155,15 @@ export function degradedConfig(): NotificationConfig {
     runCompleted: { enabled: false, level: "info", channels: ["terminal"] },
     runFailed: { enabled: true, level: "error", channels: ["terminal"] },
     runAborted: { enabled: false, level: "info", channels: ["terminal"] },
+    toolFailed: {
+      enabled: false,
+      level: "warning",
+      channels: ["terminal"],
+      mode: "aggregate",
+      threshold: 1,
+    },
+    compactFailed: { enabled: false, level: "error", channels: ["terminal"] },
+    waitingForUser: { enabled: false, level: "info", channels: ["terminal"], kinds: [...ALLOWED_PROMPT_KINDS] },
   };
   return config;
 }
@@ -199,13 +245,47 @@ function checkRules(value: unknown, errors: ConfigProblem[], warnings: ConfigPro
       errors.push({ path: fieldPath, message: "必须是对象" });
       continue;
     }
-    const rule: RuleConfig = { enabled: true, level: "info", channels: ["terminal"] };
+    const defaults = defaultConfig().rules as unknown as Record<string, RuleConfig>;
+    const rule: RuleConfig = structuredClone(defaults[key]);
     const target = rule as unknown as Record<string, unknown>;
     checkBoolean(ruleRaw, "enabled", target, `${fieldPath}.enabled`, errors);
     const level = checkLevel(ruleRaw.level, `${fieldPath}.level`, errors);
     if (level) rule.level = level;
     const channels = checkChannels(ruleRaw.channels, `${fieldPath}.channels`, errors);
     if (channels) rule.channels = channels;
+
+    if (key === "toolFailed") {
+      const toolRule = rule as ToolFailureRuleConfig;
+      if (ruleRaw.mode !== undefined) {
+        if (typeof ruleRaw.mode !== "string" || !TOOL_FAILURE_MODES.includes(ruleRaw.mode as ToolFailureMode)) {
+          errors.push({ path: `${fieldPath}.mode`, message: `必须是 ${TOOL_FAILURE_MODES.join(" | ")} 之一，实际是 ${JSON.stringify(ruleRaw.mode)}` });
+        } else {
+          toolRule.mode = ruleRaw.mode as ToolFailureMode;
+        }
+      }
+      checkPositiveInt(ruleRaw, "threshold", target, `${fieldPath}.threshold`, errors, { min: 1, max: 100 });
+    }
+
+    if (key === "waitingForUser") {
+      const waitingRule = rule as WaitingForUserRuleConfig;
+      if (ruleRaw.kinds !== undefined) {
+        if (!Array.isArray(ruleRaw.kinds) || ruleRaw.kinds.some((item) => typeof item !== "string")) {
+          errors.push({ path: `${fieldPath}.kinds`, message: `必须是字符串数组，实际是 ${JSON.stringify(ruleRaw.kinds)}` });
+        } else {
+          const requested = [...new Set(ruleRaw.kinds as string[])];
+          const unknown = requested.filter((item) => !ALL_PROMPT_KINDS.includes(item as UIPromptKind));
+          if (unknown.length > 0) {
+            errors.push({ path: `${fieldPath}.kinds`, message: `未知的 prompt kind: ${unknown.join(", ")}` });
+          }
+          // `custom` 永久排除：即使写进配置也不生效（§18.5 修订 1）
+          if (requested.includes("custom")) {
+            warnings.push({ path: `${fieldPath}.kinds`, message: "`custom` 永久排除（加载器/进度 UI 也会触发它），已忽略" });
+          }
+          waitingRule.kinds = requested.filter((item) => ALLOWED_PROMPT_KINDS.includes(item as UIPromptKind)) as UIPromptKind[];
+        }
+      }
+    }
+
     result[key] = rule;
   }
   return result as Partial<Record<string, RuleConfig>>;
@@ -306,6 +386,18 @@ export function mergeConfig(base: NotificationConfig, raw: unknown, source: stri
       checkPositiveInt(raw.delivery, "maxRetries", config.delivery as unknown as Record<string, unknown>, "delivery.maxRetries", errors, { min: 0, max: 10 });
       checkPositiveInt(raw.delivery, "concurrency", config.delivery as unknown as Record<string, unknown>, "delivery.concurrency", errors, { min: 1, max: 8 });
       checkPositiveInt(raw.delivery, "queueLimit", config.delivery as unknown as Record<string, unknown>, "delivery.queueLimit", errors, { min: 1, max: 1000 });
+      checkPositiveInt(raw.delivery, "circuitBreakerFailures", config.delivery as unknown as Record<string, unknown>, "delivery.circuitBreakerFailures", errors, { min: 0, max: 100 });
+    }
+  }
+
+  if (raw.coalesce !== undefined) {
+    if (!isPlainObject(raw.coalesce)) {
+      errors.push({ path: "coalesce", message: "必须是对象" });
+    } else {
+      // 0 是合法值 = 关闭该项过滤（测试与「每次运行都要提醒」的用户需要它）
+      checkPositiveInt(raw.coalesce, "windowMs", config.coalesce as unknown as Record<string, unknown>, "coalesce.windowMs", errors, { min: 0, max: 600000 });
+      checkPositiveInt(raw.coalesce, "toolFailureWindowMs", config.coalesce as unknown as Record<string, unknown>, "coalesce.toolFailureWindowMs", errors, { min: 0, max: 600000 });
+      checkPositiveInt(raw.coalesce, "cooldownMs", config.coalesce as unknown as Record<string, unknown>, "coalesce.cooldownMs", errors, { min: 0, max: 600000 });
     }
   }
 

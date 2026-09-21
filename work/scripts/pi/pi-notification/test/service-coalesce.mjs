@@ -1,0 +1,279 @@
+/**
+ * S4 专项回归：投递服务的**门槛与过滤**（合并窗口 / 冷却 / 去重 / 门槛 / 队列 / 超时）。
+ *
+ * 为什么单独一个脚本：这些行为全是**时间与顺序**相关的策略，用注入的假时钟 + 假渠道做断言
+ * 才能又快又确定（不需要 SDK、不需要真实会话、不弹通知）。
+ * 宿主级的真实生效（默认值、`cooldownMs=0` 后恢复、immediate 工具失败的合并）在
+ * `test/host-lifecycle.mjs` 的 L1/L2/K3 里覆盖。
+ *
+ *   MSYS_NO_PATHCONV=1 node test/service-coalesce.mjs
+ */
+
+import assert from "node:assert/strict";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const PLUGIN_DIR = fileURLToPath(new URL("..", import.meta.url));
+const serviceModule = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "service.ts")).href);
+const configModule = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "config.ts")).href);
+
+const failures = [];
+async function step(name, run) {
+  try {
+    await run();
+    console.log(`  ✓ ${name}`);
+  } catch (error) {
+    failures.push({ name, error });
+    console.log(`  ✗ ${name}`);
+    console.log(`    ${error?.message ?? error}`);
+  }
+}
+
+/** 注入的假时钟：让「冷却/合并窗口」可以被确定性地推进。 */
+function makeHarness({ mutateConfig, send } = {}) {
+  const config = configModule.defaultConfig();
+  if (mutateConfig) mutateConfig(config);
+  let nowMs = 1_000_000;
+  const records = [];
+  const sends = [];
+  const log = {
+    log: () => {},
+    record: (entry) => records.push(entry),
+  };
+  const registry = {
+    register: () => {},
+    create: (id, type) => ({
+      id,
+      type,
+      validate: () => undefined,
+      async send(req, signal) {
+        sends.push({ id, kind: req.kind, dedupeKey: req.dedupeKey, at: nowMs });
+        if (send) return send(req, signal, sends.length);
+        return undefined;
+      },
+      async dispose() {},
+    }),
+  };
+  const service = serviceModule.createService({ config, registry, log, now: () => nowMs });
+  return {
+    config,
+    service,
+    records,
+    sends,
+    log,
+    /** 推进假时钟 */
+    advance(ms) {
+      nowMs += ms;
+    },
+    events: () => records.map((row) => row.event),
+    /** 投递是异步的：断言前必须等落地（与宿主回归同一纪律）。 */
+    async settle() {
+      await service.flush(1000);
+    },
+  };
+}
+
+function request(overrides = {}) {
+  const kind = overrides.kind ?? "run_completed";
+  return {
+    level: "info",
+    kind,
+    title: "任务完成",
+    body: "用时 21ms",
+    dedupeKey: `s:1:${kind}`,
+    channels: ["terminal"],
+    meta: { sessionId: "s", runId: "1", level: "info" },
+    ...overrides,
+  };
+}
+
+console.log("S4 投递服务门槛/过滤回归：pi-notification");
+
+await step("默认值：windowMs=1500 / cooldownMs=3000（0 表示关闭该过滤）", () => {
+  const config = configModule.defaultConfig();
+  assert.equal(config.coalesce.windowMs, 1500);
+  assert.equal(config.coalesce.cooldownMs, 3000);
+  assert.equal(config.coalesce.toolFailureWindowMs, 10000);
+});
+
+await step("精确去重：同一个 dedupeKey 只投递一次", async () => {
+  const h = makeHarness({ mutateConfig: (c) => { c.coalesce.windowMs = 0; c.coalesce.cooldownMs = 0; } });
+  h.service.submit(request());
+  h.service.submit(request());
+  await h.settle();
+  assert.equal(h.sends.length, 1);
+  assert.equal(h.service.snapshot().deduped, 1);
+  assert.ok(h.events().includes("dedupe_drop"));
+});
+
+await step("门槛：enabled=false / minLevel / 空渠道列表都不投递", async () => {
+  const disabled = makeHarness({ mutateConfig: (c) => { c.enabled = false; } });
+  disabled.service.submit(request());
+  await disabled.settle();
+  assert.equal(disabled.sends.length, 0, "enabled=false 仍在投递");
+
+  const level = makeHarness({ mutateConfig: (c) => { c.minLevel = "error"; } });
+  level.service.submit(request({ level: "info" }));
+  await level.settle();
+  assert.equal(level.sends.length, 0, "minLevel 门槛未生效");
+  level.service.submit(request({ level: "error", dedupeKey: "s:1:b" }));
+  await level.settle();
+  assert.equal(level.sends.length, 1, "error 级应当通过门槛");
+
+  const noChannel = makeHarness({ mutateConfig: (c) => { c.coalesce.windowMs = 0; c.coalesce.cooldownMs = 0; } });
+  noChannel.service.submit(request({ channels: [] }));
+  await noChannel.settle();
+  assert.equal(noChannel.sends.length, 0);
+});
+
+await step("冷却：同 kind 在 cooldownMs 内只放行一条，窗口过后恢复", async () => {
+  const h = makeHarness({ mutateConfig: (c) => { c.coalesce.windowMs = 0; } }); // 只留冷却，避免合并窗口抢答
+  h.service.submit(request({ dedupeKey: "s:1:run_completed" }));
+  await h.settle();
+  assert.equal(h.sends.length, 1);
+
+  h.advance(1000);
+  h.service.submit(request({ dedupeKey: "s:2:run_completed", meta: { sessionId: "s", runId: "2", level: "info" } }));
+  await h.settle();
+  assert.equal(h.sends.length, 1, "冷却窗口内不应再投递");
+  assert.equal(h.service.snapshot().cooled, 1);
+  assert.ok(h.events().includes("cooldown_drop"));
+
+  // 不同 kind 不受同 kind 冷却影响
+  h.service.submit(
+    request({ kind: "run_failed", level: "error", dedupeKey: "s:2:run_failed", meta: { sessionId: "s", runId: "2", level: "error" } }),
+  );
+  await h.settle();
+  assert.equal(h.sends.length, 2, "不同 kind 不应被同 kind 冷却拦住");
+
+  h.advance(3000);
+  h.service.submit(request({ dedupeKey: "s:3:run_completed", meta: { sessionId: "s", runId: "3", level: "info" } }));
+  await h.settle();
+  assert.equal(h.sends.length, 3, "冷却窗口过后应恢复投递");
+});
+
+await step("合并窗口：同一（sessionId+runId）只放行一条，换 runId 立即放行", async () => {
+  const h = makeHarness();
+  // 同一次运行的两条不同事件（例如 run_completed + waiting_for_user）
+  h.service.submit(request({ dedupeKey: "s:1:run_completed" }));
+  h.service.submit(request({ kind: "waiting_for_user", dedupeKey: "s:1:waiting", channels: ["terminal"] }));
+  await h.settle();
+  assert.equal(h.sends.length, 1, "同一运行的第二条应被合并");
+  assert.equal(h.service.snapshot().coalesced, 1);
+  assert.ok(h.events().includes("coalesce_drop"));
+
+  h.advance(1000);
+  h.service.submit(
+    request({ dedupeKey: "s:9:run_completed", meta: { sessionId: "s", runId: "9", level: "info" }, kind: "run_failed", level: "error" }),
+  );
+  await h.settle();
+  assert.equal(h.sends.length, 2, "不同 runId 不应被合并（注意同 kind 冷却只作用于同 kind）");
+});
+
+await step("请求级窗口覆盖：coalesceWindowMs 优先于配置（immediate 工具失败靠它聚合）", async () => {
+  // 两个过滤都关掉，只留下请求自带的窗口
+  const h = makeHarness({ mutateConfig: (c) => { c.coalesce.windowMs = 0; c.coalesce.cooldownMs = 0; } });
+  h.service.submit(request({ kind: "tool_failed", level: "warning", dedupeKey: "s:1:tool_failed:bash", coalesceWindowMs: 10000 }));
+  await h.settle();
+  assert.equal(h.sends.length, 1);
+  h.advance(2000);
+  // 配置里 windowMs=0，但第一条请求把自己所在 run 的窗口推到了 10000ms
+  h.service.submit(request({ kind: "tool_failed", level: "warning", dedupeKey: "s:1:tool_failed:read" }));
+  await h.settle();
+  assert.equal(h.sends.length, 1, "请求级窗口未生效");
+  assert.equal(h.service.snapshot().coalesced, 1);
+});
+
+await step("bypassFilters：自检通知不受合并/冷却影响（但仍受去重与门槛约束）", async () => {
+  const h = makeHarness();
+  h.service.submit(request({ dedupeKey: "s:1:run_completed" }));
+  await h.settle();
+  h.service.submit(request({ dedupeKey: "manual:1", meta: { sessionId: "manual", runId: "1", level: "info" } }), { bypassFilters: true });
+  await h.settle();
+  assert.equal(h.sends.length, 2, "自检通知被冷却吃了（会被误读成渠道坏了）");
+
+  h.service.submit(request({ dedupeKey: "manual:1" }), { bypassFilters: true });
+  await h.settle();
+  assert.equal(h.sends.length, 2, "bypassFilters 不应绕过去重");
+});
+
+await step("队列上限：丢等级最低的最新一项并计数，不无限增长", async () => {
+  const h = makeHarness({
+    mutateConfig: (c) => {
+      c.coalesce.windowMs = 0;
+      c.coalesce.cooldownMs = 0;
+      c.delivery.queueLimit = 2;
+      c.delivery.concurrency = 1;
+    },
+    // 第一条卡住，后面的只能排队
+    send: async (_req, signal, index) => {
+      if (index === 1) {
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, 200);
+          signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+        });
+      }
+    },
+  });
+  h.service.submit(request({ dedupeKey: "q:1", meta: { sessionId: "q", runId: "1", level: "info" } }));
+  h.service.submit(request({ kind: "run_failed", level: "error", dedupeKey: "q:1:err", meta: { sessionId: "q", runId: "1", level: "error" } }));
+  h.service.submit(request({ kind: "compact_failed", level: "info", dedupeKey: "q:1:info", meta: { sessionId: "q", runId: "1", level: "info" } }));
+  // 队列已满（limit=2）+ 又来一条 info：必须丢一条并计数
+  h.service.submit(request({ kind: "waiting_for_user", level: "info", dedupeKey: "q:1:waiting", meta: { sessionId: "q", runId: "1", level: "info" } }));
+  await h.settle();
+  assert.equal(h.service.snapshot().dropped, 1, "队列满应恰好丢弃 1 条");
+  assert.ok(h.events().includes("queue_drop"));
+  assert.equal(h.service.snapshot().failed, 0);
+  assert.equal(h.service.snapshot().delivered, 3, "被丢的应只是最低级的新条目");
+});
+
+await step("Provider 挂起：超时算失败，不阻塞后面（§13 第 2 项）", async () => {
+  const h = makeHarness({
+    mutateConfig: (c) => {
+      c.coalesce.windowMs = 0;
+      c.coalesce.cooldownMs = 0;
+      c.delivery.timeoutMs = 60;
+    },
+    send: async (_req, signal) => {
+      await new Promise((_resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("渠道没有理会 signal")), 5000);
+        signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer);
+            reject(new Error("投递已取消"));
+          },
+          { once: true },
+        );
+      });
+    },
+  });
+  const startedAt = Date.now();
+  h.service.submit(request());
+  await h.settle();
+  assert.equal(h.sends.length, 1);
+  assert.equal(h.service.snapshot().failed, 1, "超时应计为投递失败");
+  assert.ok(Date.now() - startedAt < 2000, "超时没有生效（挂起的 provider 拖住了服务）");
+});
+
+await step("dispose 幂等：之后 submit 一律丢弃，且不抛异常", async () => {
+  const h = makeHarness({ mutateConfig: (c) => { c.coalesce.windowMs = 0; c.coalesce.cooldownMs = 0; } });
+  await h.service.dispose();
+  await h.service.dispose();
+  h.service.submit(request());
+  await h.settle();
+  assert.equal(h.sends.length, 0);
+  assert.ok(h.events().includes("service_disposed"));
+});
+
+for (const item of failures) {
+  console.error(`\n[FAIL] ${item.name}\n${item.error?.stack ?? item.error}`);
+}
+
+if (failures.length === 0) {
+  console.log("\n通过：门槛/去重/冷却/合并窗口/队列/超时 全部断言成立。");
+  process.exit(0);
+} else {
+  console.error(`\n失败：${failures.length} 项断言未通过。`);
+  process.exit(1);
+}

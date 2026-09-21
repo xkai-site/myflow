@@ -318,37 +318,54 @@ on: (channel, handler) => { const safeHandler = async (data) => { try { await ha
 
 ---
 
-## 7. 推荐目录结构
+## 7. 目录结构（S7 落地后的实际状态）
+
+> 本节的职责是**记录真实文件**，避免设计与代码漂移。设计草稿里的 `ui.ts` / `test/*.test.ts`
+> 都**不存在**（理由见“与设计草稿的差异”）。
 
 ```
 work/scripts/pi/pi-notification/
-├── package.json                 # type:module, keywords:[pi-package], pi.extensions:["./extensions/index.ts"]
-├── README.md                    # 安装/启用/配置/权限/模式/隐私与失败边界
+├── package.json                 # type:module, keywords:[pi-package], pi.extensions:[./extensions/index.ts]
+├── README.md                    # 安装/启用/配置/命令/隐私与失败边界/未验证项
 ├── extensions/
-│   └── index.ts                 # 默认工厂：注册 + 组装，<120 行
+│   └── index.ts                 # 默认工厂：组装 + 注册 9 个 hook + /notify + --no-notify（薄接线，不判定）
 ├── src/
-│   ├── config.ts                # schema 版本、读取、校验、原子写、路径解析
-│   ├── lifecycle.ts             # 会话/运行状态机 + RunOutcome 判定
-│   ├── rules.ts                 # 事件→通知判定（纯函数）
-│   ├── service.ts               # 队列/去重/冷却/重试/熔断/路由
-│   ├── types.ts                 # 共享类型（§11）
-│   ├── log.ts                   # 脱敏日志
-│   ├── commands.ts              # /notify 子命令
-│   ├── ui.ts                    # TUI 配置向导、状态行、可选历史渲染
+│   ├── types.ts                 # 共享契约（§11 + §17.4）；唯一的跨层类型来源
+│   ├── config.ts                # 默认值 / 用户级+项目级读盘 / 严格校验 / 降级（**不写盘**）
+│   ├── lifecycle.ts             # 运行状态机 + 工具失败/等待输入簿记；唯一完成判定点
+│   ├── rules.ts                 # 纯函数：RunOutcome/工具失败/压缩失败/等待 → NotificationRequest | null
+│   ├── service.ts               # 门槛/去重/合并窗口/冷却/超时/有界队列/统计/路由
+│   ├── commands.ts              # /notify status|test
+│   ├── log.ts                   # 控制字符清洗 / 脱敏 / 可选 JSONL 诊断 sink
 │   └── providers/
-│       ├── registry.ts          # 注册表 + 工厂分派（Factory + Registry）
-│       ├── decorators.ts        # 重试/超时/熔断/脱敏包装（Decorator）
-│       ├── noop.ts              # 禁用渠道（Null Object）
-│       ├── terminal.ts          # 阶段 1：系统桌面通知（OSC 777 / OSC 99 / Windows toast）
-│       └── webhook.ts           # 阶段 2：通用 HTTP POST（其它渠道的通用底座）
+│       ├── registry.ts          # Factory + Registry（唯一分派点）
+│       ├── decorators.ts        # withTimeout/withRetry/withCircuitBreaker/withRedaction
+│       ├── noop.ts              # Null Object（禁用/未注册/校验失败）
+│       ├── terminal.ts          # 阶段 1：OSC 777 / OSC 99 / Windows toast（+ TTY 纪律）
+│       ├── debug.ts             # 排障渠道：把通知写成一行日志（不碰终端）
+│       └── webhook.ts           # 阶段 2：通用 HTTP POST + HMAC（Telegram/Discord/Slack 的底座）
 └── test/
-    ├── rules.test.ts            # 纯函数：各 stopReason/isError → 通知决策
-    ├── service.test.ts          # 注入 fake clock + fake notifier：去重/冷却/熔断
-    ├── config.test.ts           # 校验、损坏、原子写、脱敏
-    └── host-lifecycle.mjs       # 真实 agentDir + 真实会话：加载/reload/退出/替换不叠加
+    ├── sdk-path.mjs             # 定位 SDK / pi 可执行文件（两个宿主脚本共用）
+    ├── terminal-channel.mjs     # 渠道：机制选择/渲染字节/注入面/TTY 纪律（不需要 SDK）
+    ├── service-coalesce.mjs     # 投递服务：门槛/去重/合并/冷却/队列/超时（注入假时钟与假渠道）
+    ├── webhook-channel.mjs      # Webhook + 装饰器（回环 HTTP 服务；外部 fetch 一律失败）
+    ├── host-lifecycle.mjs       # 真实宿主会话：判定/去重/阻塞/reload/配置/命令/S4/S6/S7
+    ├── cli-smoke.mjs            # 真实 pi 进程（含 stdout 不得被转义序列污染）
+    └── fixtures/
+        ├── probe-ext.ts         # 离线假 provider + /probe-cmd + /probe-prompt + 事件打点
+        └── blocking-ext.ts      # 阻塞对照组（证明“不阻塞”的测量有区分度）
 ```
 
-不做 `dist/`、`main`、`bin`、构建流程——Pi 直接加载 TS。第三方依赖能不加就不加（HTTP 用 Node 内置 `fetch`）。
+**与设计草稿的差异（都是刻意的）**：
+
+| 草稿 | 实际 | 理由 |
+|---|---|---|
+| `ui.ts`（TUI 向导 / 状态行 / 历史渲染） | 不存在 | 配置向导与写盘属未做的下一阶段；`/notify status` 只用 `ctx.ui.notify` 输出文本 |
+| `test/rules.test.ts`、`service.test.ts`、`config.test.ts` | `service-coalesce.mjs` + 宿主脚本里的 P0/I*/J* 段 | 仓库不允许装依赖、没有测试框架；用 `node:test` 之外的零依赖脚本反而更直接 |
+| `commands.ts` 覆盖 `on\|off\|config\|reload` | 只有 `status\|test` | 写盘属未做阶段；读盘刷新已由 `session_start`/`reload` 覆盖 |
+| 无 `decorators.ts` / `webhook.ts` | 已落地 | S7 阶段 2 的目标 |
+
+不做 `dist/`、`main`、`bin`、构建流程——Pi 直接加载 TS。第三方依赖为零（HTTP 用 Node 内置 `fetch`）。
 
 ---
 
@@ -467,6 +484,21 @@ SignalEvent（工具失败等）───────────────┘
   ]
 }
 ```
+
+### 10.2 补充：落地后的真实语义（S4 实现）
+
+`config.ts` 的 schema 与本节 1:1（字段名、默认值都对齐），但三个数字的**语义**在实现时被钉死到下面这样，
+以免“合并/冷却”变成各自理解的模糊词：
+
+| 字段 | 真实含义 | 实现位置 |
+|---|---|---|
+| `coalesce.windowMs` | **同一「逻辑运行」（`sessionId + runId`）内最多放行一条通知**：第一条进入后开窗，窗口内该 run 的后续通知被合并（计数 `coalesced`）。窗口一旦被任一条通知打开，后续通知即使自带不同窗口也会被吸进去 | `service.ts` |
+| `coalesce.toolFailureWindowMs` | `toolFailed.mode = "immediate"` 时，把同一 run 内**并行工具失败**聚合成一条的窗口。通过 `NotificationRequest.coalesceWindowMs` 逐条下达（规则层知道“这是工具失败”） | `rules.ts` → `service.ts` |
+| `coalesce.cooldownMs` | 同一 `kind` 两次**入队**之间的最小间隔（跨会话、跨 run）；不足则丢弃并计数 `cooled` | `service.ts` |
+| `delivery.circuitBreakerFailures` | 连续多少次**投递彻底失败**（重试已耗尽）后熔断该渠道；30s 后放行一次探测（半开）。`0` = 关闭熔断 | `providers/decorators.ts` |
+
+两个 0 是合法值（测试与「每次运行都要提醒」的用户需要它）。`/notify status` 会展示这三个数字与计数；
+`/notify test` 的自检通知**绕过**合并/冷却（但不绕过去重与门槛）。
 
 ### 10.3 配置访问方式
 
@@ -615,6 +647,14 @@ export interface LifecycleDeps {
 
 `AssistantStopReason` 直接复用 Pi 的联合类型：`"pending" | "stop" | "length" | "toolUse" | "error" | "aborted" | "deferred"`（`O/docs/session-format.md`）。
 
+> **落地差异（S4/S6/S7）**：本节是设计草稿；实际契约以 `src/types.ts` 为唯一来源，相对本节新增了：
+> `UIPromptKind` / `ToolFailureMode` / `ToolFailureEvent`、`SignalEvent` 扩到 8 种 kind
+> （`tool_finished` / `compact_failed` / `ui_prompt_start` / `ui_prompt_end`）、
+> `NotificationRequest.coalesceWindowMs`（逐条下达合并窗口，工具失败 immediate 模式用）、
+> `NotificationService.submit(req, { bypassFilters })`、快照新增 `coalesced` / `cooled`，
+> 以及 `rules` 下新增 `toolFailed`（含 `mode`/`threshold`）/ `compactFailed` / `waitingForUser`（含 `kinds`）三条。
+> 内置默认值的数值全部对齐 §10.2。
+
 ---
 
 ## 12. 事件触发与通知判定流程
@@ -676,6 +716,15 @@ agent_settled 触发
 - 若某工具失败可能长时间无人管（例如长任务中途），可配 `mode: "immediate"` + `threshold`。
 - 去重键 = `sessionId + toolName`，同 run 内相同工具失败只计一次计数。
 
+**落地后的真实行为（S6）**：
+
+- `aggregate`：**不单独发一条**——失败工具名已并入本次运行的结果通知正文（`content.includeToolFailureNames`）；
+  只有本 run **没有结果通知**时（`runCompleted` 被关、`run_aborted`/`unknown` 不通知）才单独发 `tool_failed`。
+  这就是“一次运行最多一条通知”的实现方式（`rules.evaluateSettlement` 取第一个非空候选）。
+- `immediate`：某工具失败计数达到 `threshold` 时**立即**发一条，文案用**本 run 至今的完整汇总**
+  （不只刚失败的那个工具）；去重键含 `toolName`（每个工具只提醒一次），
+  并行失败再由 `toolFailureWindowMs` 合并成一条（同时会把该 run 后续的结果通知一起吸收，这是有意的）。
+
 ### 12.4 等待用户输入
 
 ```
@@ -685,6 +734,16 @@ agent_settled + ctx.isIdle()     → 发"轮到你输入"（默认策略）
 ```
 
 默认 `waitingForUser.enabled = false`，因为它与 `run_completed` 高度重叠；开启后需排除 `kind: "custom"`。
+
+**落地后的真实行为（S6）**：
+
+- 通知只在 `ui_prompt_start` 那一刻发（不需要等到 `agent_settled`，且 RPC/print 下也能触发）。
+- `custom` **永久排除**：配置校验时就会从 `kinds` 里剔除并告警，`rules` 里还有一道硬检查（双保险）。
+- 不依赖 `start.kind === end.kind` 配对（实测嵌套 prompt 不发内层 span，`end.kind` 报的是外层）：
+  只做「非 custom 的 start +1 / end −1」深度计数；`session_shutdown` 兜底复位（强杀时收不到 `end`）。
+- `custom` 也不参与深度计数——它不代表用户在输入（TUI 加载器就是 `custom`），否则状态会一直显示“正在等你输入”。
+- `session_compact_failed` 不走 settled 出口：它在**当下**投递（手工 `/compact` 没有 run 可 settle），
+  `aborted === true`（用户自己取消）不发。这与 §12.1 把 compact 失败当作 settled 输入的写法不同，是 S6 的修订。
 
 ---
 
@@ -754,20 +813,32 @@ agent_settled + ctx.isIdle()     → 发"轮到你输入"（默认策略）
 
 ## 15. 实现步骤（按开发顺序）
 
-| 阶段 | 内容 | 完成判据 |
-|---|---|---|
-| **S0 前置验证** | 完成 §16 的 6 项 API 实测（尤其纯命令是否无 settled、子会话是否无 settled） | 6 项都有结论，写进 README |
-| **S1 骨架** | `package.json` + `extensions/index.ts` + `src/types.ts`；注册 `session_start`/`session_shutdown`，只打日志 | `pi -e` 加载成功；`/reload` 无重复注册；退出无报错 |
-| **S2 判定核心** | `src/lifecycle.ts` + `rules.ts`（纯函数）；先只支持 `run_completed` / `run_failed` / `run_aborted` | `test/rules.test.ts` 覆盖 7 种 stopReason + 无 assistant 情况 |
-| **S3 终端渠道** | `src/providers/terminal.ts`（OSC 777 / OSC 99 / Windows toast），含**控制字符清洗**与平台探测 | TUI 下三平台至少本机可用；注入字符串测试通过 |
-| **S4 服务层** | `src/service.ts`：队列、去重、冷却、超时、熔断、dispose | `test/service.test.ts` 用 fake clock + fake notifier：重复事件只发 1 条 |
-| **S5 配置** | `src/config.ts`：schema v1、校验、原子写、脱敏；`/notify status\|test\|on\|off\|config` | 损坏配置不崩、不静默关闭；`/notify test` 端到端可见 |
-| **S6 工具失败与压缩失败** | `tool_execution_end` 聚合 + `session_compact_failed` | 并行多工具失败只产生 1 条通知 |
-| **S7 外部渠道** | `src/providers/webhook.ts`（首个非终端渠道） | 用一个本地 echo 服务验证 payload、超时、密钥来自 env |
-| **S8 生命周期加固** | 会话替换/重载/退出场景；旧实例丢弃；quit 尽力 flush | `test/host-lifecycle.mjs`：连续 `/reload` 不叠加、换会话不误报 |
-| **S9 文档与默认值** | README：安装、权限、隐私、模式降级、覆盖范围限制 | 明确写出"不覆盖子会话 / 不覆盖纯命令任务" |
+> **状态（S7 落地后）**：表中 ✅ = 已完成并已固化为回归断言；⚠ = 部分完成（见下表下方说明）。
+
+| 阶段 | 内容 | 完成判据 | 状态 |
+|---|---|---|---|
+| **S0 前置验证** | 完成 §16 的 6 项 API 实测（尤其纯命令是否无 settled、子会话是否无 settled） | 6 项都有结论，写进 README | ✅ 见 §18 |
+| **S1 骨架** | `package.json` + `extensions/index.ts` + `src/types.ts`；注册 `session_start`/`session_shutdown`，只打日志 | `pi -e` 加载成功；`/reload` 无重复注册；退出无报错 | ✅ |
+| **S1.5 回归脚本**（§18.7 插入） | 把 S0 的可复现配方固化成宿主级断言（带 `MSYS_NO_PATHCONV=1`） | 纯命令无 settled、settled 内不阻塞（含阻塞对照组）、reload 不重复投递 | ✅ `test/host-lifecycle.mjs` |
+| **S2 判定核心** | `src/lifecycle.ts` + `rules.ts`（纯函数）；`run_completed` / `run_failed` / `run_aborted` | 覆盖 7 种 stopReason + 无 assistant 情况 | ✅ 断言 A–F（宿主级，未单独建单测） |
+| **S3 终端渠道** | `src/providers/terminal.ts`（OSC 777 / OSC 99 / Windows toast）+ 控制字符清洗 + 平台探测 + TTY 纪律 | 注入字符串测试通过；本机 toast 人工确认 | ✅ `test/terminal-channel.mjs` |
+| **S4 服务层** | `src/service.ts`：队列、去重、**合并窗口**、冷却、超时、dispose | fake clock + fake notifier：重复事件只发 1 条 | ✅ `test/service-coalesce.mjs` + 断言 L0–L2（熔断/重试在 `decorators.ts`，属 S7） |
+| **S5 配置** | `src/config.ts`：schema v1、严格校验、降级、脱敏；`/notify status\|test` | 损坏配置不崩、不静默关闭；`/notify test` 端到端可见 | ⚠ **原子写与 `on\|off\|config` 未做**（断言 I1–I11 / J1–J4） |
+| **S6 工具失败与压缩失败** | `tool_execution_end` 聚合 + `session_compact_failed` + `ui_prompt_start/end`（修订 1） | 并行多工具失败只产生 1 条通知；`custom` 不误报 | ✅ 断言 K1–K6 |
+| **S7 外部渠道** | `src/providers/webhook.ts` + `src/providers/decorators.ts`（首个非终端渠道） | 本地 echo 服务验证 payload、超时、密钥来自 env | ✅ `test/webhook-channel.mjs` + 断言 M1–M3（回环 HTTP 服务即“本地 echo 服务”） |
+| **S8 生命周期加固** | 会话替换/重载/退出场景；旧实例丢弃；quit 尽力 flush | 连续 `/reload` 不叠加、换会话不误报 | ✅ 断言 D / E / K6 |
+| **S9 文档与默认值** | README：安装、隐私、模式降级、覆盖范围限制 | 明写“不覆盖子会话 / 不覆盖纯命令任务” | ✅ 插件 README |
 
 顺序理由：先钉死判定正确性（S2），再谈渠道（S3/S7）；可靠性（S4）在配置（S5）之前，因为配置要靠 service 生效。
+
+**未完成项（不要当成已完成）**：`quietHours` 静默时段（本节表格未单列，但 §10.2/§8/§12.1 已定、**代码 0 行**）、
+配置写盘与向导（`/notify on|off|config|reload`、临时文件 + `0o600` + `rename`）、
+成本/上下文占比（`content.includeCost` / `RunSummary.costUsd`，未采集）、
+通知历史与状态行（`pi.appendEntry`+`registerEntryRenderer`、`ctx.ui.setStatus`，设计列为可选）、
+macOS 原生横幅（`osascript`）、Telegram/Discord/Slack 专用渠道、子任务通知（§18.5 修订 4 裁定不做）。
+
+**“接受但不生效”的字段**：`content.includePromptExcerpt` 会被校验但**无一处读取**（插件从不外传 prompt），
+属于待决策的 no-op（要么删、要么在 README 写明“保留字段、当前无效果”）。
 
 ---
 
@@ -817,6 +888,12 @@ agent_settled + ctx.isIdle()     → 发"轮到你输入"（默认策略）
 5. 终端输出前清洗控制字符（官方示例存在注入面）。
 
 **MVP 预计规模**：约 300–400 行 TS（含类型），无第三方依赖。
+
+> **状态更新（S7 落地后）**：本节是**设计当时的范围切分**，不是当前能力表。
+> 其中“明确不做”的 Webhook、工具失败通知、压缩失败通知、重试/熔断**已经在 S4/S6/S7 实现**（见 §15 状态列）；
+> 仍然成立的不做项与未做项以 §15 末尾的「未完成项」为准（配置向导/写盘、`quietHours`、成本/上下文、
+> 历史/状态行、macOS 横幅、专用渠道）。
+> 实际规模：实现 3349 行 + 测试 2718 行（远超当初预估，因为把回归断言与硬化也算进去了）。
 
 ---
 
@@ -903,6 +980,11 @@ rules ──────┴──► NotificationRequest ──► service ─�
 
 **验收这条抽象是否真的成立**：新增一个渠道，改动应仅限于「新增 1 个文件 + `registry.ts` 注册 1 行 + 配置加 1 条」，`lifecycle.ts` / `rules.ts` / `service.ts` 的 diff 必须为 0。
 
+> **S7 实测结果（Webhook）**：成立。`lifecycle.ts` / `rules.ts` 一个字未改，`service.ts` 的改动来自同期的 S4（合并窗口/冷却），
+> 与渠道无关；新增文件只有 `providers/webhook.ts`、`providers/decorators.ts` 与对应的回归脚本。
+> 这条验收已固化为可执行断言：`test/host-lifecycle.mjs` 的 **M3** 会读源码，
+> 一旦 `lifecycle.ts` / `rules.ts` 出现渠道名或 `providers/*` import、`service.ts` 出现 `webhook`，测试即失败。
+
 ### 17.4 渠道接口（最终版）
 
 ```ts
@@ -938,12 +1020,36 @@ export interface NotifierRegistry {
 
 | | `terminal.ts` | `webhook.ts` |
 |---|---|---|
-| `validate` | 探测终端能力（`WT_SESSION` / `KITTY_WINDOW_ID` / 默认 OSC 777）；不可用返回错误 | 校验 URL 合法 + secret 环境变量存在（**只存变量名**） |
-| `send` | `process.stdout.write` OSC 序列 / PowerShell toast，**先清洗控制字符** | `fetch(url, {signal, headers, body})`，HMAC 签名 |
-| `format` | 不需要（用 title/body） | 可覆盖为结构化 payload |
-| 失败模式 | 写 stdout 失败、终端不支持、Windows 转义 | 网络错误、非 2xx、超时 |
+| `validate` | 探测终端能力（`WT_SESSION` / `KITTY_WINDOW_ID` / 默认 OSC 777）；不可用返回错误 | 校验 URL 合法（http/https、不得内嵌凭据、不得含换行）+ **若配了 `secretEnv` 则要求该环境变量存在**（只存变量名） |
+| `send` | `process.stdout.write` OSC 序列 / PowerShell toast，**先清洗控制字符** | `fetch(url, {signal, headers, body, redirect: "error"})`，HMAC 签名 |
+| `format` | 不需要（用 title/body） | 结构化 payload；`send()` 内部复用同一个 `format`，**payload 形状只有一处定义** |
+| 失败模式 | 写 stdout 失败、终端不支持、Windows 转义 | 网络错误、非 2xx（错误信息带状态码 + **脱敏后**的响应体片段）、超时 |
 
 两者都不需要知道「为什么发这条通知」——这正是解耦要达成的效果。
+
+#### 17.4.1 落地记录（S7 实现后的真实语义）
+
+接口本身未变，以下是实现时补上的细节（都是**刻意**的，不是遗漏）：
+
+1. **`secretEnv` 是可选的**：不配就发送但不签名（`signed=false` 记入日志）；配了但环境变量不存在则
+   `validate` 返回错误 → `registry` 降级为 Noop（**不会静默发到错地方**）。密钥从不进日志/载荷。
+2. **不跟随重定向**（`redirect: "error"`）：否则签名与载荷可能被带到另一个主机（重定向后的 host 不可控）。
+3. **日志丢弃 URL query**（只记 `origin + pathname`）：query 常被用来传 token。
+4. **响应体片段先 `sanitizeError()`（清洗 + 脱敏）再入日志/错误消息**：真实端点常在错误响应里回显凭据。
+   这条是回归断言发现的真实缺陷（初版只做了 `sanitize()`）。
+5. **签名对象是“实际发送的字节”**：接收方用同一 secret 对原始 body 重算 HMAC 即可验证。
+6. **装饰器组合顺序：`redaction(circuit(retry(timeout(inner))))`**，理由：
+   - 熔断在**重试之外** → “一次投递彻底失败”只计一次失败，而不是每次尝试都计；
+   - 脱敏在最外层 → 任何异常文本出 provider 层之前已被处理；
+   - **每次尝试有自己的 deadline**（`attemptTimeoutMs`），否则第一次尝试吃光外层
+     `delivery.timeoutMs` 后，重试会在已 abort 的 signal 上立刻失败（等于没有重试）。
+     组装点按 `max(250, timeoutMs / (maxRetries+1))` 派生单次预算。
+7. **超时由两处共同保证**：外层 `service` 用 `AbortSignal.timeout(delivery.timeoutMs)` 管总量，
+   `withTimeout` 管单次尝试。内层即使“吃掉” abort 并正常返回，也会被判为超时失败。
+8. `Notifier.format?()` 目前**不被 `service` 调用**（`send` 收到的是原始 `NotificationRequest`）；
+   它的用途是「渠道特定形状有一个官方归属」，webhook 在自己的 `send` 里复用同一个函数。
+9. 本地渠道同样被可靠性装饰器包住（同一套机制只实现一次）；终端渠道实际几乎不会触发重试，
+   但这保证了新增渠道不需要自己写重试/熔断。
 
 ### 17.5 与 MVP 的关系
 
@@ -1079,7 +1185,13 @@ pi.events.emit("pi-notification:emit", {
 | `reason="new"\|"resume"\|"fork"` 的 shutdown 语义 | 未测（需交互流程） | 手工跑 `/new`、`/resume`、`/fork` 并观察日志 |
 | `input`/`editor` 两个 kind 的 span 行为 | 未单独测（仅 `confirm`/`custom`/`select`） | 同一探针补测；实现上按白名单同等处理 |
 | `--mode json` 下的 `hasUI`/`ui_prompt_*` | 未测（仅源码推断无 uiContext） | 跑一次 `--mode json` |
-| 进程在 prompt 未闭合时被强杀是否补发 `ui_prompt_end` | 未测 | 需要一个 `session_shutdown` 兜底复位（已写入修订 1） |
+| 进程在 prompt 未闭合时被强杀是否补发 `ui_prompt_end` | 未测（**兜底已实现**） | 需要一个 `session_shutdown` 兜底复位（已写入修订 1）——S6 已实现并断言 reload 路径；SIGKILL 本身仍无法在测试中复现 |
+
+**S7 落地后的状态补充**：上表中与“实现”相关的两条已有结论——
+「强杀兜底复位」已实现（`lifecycle.onShutdown` 复位 + 断言 K6）；
+「`input`/`editor` kind」在实现上按白名单同等处理、`select`/`confirm` 已用**真触发**验证，但仍**未单独实测** `input`/`editor`。
+其余各项（T1/T3/T4、TUI 可见性、`new\|resume\|fork`、`--mode json`）仍**未测**，不得当成已解决；
+当前完整的未验证清单以插件 `README.md` 的「未验证 / 已知不确定」为准（它还包含 Webhook 真实端点、熔断阈值等 S7 新增项）。
 
 ### 18.7 对实现顺序的影响
 

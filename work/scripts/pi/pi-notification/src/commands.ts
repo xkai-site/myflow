@@ -25,6 +25,8 @@ export interface CommandDeps {
   isSilenced(): boolean;
   /** 首次启用时载入的会话 id，用于展示 */
   sessionId(): string | undefined;
+  /** 当前是否在等用户输入（S6 的 waiting 状态） */
+  isWaitingForUser?(): boolean;
 }
 
 function formatStatus(deps: CommandDeps): string {
@@ -36,15 +38,20 @@ function formatStatus(deps: CommandDeps): string {
   const lines: string[] = [];
   lines.push(`pi-notification: ${config.enabled && !deps.isSilenced() ? "开启" : "关闭"}${deps.isSilenced() ? "（--no-notify）" : ""}`);
   lines.push(`  规则/渠道: ${describeConfig(config)}`);
+  lines.push(
+    `  合并/冷却: 同运行窗口 ${config.coalesce.windowMs}ms / 同 kind 冷却 ${config.coalesce.cooldownMs}ms`
+    + ` / 工具失败 ${config.rules.toolFailed.mode}(${config.rules.toolFailed.threshold})`,
+  );
   lines.push(`  配置来源: ${load.sources.join(" → ")}${load.degraded ? "（已降级）" : ""}`);
   lines.push(`  终端机制: ${selection.channel}${selection.reason ? `（${selection.reason}）` : ""}`);
   lines.push(
     `  投递统计: 成功 ${snapshot.delivered} / 失败 ${snapshot.failed} / 去重 ${snapshot.deduped}`
+    + ` / 合并 ${snapshot.coalesced} / 冷却 ${snapshot.cooled}`
     + ` / 丢弃 ${snapshot.dropped} / 在队 ${snapshot.queued} / 在途 ${snapshot.active}`,
   );
   lines.push(`  上次成功: ${snapshot.lastOkAt ? new Date(snapshot.lastOkAt).toLocaleString() : "—"}`);
   if (snapshot.lastError) lines.push(`  上次错误: ${snapshot.lastError}`);
-  if (deps.sessionId()) lines.push(`  会话: ${deps.sessionId()}`);
+  if (deps.sessionId()) lines.push(`  会话: ${deps.sessionId()}${deps.isWaitingForUser?.() ? "（正在等你输入）" : ""}`);
   for (const problem of load.errors) lines.push(`  ⚠ 配置错误 ${problem.path}: ${problem.message}`);
   for (const problem of load.warnings) lines.push(`  · 提示 ${problem.path}: ${problem.message}`);
   return lines.join("\n");
@@ -64,15 +71,20 @@ export async function handleNotifyCommand(args: string, ctx: ExtensionCommandCon
     // 端到端自检：走与真实通知完全相同的路径（含渠道选择、清洗、降级判断）
     const config = deps.config();
     const now = Date.now();
-    deps.service().submit({
-      level: "info",
-      kind: "run_completed",
-      title: "Pi 通知自检",
-      body: "如果你看到这条，说明渠道可用",
-      dedupeKey: `manual:${now}`,
-      channels: config.rules.runCompleted.channels,
-      meta: { sessionId: deps.sessionId() ?? "manual", runId: String(now), level: "info" },
-    });
+    deps.service().submit(
+      {
+        level: "info",
+        kind: "run_completed",
+        title: "Pi 通知自检",
+        body: "如果你看到这条，说明渠道可用",
+        dedupeKey: `manual:${now}`,
+        channels: config.rules.runCompleted.channels,
+        meta: { sessionId: deps.sessionId() ?? "manual", runId: String(now), level: "info" },
+      },
+      // 自检绕过合并/冷却：否则刚跑完一个任务再 `/notify test` 会被冷却吃掉，
+      // 用户会把它误读成「渠道坏了」。
+      { bypassFilters: true },
+    );
     const snapshot = deps.service().snapshot();
     const selection = selectTerminalChannel(createDefaultTerminalIo().environment());
     const text = selection.channel === "none"

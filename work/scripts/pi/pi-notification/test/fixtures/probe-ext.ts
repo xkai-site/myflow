@@ -84,7 +84,11 @@ function assistantMessage(model, overrides) {
 /** mode: "ok" | "error" */
 function buildStream(model, mode) {
   const stream = createAssistantMessageEventStream();
-  queueMicrotask(() => {
+  const delay = Number(process.env.PROBE_DELAY_MS ?? 0);
+  const schedule = Number.isFinite(delay) && delay > 0
+    ? (run) => setTimeout(run, delay)
+    : (run) => queueMicrotask(run);
+  schedule(() => {
     if (mode === "error") {
       stream.push({
         type: "error",
@@ -128,6 +132,17 @@ export default function probeExtension(pi) {
     description: "probe: 纯命令，不进入 agent 生命周期",
     handler: async () => {
       log("CMD_HANDLER_ENTER");
+    },
+  });
+
+  // 走 Pi **真实**的 UI prompt 路径（runner 会包一层 `withUIPrompt`）：
+  // 用于验证 `ui_prompt_start/end` 的真触发（kind=select、title 带过来）。
+  pi.registerCommand("probe-prompt", {
+    description: "probe: 触发一次真实的 select 提示（不会真的阻塞：桩 UI 直接返回 undefined）",
+    handler: async (_args, ctx) => {
+      log("PROMPT_CMD_ENTER");
+      const answer = await ctx.ui.select("选择 A", ["a", "b"]);
+      log("PROMPT_CMD_EXIT", { answer: answer ?? null });
     },
   });
 

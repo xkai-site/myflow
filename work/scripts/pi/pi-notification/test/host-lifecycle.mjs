@@ -20,7 +20,9 @@
  */
 
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -43,12 +45,17 @@ process.env.PROBE_BLOCK_MS = String(BLOCK_MS);
 process.env.PI_NOTIFY_CHANNEL = "osc777";
 delete process.env.PI_NOTIFY_DISABLE;
 
-// 网络陷阱：任何一次真实 fetch 都会让本次回归失败（证明"离线"不是靠运气）。
+// 网络陷阱：任何一次**外部**网络访问都会让本次回归失败（证明"离线"不是靠运气）。
+// 例外：回环地址（127.0.0.1）——S7 的 webhook 端到端断言需要本机 HTTP 服务，
+// 它不经过任何外部网络，也不依赖互联网。
 const networkAttempts = [];
 const realFetch = globalThis.fetch;
-globalThis.fetch = (...args) => {
-  networkAttempts.push(String(args[0]));
-  throw new Error(`回归脚本禁止网络访问: ${String(args[0])}`);
+const LOOPBACK_RE = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/;
+globalThis.fetch = (input, init) => {
+  const url = typeof input === "string" ? input : input?.url ?? String(input);
+  if (LOOPBACK_RE.test(url)) return realFetch(input, init);
+  networkAttempts.push(url);
+  throw new Error(`回归脚本禁止外部网络访问: ${url}`);
 };
 
 // ---------------------------------------------------------------------------
@@ -152,6 +159,24 @@ async function waitForFileQuiet(file) {
   }
 }
 
+/**
+ * 等某个探针事件出现。
+ *
+ * S6 的工具失败必须是"真的在运行中"发生的：先用 `PROBE_DELAY_MS` 让假 provider 晚一点回包，
+ * 再等 `agent_start` 落地，然后把 `tool_execution_end` 送进插件（此刻 run 仍在进行中）。
+ * 不靠 sleep 猜时机，靠探针文件的实际内容。
+ */
+async function waitForProbeEvent(host, ev, timeoutMs = 3000) {
+  const count = () => readJsonl(host.probeFile).filter((row) => row.ev === ev).length;
+  const before = count();
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (count() > before) return;
+    if (Date.now() > deadline) throw new Error(`等待探针事件超时: ${ev}`);
+    await sleep(5);
+  }
+}
+
 function findBy(list, predicate, describe) {
   const found = list.find(predicate);
   assert.ok(found, `未找到期望的记录: ${describe}`);
@@ -203,7 +228,7 @@ function stubUiContext(notices) {
   };
 }
 
-async function makeHost({ label, extensions, projectTrusted = true }) {
+async function makeHost({ label, extensions, projectTrusted = true, userConfig }) {
   const root = path.join(TMP, label);
   const agentDir = path.join(root, "agent");
   const probeFile = path.join(root, "probe.jsonl");
@@ -212,6 +237,16 @@ async function makeHost({ label, extensions, projectTrusted = true }) {
   fs.writeFileSync(path.join(agentDir, "models.json"), JSON.stringify({ providers: {} }));
   fs.writeFileSync(probeFile, "");
   fs.writeFileSync(pluginFile, "");
+
+  /** 用户级配置必须**在会话建立之前**写入：插件在工厂（loader.reload）与 session_start 两次读盘。 */
+  const userConfigFile = configModule.userConfigPath(agentDir);
+  const userConfigRaw = userConfig === undefined
+    ? undefined
+    : (typeof userConfig === "string" ? userConfig : JSON.stringify(userConfig, null, 2));
+  if (userConfigRaw !== undefined) {
+    fs.mkdirSync(path.dirname(userConfigFile), { recursive: true });
+    fs.writeFileSync(userConfigFile, userConfigRaw);
+  }
 
   // 每个 host 独立：用户级配置目录 + 两份日志（避免游标跨 host 漂移）
   process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -279,7 +314,20 @@ async function makeHost({ label, extensions, projectTrusted = true }) {
     probe,
     plugin,
     userConfigPath: configModule.userConfigPath(agentDir),
+    /** 测试自己写下的用户级配置原文（用于断言插件未改写它） */
+    userConfigRaw,
     projectConfigPath: configModule.projectConfigPath(root, ".pi"),
+
+    /** 把事件直接送进真实的扩展 runner（S6 的 hook 回归就靠它）。 */
+    emit(event) {
+      return session.extensionRunner.emit(event);
+    },
+
+    /** 让假 provider 下次回包晚 `ms` 毫秒（给"运行中"留出一个可观测窗口）。 */
+    setModelDelay(ms) {
+      if (ms === undefined) delete process.env.PROBE_DELAY_MS;
+      else process.env.PROBE_DELAY_MS = String(ms);
+    },
 
     async drain() {
       await waitForFileQuiet(pluginFile);
@@ -320,6 +368,29 @@ async function makeHost({ label, extensions, projectTrusted = true }) {
     /** 发一条 prompt，返回该次运行的增量（含投递与 OSC）。 */
     async prompt(text = "hi") {
       return host.during(() => session.prompt(text));
+    },
+
+    /**
+     * 发一条 prompt，并在**运行中**注入一次工具失败（真实 `tool_execution_end`）。
+     * 注入点由探针的 `agent_start` 事件定位，不靠猜测的 sleep。
+     */
+    async promptWithToolFailures(toolNames = ["bash"], text = "hi") {
+      return host.during(async () => {
+        const started = session.prompt(text);
+        await waitForProbeEvent(host, "agent_start");
+        let index = 0;
+        for (const toolName of toolNames) {
+          index += 1;
+          await host.emit({
+            type: "tool_execution_end",
+            toolCallId: `call_${label}_${index}`,
+            toolName,
+            result: { content: [{ type: "text", text: "boom" }], isError: true },
+            isError: true,
+          });
+        }
+        await started;
+      });
     },
 
     /** 走 Pi 真实命令分发（纯命令不产生 agent 生命周期）。 */
@@ -387,7 +458,14 @@ await step("P0 控制字符清洗 / 脱敏", () => {
 // Host 1：判定 / 去重 / 阻塞 / reload
 // ---------------------------------------------------------------------------
 
-const host = await makeHost({ label: "main", extensions: [PROBE_ENTRY, PLUGIN_ENTRY] });
+/**
+ * 判定/去重/阻塞/reload 四组断言关心的是**判定语义**，不是冷却策略：
+ * 关掉 S4 的合并/冷却（两个 0），否则“两次运行 → 两次通知”会被冷却吃掉。
+ * S4 自己的行为由后面的 `coalesce` 宿主（默认值）与 `test/service-coalesce.mjs` 负责。
+ */
+const NO_COALESCE = { version: 1, coalesce: { windowMs: 0, cooldownMs: 0 } };
+
+const host = await makeHost({ label: "main", extensions: [PROBE_ENTRY, PLUGIN_ENTRY], userConfig: NO_COALESCE });
 const session0 = host.session;
 
 await step("P1 加载无错误，且 session_start 被绑定触发", () => {
@@ -432,23 +510,33 @@ await step("B 一次成功运行恰好投递 1 条 run_completed（并真的写�
   bSettledMono = findBy(delta.probe, (row) => row.ev === "settled_enter", "settled_enter").mono;
 });
 
-await step("C settled 内不阻塞：下一次 run 在 250ms 内启动", async () => {
+await step("C settled 内不阻塞：下一次 run 在 250ms 内启动（取 3 次最小值）", async () => {
   // 刻意不用 host.prompt()：它会先 drain（等日志安静），那会把"settled→下一次 run"的间隔
   // 污染成一个等待周期，测出来的是等待而不是阻塞。
-  host.resetCursors();
-  await session0.prompt("hi");
-  await host.drain();
-  const probe = host.probe();
-  const delta = { deliveries: deliveries(host.plugin()), notifies: (() => { const o = nextOscNotifications(); return o.osc777.length + o.osc99.length; })() };
+  // 取多次最小值：单次采样会被 GC/调度抖动影响（曾经出现过 265ms 的假失败）。
+  const samples = [];
+  const deliveriesPerRun = [];
+  for (let i = 0; i < 3; i += 1) {
+    host.resetCursors();
+    await session0.prompt("hi");
+    await host.drain();
+    const probe = host.probe();
+    const osc = nextOscNotifications();
+    const started = findBy(probe, (row) => row.ev === "agent_start", "agent_start");
+    samples.push(started.mono - bSettledMono);
+    deliveriesPerRun.push(deliveries(host.plugin()).length);
+    assert.equal(osc.osc777.length, 1, "每次运行都应恰好写出 1 条终端通知");
+  }
+  const best = Math.min(...samples);
+  assert.ok(
+    best < 250,
+    `settled→下一次 run 间隔过大（最小 ${best.toFixed(0)}ms，样本 [${samples.map((n) => n.toFixed(0))}]），说明 handler 内有阻塞`,
+  );
+  console.log(`    （实测最小间隔 ${best.toFixed(0)}ms，样本 [${samples.map((n) => n.toFixed(0)).join(", ")}]）`);
 
-  const started = findBy(probe, (row) => row.ev === "agent_start", "agent_start");
-  const gap = started.mono - bSettledMono;
-  assert.ok(gap < 250, `settled→下一次 run 间隔过大（${gap.toFixed(0)}ms），说明 handler 内有阻塞`);
-  console.log(`    （实测间隔 ${gap.toFixed(0)}ms，对照见末尾）`);
-
-  assert.equal(delta.deliveries.length, 1, "第二次运行也应当只有 1 条投递");
-  assert.equal(delta.notifies, 1, "第二次运行也应恰好写出 1 条终端通知");
-  assert.notEqual(delta.deliveries[0].dedupeKey, firstDedupeKey, "两次运行的去重键必须不同");
+  assert.deepEqual(deliveriesPerRun, [1, 1, 1], "每次运行都应恰好投递 1 条");
+  const keys = deliveries(readJsonl(host.pluginFile)).map((row) => row.dedupeKey);
+  assert.equal(new Set(keys).size, keys.length, "两次运行的去重键必须不同");
 });
 
 await step("D /reload 后不重复投递（旧实例失效、新实例不叠加）", async () => {
@@ -502,16 +590,23 @@ await step("H 非终端模式（stdout 非 TTY）不得写入任何字节，只�
   }
 });
 
-await step("E 无扩展异常、无网络访问、未写入 agentDir", async () => {
+await step("E 无扩展异常、无网络访问、未改写配置文件", async () => {
   await host.dispose();
   assert.deepEqual(host.runtimeErrors, [], "扩展运行期出现异常");
   assertNoPluginErrors(host);
-  assert.deepEqual(networkAttempts, [], "出现了真实网络访问");
+  assert.deepEqual(networkAttempts, [], "出现了外部网络访问");
   // SDK 自己会写 auth.json / models-store.json；这里断言的是**插件**没有写入任何东西。
-  const sdkOwned = new Set(["models.json", "auth.json", "models-store.json"]);
+  // `pi-notification/` 目录是测试自己预置的配置目录（不再是插件写入的迹象）。
+  const sdkOwned = new Set(["models.json", "auth.json", "models-store.json", "pi-notification"]);
   const unexpected = fs.readdirSync(host.agentDir).filter((name) => !sdkOwned.has(name));
   assert.deepEqual(unexpected, [], "插件在 agentDir 里留下了文件");
-  assert.equal(fs.existsSync(host.userConfigPath), false, "插件不应创建/改写配置文件");
+  if (host.userConfigRaw !== undefined) {
+    assert.equal(
+      fs.readFileSync(host.userConfigPath, "utf8"),
+      host.userConfigRaw,
+      "插件改写了配置文件（本轮不应写盘）",
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -521,6 +616,7 @@ await step("E 无扩展异常、无网络访问、未写入 agentDir", async () 
 const control = await makeHost({
   label: "control",
   extensions: [PROBE_ENTRY, PLUGIN_ENTRY, BLOCKING_ENTRY],
+  userConfig: NO_COALESCE,
 });
 
 await step(`对照 settled 内阻塞 ${BLOCK_MS}ms → 下一次 run 显著推迟`, async () => {
@@ -704,6 +800,7 @@ await step("J1 /notify status：走真实命令分发，给出可读状态", asy
   assert.match(delta.notice.message, /投递统计/);
   assert.match(delta.notice.message, /终端机制/);
   assert.match(delta.notice.message, /配置来源/);
+  assert.match(delta.notice.message, /合并\/冷却/, "status 应展示 S4 的合并/冷却参数");
 
   assert.equal(delta.plugin.filter((row) => row.event === "notify_status").length, 1);
   // 纯命令不得产生 agent 生命周期（与断言 A 同一不变量）
@@ -745,13 +842,319 @@ await step("J4 /notify status 不产生副作用，且错误/告警会露出", a
 await commander.dispose();
 
 // ---------------------------------------------------------------------------
+// Host 8：S4 合并窗口 / 冷却 —— 默认值在真实宿主下真的生效
+// ---------------------------------------------------------------------------
+
+await step("L0 默认参数的合并/冷却与设计 §10.2 一致", () => {
+  const config = configModule.defaultConfig();
+  assert.equal(config.coalesce.windowMs, 1500);
+  assert.equal(config.coalesce.cooldownMs, 3000);
+  assert.equal(config.coalesce.toolFailureWindowMs, 10000);
+  assert.equal(config.rules.toolFailed.mode, "aggregate");
+  assert.deepEqual(config.rules.waitingForUser.kinds, ["select", "confirm", "input", "editor"]);
+  assert.equal(config.delivery.circuitBreakerFailures, 3);
+});
+
+const coalesceHost = await makeHost({ label: "coalesce", extensions: [PROBE_ENTRY, PLUGIN_ENTRY] });
+await coalesceHost.useModel("probe-fake", "fake-model");
+
+await step("L1 默认配置：极短时间内的两次运行只发一条（同 kind 冷却）", async () => {
+  const first = await coalesceHost.prompt("hi");
+  assert.equal(first.deliveries.length, 1, "第一次运行应当投递");
+  assert.equal(first.notifies, 1);
+
+  const second = await coalesceHost.prompt("hi");
+  assert.equal(second.deliveries.length, 0, "冷却窗口内的第二次运行不应再发一条");
+  assert.equal(second.notifies, 0, "冷却窗口内不得再写 OSC");
+  assert.equal(second.plugin.filter((row) => row.event === "cooldown_drop").length, 1, "被拦下必须留痕（否则等于静默丢失）");
+});
+
+await step("L2 cooldownMs=0 后恢复「每次运行各发一条」（参数真的被读取）", async () => {
+  coalesceHost.writeUserConfig({ version: 1, coalesce: { windowMs: 0, cooldownMs: 0 } });
+  await coalesceHost.during(() => coalesceHost.session.reload());
+  const first = await coalesceHost.prompt("hi");
+  const second = await coalesceHost.prompt("hi");
+  assert.equal(first.deliveries.length, 1);
+  assert.equal(second.deliveries.length, 1, "冷却已关闭却仍被拦下");
+  assert.notEqual(first.deliveries[0].dedupeKey, second.deliveries[0].dedupeKey);
+});
+
+await coalesceHost.dispose();
+
+// ---------------------------------------------------------------------------
+// Host 9：S6 工具失败 / 压缩失败 / 等待输入
+//
+// 工具失败是在**运行中**注入真实 `tool_execution_end`（靠探针 `agent_start` 定位注入点，
+// 不靠 sleep 猜时机）：`PROBE_DELAY_MS` 让假 provider 晚 250ms 回包，窗口足够大。
+// ---------------------------------------------------------------------------
+
+const S6_BASE = {
+  version: 1,
+  // 关掉冷却/合并，先把“hook 行为”本身测清楚（冷却由 L1/L2 与 K3 负责）
+  coalesce: { windowMs: 0, cooldownMs: 0 },
+  rules: {
+    toolFailed: { enabled: true, level: "warning", channels: ["terminal"] },
+    compactFailed: { enabled: true, level: "error", channels: ["terminal"] },
+    waitingForUser: { enabled: true, level: "info", channels: ["terminal"] },
+  },
+};
+
+const s6 = await makeHost({ label: "s6", extensions: [PROBE_ENTRY, PLUGIN_ENTRY], userConfig: S6_BASE });
+await s6.useModel("probe-fake", "fake-model");
+s6.setModelDelay(250);
+
+/** 改配置 → reload（重新读盘）→ 返回 reload 期间的插件增量。 */
+async function reconfigure(host, raw) {
+  host.writeUserConfig(raw);
+  return host.during(() => host.session.reload());
+}
+
+await step("K1 聚合模式：工具失败并入运行结果，一次运行仍然只发一条", async () => {
+  const delta = await s6.promptWithToolFailures(["bash"]);
+  assert.equal(delta.deliveries.length, 1, `期望 1 条投递，实际 ${delta.deliveries.length} 条`);
+  assert.equal(delta.deliveries[0].kind, "run_completed");
+  assert.equal(delta.notifies, 1, "工具失败不得另发一条");
+  assert.ok(delta.osc.osc777[0].includes("1 个工具失败: bash"), `结果通知应包含失败工具名: ${delta.osc.osc777[0]}`);
+  const settled = findBy(readJsonl(s6.pluginFile), (row) => row.event === "run_settled", "run_settled");
+  assert.equal(settled.toolFailures, 1, "lifecycle 未累积工具失败");
+});
+
+await step("K2 运行结果不通知时，聚合的工具失败自己发一条（去重后按工具名列出）", async () => {
+  await reconfigure(s6, { ...S6_BASE, rules: { ...S6_BASE.rules, runCompleted: { enabled: false } } });
+  const delta = await s6.promptWithToolFailures(["bash", "read"]);
+  assert.equal(delta.deliveries.length, 1);
+  assert.equal(delta.deliveries[0].kind, "tool_failed");
+  assert.equal(delta.deliveries[0].level, "warning");
+  assert.ok(delta.osc.osc777[0].includes("2 个工具失败: bash, read"), `聚合文案不对: ${delta.osc.osc777[0]}`);
+});
+
+await step("K3 immediate 模式：工具一失败就提醒，同 run 的后续事件被合并窗口吸收", async () => {
+  await reconfigure(s6, {
+    ...S6_BASE,
+    // 同一 run 的后续事件（第二个工具、运行结果）靠默认 1500ms 窗口吸收
+    coalesce: { windowMs: 1500, cooldownMs: 0 },
+    rules: {
+      ...S6_BASE.rules,
+      runCompleted: { enabled: true },
+      toolFailed: { enabled: true, level: "warning", channels: ["terminal"], mode: "immediate", threshold: 1 },
+    },
+  });
+  const delta = await s6.promptWithToolFailures(["bash", "read"]);
+  assert.equal(delta.deliveries.length, 1, `immediate 模式下只应有一条（后续被合并），实际 ${delta.deliveries.length}`);
+  assert.equal(delta.deliveries[0].kind, "tool_failed");
+  assert.match(delta.deliveries[0].dedupeKey, /:tool_failed:bash$/);
+  assert.ok(
+    delta.plugin.filter((row) => row.event === "coalesce_drop").length >= 1,
+    "同一 run 的后续事件应被合并窗口拦下并留痕",
+  );
+  assert.equal(delta.notifies, 1);
+});
+
+await step("K4 压缩失败立即提醒（error）；用户自己取消（aborted）不发", async () => {
+  const failed = await s6.during(() =>
+    s6.emit({
+      type: "session_compact_failed",
+      reason: "overflow",
+      errorMessage: "context overflow recovery failed",
+      aborted: false,
+      willRetry: true,
+      fromExtension: false,
+    }));
+  assert.equal(failed.deliveries.length, 1, "压缩失败必须能发出去（手工 /compact 没有 settled 可等）");
+  assert.equal(failed.deliveries[0].kind, "compact_failed");
+  assert.equal(failed.deliveries[0].level, "error");
+  assert.equal(failed.notifies, 1);
+
+  const aborted = await s6.during(() =>
+    s6.emit({
+      type: "session_compact_failed",
+      reason: "manual",
+      aborted: true,
+      willRetry: false,
+      fromExtension: false,
+    }));
+  assert.equal(aborted.deliveries.length, 0, "用户自己取消的压缩不应发通知");
+  assert.equal(aborted.notifies, 0);
+});
+
+await step("K5 等待输入：真 select 触发一条；custom 永久排除；end 能复位", async () => {
+  const delta = await s6.command("/probe-prompt");
+  assert.equal(delta.deliveries.length, 1, `等待输入未通知: ${JSON.stringify(delta.deliveries)}`);
+  assert.equal(delta.deliveries[0].kind, "waiting_for_user");
+  assert.equal(delta.deliveries[0].level, "info");
+  assert.ok(delta.osc.osc777[0].includes("选择 A"), `标题应带过来: ${delta.osc.osc777[0]}`);
+
+  const starts = delta.plugin.filter((row) => row.event === "lifecycle_prompt_start");
+  const ends = delta.plugin.filter((row) => row.event === "lifecycle_prompt_end");
+  assert.equal(starts.length, 1, "真实 select 应产生 1 个 start span");
+  assert.equal(starts[0].kind, "select");
+  assert.equal(ends.length, 1, "select 返回后应产生 1 个 end span");
+  assert.equal(ends[0].depth, 0, "end 应把等待计数复位");
+
+  // §18.5 修订 1：custom 与用户输入无关（加载器/进度 UI 也会用它），永久排除
+  const custom = await s6.during(() => s6.emit({ type: "ui_prompt_start", reason: "ui_prompt", kind: "custom" }));
+  assert.equal(custom.deliveries.length, 0, "custom 提示不得产生通知");
+  assert.equal(custom.notifies, 0);
+
+  // 嵌套 prompt 不会产生内层 span，end 报的是外层 kind：不得靠 kind 配对
+  await s6.emit({ type: "ui_prompt_start", reason: "ui_prompt", kind: "confirm", title: "确认 X" });
+  const waiting = await s6.command("/notify status");
+  assert.match(waiting.notice.message, /正在等你输入/, "status 应反映 waiting 状态");
+  await s6.emit({ type: "ui_prompt_end", reason: "ui_prompt", kind: "confirm", title: "确认 X" });
+  const afterEnd = await s6.command("/notify status");
+  assert.doesNotMatch(afterEnd.notice.message, /正在等你输入/, "end 之后应复位");
+});
+
+await step("K6 shutdown/reload 兜底复位 waiting（强杀时可能收不到 end）", async () => {
+  await s6.emit({ type: "ui_prompt_start", reason: "ui_prompt", kind: "input", title: "输入 Y" });
+  const before = await s6.command("/notify status");
+  assert.match(before.notice.message, /正在等你输入/);
+
+  await s6.during(() => s6.session.reload());
+  const after = await s6.command("/notify status");
+  assert.doesNotMatch(after.notice.message, /正在等你输入/, "reload 后不得还挂着等待状态");
+});
+
+s6.setModelDelay(undefined);
+await s6.dispose();
+
+// ---------------------------------------------------------------------------
+// Host 10：S7 Webhook —— 验收 §17.3：「新增 1 个文件 + registry 1 行 + 配置 1 条」
+// ---------------------------------------------------------------------------
+
+const hookRequests = [];
+const hookServer = http.createServer((req, res) => {
+  let body = "";
+  req.on("data", (chunk) => {
+    body += chunk;
+  });
+  req.on("end", () => {
+    hookRequests.push({ url: req.url, method: req.method, headers: req.headers, body });
+    res.writeHead(202, { "content-type": "text/plain" });
+    res.end("accepted");
+  });
+});
+await new Promise((resolve) => hookServer.listen(0, "127.0.0.1", resolve));
+const hookPort = hookServer.address().port;
+const WEBHOOK_SECRET = "regression-secret-do-not-log";
+process.env.PI_NOTIFY_TEST_WEBHOOK_SECRET = WEBHOOK_SECRET;
+
+const webhookHost = await makeHost({
+  label: "webhook",
+  extensions: [PROBE_ENTRY, PLUGIN_ENTRY],
+  userConfig: {
+    version: 1,
+    coalesce: { windowMs: 0, cooldownMs: 0 },
+    providers: [
+      { id: "terminal", type: "terminal", enabled: true },
+      {
+        id: "hook",
+        type: "webhook",
+        enabled: true,
+        options: {
+          url: `http://127.0.0.1:${hookPort}/hook?token=in-query`,
+          secretEnv: "PI_NOTIFY_TEST_WEBHOOK_SECRET",
+        },
+      },
+    ],
+    rules: { runFailed: { enabled: true, level: "error", channels: ["hook"] } },
+  },
+});
+await webhookHost.useModel("probe-fail", "fail-model");
+
+await step("M1 webhook 端到端：真实 POST + HMAC 签名 + 日志不复现 query/密钥", async () => {
+  const delta = await webhookHost.prompt("hi");
+  assert.equal(delta.deliveries.length, 1, `期望 1 条投递，实际 ${JSON.stringify(delta.deliveries)}`);
+  assert.equal(delta.deliveries[0].providerId, "hook");
+  assert.equal(delta.deliveries[0].ok, true);
+  assert.equal(hookRequests.length, 1, "本机服务未收到 webhook 请求");
+
+  const sent = hookRequests[0];
+  assert.equal(sent.method, "POST");
+  assert.equal(sent.url, "/hook?token=in-query");
+  assert.equal(sent.headers["content-type"], "application/json; charset=utf-8");
+  assert.equal(sent.headers["x-pi-notify-event"], "run_failed");
+  const expected = `sha256=${createHmac("sha256", WEBHOOK_SECRET).update(sent.body, "utf8").digest("hex")}`;
+  assert.equal(sent.headers["x-pi-notify-signature"], expected, "HMAC 签名必须能被子方重现");
+
+  const payload = JSON.parse(sent.body);
+  assert.equal(payload.source, "pi-notification");
+  assert.equal(payload.event, "run_failed");
+  assert.equal(payload.level, "error");
+  assert.ok(payload.sessionId, "载荷应带会话标识（跨会话防御需要）");
+  assert.ok(!sent.body.includes(WEBHOOK_SECRET), "载荷里不得出现密钥明文");
+
+  const record = findBy(readJsonl(webhookHost.pluginFile), (row) => row.event === "webhook_sent", "webhook_sent");
+  assert.equal(record.signed, true);
+  assert.equal(record.url, `http://127.0.0.1:${hookPort}/hook`, "日志应丢弃 query（常被用来传 token）");
+  assert.ok(!JSON.stringify(readJsonl(webhookHost.pluginFile)).includes(WEBHOOK_SECRET), "日志里出现了密钥明文");
+
+  await webhookHost.useModel("probe-fake", "fake-model");
+});
+
+await step("M2 非法 webhook 配置降级为 noop，绝不发到错地方", async () => {
+  webhookHost.writeUserConfig({
+    version: 1,
+    coalesce: { windowMs: 0, cooldownMs: 0 },
+    providers: [
+      { id: "bad", type: "webhook", enabled: true, options: { url: "ftp://example.invalid/x" } },
+      {
+        id: "nosecret",
+        type: "webhook",
+        enabled: true,
+        options: { url: "https://example.invalid/hook", secretEnv: "PI_NOTIFY_TEST_MISSING_SECRET" },
+      },
+    ],
+    rules: { runCompleted: { enabled: true, level: "info", channels: ["bad", "nosecret"] } },
+  });
+  await webhookHost.during(() => webhookHost.session.reload());
+
+  const requestsBefore = hookRequests.length;
+  const delta = await webhookHost.prompt("hi");
+  const degraded = delta.plugin.filter((row) => row.event === "channel_degraded");
+  assert.equal(degraded.length, 2, `期望 2 条降级记录，实际 ${JSON.stringify(degraded)}`);
+  const reasons = JSON.stringify(degraded.map((row) => row.reason));
+  assert.match(reasons, /协议/);
+  assert.match(reasons, /环境变量/);
+  assert.equal(delta.deliveries.length, 2, "降级渠道仍应记录投递（noop 成功），不能静默消失");
+  assert.equal(hookRequests.length, requestsBefore, "降级渠道不得真的发出去");
+  assert.deepEqual(networkAttempts, [], "出现了外部网络访问");
+});
+
+await step("M3 §17.3 反回退：lifecycle/rules 不碰渠道名，service 不认识 webhook", () => {
+  const read = (rel) => fs.readFileSync(path.join(PLUGIN_DIR, rel), "utf8");
+  // 只看真正的 import 语句：注释里提到 `providers/*` 是在说明这条约束，不算违规。
+  const importsProviders = /from\s+"[^"]*providers\//;
+  for (const rel of ["src/lifecycle.ts", "src/rules.ts"]) {
+    const source = read(rel);
+    assert.doesNotMatch(source, importsProviders, `${rel} 不得 import providers/*（§17.3 规则 1）`);
+    assert.doesNotMatch(source, /terminal|webhook/, `${rel} 不得出现渠道名（§17.3 规则 2）`);
+  }
+  // `debug` 只是日志级别名，不作为渠道名检查
+  assert.doesNotMatch(read("src/service.ts"), /terminal|webhook/, "service 不得出现渠道名");
+  assert.doesNotMatch(read("extensions/index.ts"), /pi\.on\(\s*"agent_end"/, "不得注册 agent_end（硬约束 1）");
+  assert.doesNotMatch(
+    read("src/providers/webhook.ts"),
+    /from "\.\.\/(lifecycle|rules|config)\.ts"/,
+    "渠道不得 import 判定/配置层（§17.3 规则 3）",
+  );
+});
+
+await webhookHost.dispose();
+await new Promise((resolve) => hookServer.close(resolve));
+delete process.env.PI_NOTIFY_TEST_WEBHOOK_SECRET;
+
+// ---------------------------------------------------------------------------
 // 收尾
 // ---------------------------------------------------------------------------
 
 globalThis.fetch = realFetch;
 
 if (failures === 0) {
-  console.log("\n通过：判定/去重/阻塞/reload（A–F,H）+ 配置读盘（I1–I11）+ 命令面（J1–J4）全部成立。");
+  console.log(
+    "\n通过：判定/去重/阻塞/reload（A–F,H）+ 配置读盘（I1–I11）+ 命令面（J1–J4）"
+    + " + 合并/冷却（L0–L2）+ 工具失败/压缩失败/等待输入（K1–K6）+ Webhook（M1–M3）全部成立。",
+  );
   fs.rmSync(TMP, { recursive: true, force: true });
   process.exit(0);
 } else {

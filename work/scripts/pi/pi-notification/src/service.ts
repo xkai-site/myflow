@@ -1,7 +1,7 @@
 /**
  * 投递服务（设计 §8 / §12.1 第 5、6 步 / §17.2）。
  *
- * 职责：门槛过滤 → 去重 → 有界队列 → 并发投递 → 超时 → 幂等 dispose。
+ * 职责：门槛过滤 → 去重 → **合并窗口 + 冷却（S4）** → 有界队列 → 并发投递 → 超时 → 幂等 dispose。
  * 只关心「通知要发出去」，**不关心事件从哪来**，也不认识任何具体渠道（只认 `providerId`）。
  *
  * 硬约束（§18.4）：
@@ -55,9 +55,26 @@ export function createService(options: ServiceOptions): NotificationService {
 
   const queue: NotificationRequest[] = [];
   const seen = new Map<string, true>();
+  /**
+   * S4 门槛过滤（§12.1 第 5 步，设计 §10.2 的 `coalesce`）：
+   *  - `coalesceUntil`：「同一逻辑运行（sessionId+runId）只放行一条」；
+   *  - `cooldownUntil`：「同一 kind 的最小间隔」。
+   * 两个表只在**真正入队**时推进，所以被拦下的通知不会把窗口越推越远。
+   */
+  const coalesceUntil = new Map<string, number>();
+  const cooldownUntil = new Map<string, number>();
   let active = 0;
   let disposed = false;
-  const stats: ServiceSnapshot = { queued: 0, active: 0, delivered: 0, failed: 0, deduped: 0, dropped: 0 };
+  const stats: ServiceSnapshot = {
+    queued: 0,
+    active: 0,
+    delivered: 0,
+    failed: 0,
+    deduped: 0,
+    dropped: 0,
+    coalesced: 0,
+    cooled: 0,
+  };
   let drainWaiters: Array<() => void> = [];
   const inFlight = new Set<AbortController>();
 
@@ -67,6 +84,53 @@ export function createService(options: ServiceOptions): NotificationService {
     drainWaiters = [];
     for (const resolve of waiters) resolve();
   };
+
+  /** 窗口表的有界性：过期项直接剔除，保留量超过上限时整表重建。 */
+  function pruneWindow(table: Map<string, number>, nowMs: number): void {
+    if (table.size <= DEDUPE_LIMIT) return;
+    for (const [key, until] of table) {
+      if (until <= nowMs) table.delete(key);
+    }
+  }
+
+  /**
+   * 合并窗口 + 冷却。返回 true 表示被拦下（调用方直接 return）。
+   * 两个窗口都只在**已放行**时推进：被拦下的通知不应延长别人的等待。
+   */
+  function filtered(req: NotificationRequest): boolean {
+    const nowMs = now();
+    // 通知自带的窗口优先（工具失败 immediate 模式用 `toolFailureWindowMs` 聚合并行失败），
+    // 但**已在窗口内的 key 一律合并**：窗口一旦被（任一条通知）打开，同一运行的后续通知
+    // 都应该被吸进去，而不是取决于它自己带没带窗口。
+    const ownWindowMs = req.coalesceWindowMs !== undefined
+      ? (Number.isFinite(req.coalesceWindowMs) ? Math.max(0, Math.floor(req.coalesceWindowMs)) : 0)
+      : (Number.isFinite(config.coalesce?.windowMs) ? config.coalesce.windowMs : 0);
+    const coalesceKey = `${req.meta.sessionId}:${req.meta.runId}`;
+    const until = coalesceUntil.get(coalesceKey);
+    if (until !== undefined && nowMs < until) {
+      stats.coalesced += 1;
+      log.record({ event: "coalesce_drop", kind: req.kind, dedupeKey: req.dedupeKey });
+      log.log("debug", `同一运行已在合并窗口内，合并掉: kind=${req.kind}`);
+      return true;
+    }
+    if (ownWindowMs > 0) {
+      coalesceUntil.set(coalesceKey, Math.max(until ?? 0, nowMs + ownWindowMs));
+      pruneWindow(coalesceUntil, nowMs);
+    }
+    const cooldownMs = Number.isFinite(config.coalesce?.cooldownMs) ? config.coalesce.cooldownMs : 0;
+    if (cooldownMs > 0) {
+      const until = cooldownUntil.get(req.kind);
+      if (until !== undefined && nowMs < until) {
+        stats.cooled += 1;
+        log.record({ event: "cooldown_drop", kind: req.kind, dedupeKey: req.dedupeKey, cooldownMs });
+        log.log("debug", `同 kind 冷却中，已拦下: kind=${req.kind}`);
+        return true;
+      }
+      cooldownUntil.set(req.kind, nowMs + cooldownMs);
+      pruneWindow(cooldownUntil, nowMs);
+    }
+    return false;
+  }
 
   function notifierFor(providerId: string): Notifier {
     const cached = notifiers.get(providerId);
@@ -211,7 +275,7 @@ export function createService(options: ServiceOptions): NotificationService {
   }
 
   return {
-    submit(req: NotificationRequest): void {
+    submit(req: NotificationRequest, options?: { bypassFilters?: boolean }): void {
       try {
         if (disposed) return;
         if (!config.enabled) return;
@@ -227,6 +291,8 @@ export function createService(options: ServiceOptions): NotificationService {
           const oldest = seen.keys().next();
           if (!oldest.done) seen.delete(oldest.value);
         }
+        // `/notify test` 这类自检绕过合并/冷却，否则「测试通知没来」会被误读成渠道坏了。
+        if (options?.bypassFilters !== true && filtered(req)) return;
         enqueue(req);
         log.record({
           event: "submit",

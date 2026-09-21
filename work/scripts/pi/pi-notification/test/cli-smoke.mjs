@@ -275,6 +275,28 @@ await step("K 配置损坏时降级，但失败通知仍能发出（不静默全
   assert.equal(sent[0].level, "error");
 });
 
+await step("L --no-notify：本会话静默，一条都不发（且不改写配置文件）", async () => {
+  const run = runPi({
+    label: "no-notify",
+    userConfig: { version: 1 },
+    args: [
+      "--no-session", "--approve", "--no-tools", "--no-notify",
+      "--model", "probe-fake/fake-model",
+      ...EXTENSIONS,
+      "-p", "只回复 OK",
+    ],
+  });
+  assertCleanExit("L", run);
+  assert.ok(run.probe.map((row) => row.ev).includes("settled_enter"), "L: 这轮根本没跑起来");
+  assert.equal(
+    run.plugin.filter((row) => row.event === "delivery").length,
+    0,
+    "L: --no-notify 下仍在投递",
+  );
+  const startup = run.plugin.filter((row) => row.event === "plugin_session_start").at(-1);
+  assert.equal(startup.silenced, true, "L: 插件未记录静默标志");
+});
+
 // ---------------------------------------------------------------------------
 
 for (const item of failures) {
@@ -282,7 +304,7 @@ for (const item of failures) {
 }
 
 if (failures.length === 0) {
-  console.log("\n通过：真实 CLI 下 G/H（判定与管道纪律）+ I（命令面）+ J/K（配置真实生效）全部成立。");
+  console.log("\n通过：真实 CLI 下 G/H（判定与管道纪律）+ I（命令面）+ J/K（配置真实生效）+ L（--no-notify）全部成立。");
   fs.rmSync(TMP, { recursive: true, force: true });
   process.exit(0);
 } else {
