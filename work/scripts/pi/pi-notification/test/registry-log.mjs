@@ -187,6 +187,23 @@ await step("L4b 带认证方案的 Authorization 头与 Cookie 头必须整段�
   assert.equal(redact("cookie monster"), "cookie monster");
 });
 
+await step("L4c 空格分隔的键值也要遮蔽，但短词散文不得被误伤", () => {
+  // A key without a separator still carries a credential in practice: "token <secret>" is a common
+  // API error shape. Only long high-entropy values are masked, so diagnostics stay readable.
+  assert.equal(redact("token abcdefghijklmnop"), "token ***", "16 字符的凭据必须遮蔽");
+  assert.equal(redact("api key abcdefghijklmnop"), "api key ***");
+  assert.equal(redact("access-key abcdefghijklmnop"), "access-key ***");
+  assert.equal(redact("password supersecretpassword123"), "password ***");
+  assert.equal(redact("Invalid token abcdefghijklmnop provided"), "Invalid token *** provided", "夹在句子中也要命中");
+
+  // Below the 16-character floor the value is left alone, which is what keeps ordinary prose and
+  // short test tokens readable; this boundary is deliberate, not an oversight.
+  assert.equal(redact("token abcdefghijklmno"), "token abcdefghijklmno");
+  assert.equal(redact("token expired"), "token expired");
+  assert.equal(redact("secret sauce"), "secret sauce");
+  assert.equal(redact("apiKey=secret123"), "apiKey=***", "带分隔符的形式仍由既有规则处理");
+});
+
 await step("L5 sanitize：非字符串、不可见字符与按码位截断", () => {
   assert.equal(sanitize(42), "42");
   assert.equal(sanitize(null), "");

@@ -140,6 +140,14 @@ export function redact(input: unknown): string {
   text = text.replace(/\bgh[pousr]_[A-Za-z0-9]{16,}/g, "gh*_***");
   text = text.replace(/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, "xox*-***");
   text = text.replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/g, "***jwt***");
+  // A key without a separator ("token <secret>") still carries a credential in practice. Only long
+  // high-entropy values are masked, so ordinary prose such as "token expired" stays readable; the
+  // 16-character floor matches the shortest real API keys. This runs after the family rules above so
+  // they keep their more informative form, for example "token gh*_***".
+  text = text.replace(
+    /((?:api[\s_-]?key|access[\s_-]?key|token|secret|password|passwd)\s+)(?=[A-Za-z0-9_-]{16,})([^\s,;"']+)/gi,
+    "$1***",
+  );
   text = text.replace(/\b[A-Za-z0-9_-]{40,}\b/g, "***");
   // Home directory and user directory, in either separator style.
   if (HOME_POSIX.length > 3) {
