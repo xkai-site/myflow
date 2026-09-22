@@ -27,13 +27,15 @@ import {
   readUserConfigRaw,
   userConfigPath,
   writeUserDefault,
+  deleteUserDefault,
   type ConfigLoadResult,
 } from "./config.ts";
 import { sanitize, sanitizeError } from "./log.ts";
 import { createDefaultTerminalIo, selectTerminalChannel } from "./providers/terminal.ts";
-import { setPatchPath, type SessionOverlay } from "./settings.ts";
-import { NotifySettingsComponent, type ItemValue, type NotifySettingsSummary, type SettingsHost } from "./ui.ts";
-import type { Logger, NotificationConfig, NotificationService } from "./types.ts";
+import { evaluateRunOutcome } from "./rules.ts";
+import { builtinDefaultValue, clearItemOverride, sessionOverrideValue, setPatchPath, channelUserFilePatch, type SessionOverlay } from "./settings.ts";
+import { NotifySettingsComponent, type ItemValue, type NotifySettingsSummary, type SettingsHost, type SettingsRestriction } from "./ui.ts";
+import type { Logger, NotificationConfig, NotificationService, RunOutcome, RunSummary } from "./types.ts";
 
 export interface CommandDeps {
   log: Logger;
@@ -66,13 +68,18 @@ function formatStatus(deps: CommandDeps): string {
   const lines: string[] = [];
   lines.push(`pi-notification: ${config.enabled && !deps.isSilenced() ? "开启" : "关闭"}${deps.isSilenced() ? "（--no-notify）" : ""}`);
   lines.push(`  规则/渠道: ${describeConfig(config)}`);
+  // “Rule enabled” only means “passes the filter”; it is never a promise that a notification was
+  // delivered, and no enabled channel is a state worth spelling out.
+  const enabledProviders = config.providers.filter((provider) => provider.enabled);
+  lines.push(enabledProviders.length === 0
+    ? "  送达前提: 没有启用的渠道，通知不会到达任何地方"
+    : `  送达前提: ${enabledProviders.length} 个渠道启用；规则开启只表示通过筛选，实际送达取决于渠道可用性`);
   lines.push(
     `  合并/冷却: 同运行窗口 ${config.coalesce.windowMs}ms / 同 kind 冷却 ${config.coalesce.cooldownMs}ms`
     + ` / 工具失败 ${config.rules.toolFailed.mode}(${config.rules.toolFailed.threshold})`,
   );
   const quiet = config.quietHours;
-  lines.push(`  静默时段: ${quiet.start}–${quiet.end}（${!quiet.enabled ? "未开启" : deps.service().isQuietHours() ? "当前生效" : "当前未生效"}；本地时间；例外 ${quiet.exceptLevels.join(",") || "无"}）`);
-  lines.push(`  配置来源: ${load.sources.join(" → ")}${load.degraded ? "（已降级）" : ""}`);
+  lines.push(`  静默时段: ${quiet.start}–${quiet.end}（${!quiet.enabled ? "未开启" : deps.service().isQuietHours() ? "当前生效" : "当前未生效"}；本地时间；例外 ${quiet.exceptLevels.join(",") || "无"}）`);  lines.push(`  配置来源: ${load.sources.join(" → ")}${load.degraded ? "（已降级）" : ""}`);
   lines.push(`  用户默认: ${userConfigPath(deps.agentDir())}（单项保存，未保存的项跟随出厂默认）`);
   lines.push(`  终端机制: ${selection.channel}${selection.reason ? `（${selection.reason}）` : ""}`);
   lines.push(
@@ -83,6 +90,10 @@ function formatStatus(deps: CommandDeps): string {
   lines.push(`  上次成功: ${snapshot.lastOkAt ? new Date(snapshot.lastOkAt).toLocaleString() : "—"}`);
   if (snapshot.lastError) lines.push(`  上次错误: ${snapshot.lastError}`);
   if (deps.sessionId()) lines.push(`  会话: ${deps.sessionId()}${deps.isWaitingForUser?.() ? "（正在等你输入）" : ""}`);
+  // The four diagnostic groups the status page keeps apart: config blocking, current silence, the
+  // self-test submission and the real delivery counters. Placed after the session line so the
+  // waiting state stays inside the first page.
+  lines.push("  自检: Ctrl+T 或首页“发送测试通知”只提交一条（绕过静默/合并/冷却）；“已提交”不等于“已送达”");
   for (const problem of load.errors) lines.push(`  ⚠ 配置错误 ${problem.path}: ${problem.message}`);
   for (const problem of load.warnings) lines.push(`  · 提示 ${problem.path}: ${problem.message}`);
   return lines.join("\n");
@@ -114,6 +125,17 @@ function forcedOff(deps: CommandDeps): boolean {
  * re-reads the config so both the current value and the user default are fresh.
  */
 function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): SettingsHost {
+  /** Item name used by every feedback message, so a confirmation names what it changed. */
+  const name = (item: Parameters<SettingsHost["setValue"]>[0]): string => `${item.group} · ${item.label}`;
+
+  /** Session-level restrictions that override the user's own setting; shown as extra limits, never as a user default. */
+  const restrictions = (): SettingsRestriction[] => {
+    const list: SettingsRestriction[] = [];
+    if (deps.isSilenced()) list.push({ label: "强制静默", reason: "--no-notify" });
+    if (isDisabledByEnv()) list.push({ label: "强制静默", reason: "PI_NOTIFY_DISABLE" });
+    return list;
+  };
+
   const applyPatch = (item: Parameters<SettingsHost["setValue"]>[0], value: ItemValue): { ok: true; message: string } | { ok: false; message: string } => {
     const patch = item.patch(value);
     const next: SessionOverlay = {
@@ -123,44 +145,44 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
         : { ...deps.overlay().providers },
     };
     deps.setOverlay(next);
-    return { ok: true, message: `已应用（仅本对话）· ${item.format(item.read(deps.config()))}` };
+    return { ok: true, message: `已应用（仅本对话）「${name(item)}」= ${item.format(item.read(deps.config()))}；Ctrl+S 可设为以后默认` };
   };
 
   return {
     config: () => deps.config(),
     userRaw: () => deps.userRaw(),
+    sessionOverride: (item) => sessionOverrideValue(deps.overlay(), item),
+    restrictions,
 
     setValue(item, value) {
       if (item.id === "enabled" && forcedOff(deps) && value === true) {
-        return { ok: false, message: "本会话被 --no-notify / PI_NOTIFY_DISABLE 强制静默，界面无法开启通知" };
+        return { ok: false, message: `已拒绝「${name(item)}」= 开启：本会话被 --no-notify / PI_NOTIFY_DISABLE 强制静默（额外限制，不是你的默认值），界面无法开启通知` };
       }
       return applyPatch(item, value);
     },
 
     saveDefault(item, value) {
       if (item.id === "enabled" && forcedOff(deps) && value === true) {
-        return { ok: false, message: "本会话被强制静默；强制关闭不会被写成用户默认" };
+        return { ok: false, message: `已拒绝保存「${name(item)}」= 开启：本会话被强制静默（额外限制）；强制关闭不会被写成用户默认` };
       }
       const patch = item.patch(value);
       const filePatch = patch.kind === "providers"
-        ? {
-          // Providers are an array field: the whole array is written, taken from the effective
-          // config (including this conversation's switches), so Ctrl+S really means "freeze the
-          // current value as the user default".
-          providers: deps.config().providers.map((provider) => (
-            provider.id === patch.id ? { ...provider, enabled: patch.value } : { ...provider }
-          )),
-        }
+        ? channelUserFilePatch(
+          deps.userRaw(),
+          patch.id,
+          deps.config().providers.find((provider) => provider.id === patch.id)?.type ?? "terminal",
+          patch.value,
+        )
         : setPatchPath({}, patch.path, patch.value);
       const result = writeUserDefault(deps.agentDir(), filePatch);
       if (!result.ok) {
         const problems = result.problems.map((problem) => sanitizeError(`${problem.path}: ${problem.message}`));
         deps.log.record({ event: "notify_default_write_failed", item: item.id, problems });
-        return { ok: false, message: `保存失败，用户文件未改动：${problems.join("; ")}` };
+        return { ok: false, message: `保存失败「${name(item)}」：用户文件未改动（${problems.join("; ")}）` };
       }
       deps.reload(ctx); // Re-read only after a successful write, so both layers refresh together.
       deps.log.record({ event: "notify_default_saved", item: item.id, path: patch.kind === "providers" ? `providers.${patch.id}.enabled` : patch.path });
-      return { ok: true, message: `已保存为默认 · ${sanitize(userConfigPath(deps.agentDir()), 2000)}` };
+      return { ok: true, message: `已保存为默认「${name(item)}」= ${item.format(item.read(deps.config()))}（作用范围：以后默认；${sanitize(userConfigPath(deps.agentDir()), 2000)}）` };
     },
 
     test() {
@@ -198,6 +220,67 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
       return load.degraded
         ? { ok: false, message: "已重新读取配置：配置有问题，当前是降级后的安全子集（Ctrl+O 看状态）" }
         : { ok: true, message: "已重新读取配置（未重载扩展）" };
+    },
+
+    /** “沿用以后默认”: drop only this conversation's override, so the user default applies again. */
+    followUserDefault(item) {
+      deps.setOverlay(clearItemOverride(deps.overlay(), item));
+      deps.log.record({ event: "notify_override_cleared", item: item.id });
+      return { ok: true, message: `已沿用以后默认「${name(item)}」：本对话不再覆盖（当前 ${item.format(item.read(deps.config()))}）` };
+    },
+
+    /** “恢复此项内置默认”: clear the user default and the conversation override for one item. */
+    restoreBuiltinDefault(item) {
+      const removal = item.providerId !== undefined
+        ? { kind: "provider" as const, id: item.providerId }
+        : { kind: "path" as const, path: item.userPath };
+      const result = deleteUserDefault(deps.agentDir(), removal);
+      if (!result.ok) {
+        const problems = result.problems.map((problem) => sanitizeError(`${problem.path}: ${problem.message}`));
+        deps.log.record({ event: "notify_default_delete_failed", item: item.id, problems });
+        return { ok: false, message: `恢复失败「${name(item)}」：用户文件未改动（${problems.join("; ")}）` };
+      }
+      // Only after the file is clean does the conversation override go away: a failed write must not
+      // silently drop this conversation's value.
+      deps.setOverlay(clearItemOverride(deps.overlay(), item));
+      deps.log.record({ event: "notify_default_removed", item: item.id, path: item.userPath });
+      if (item.id === "enabled" && forcedOff(deps) && builtinDefaultValue(item) === true) {
+        // The default really is back to on, but the session-level silence still wins; never bypass it.
+        return { ok: true, message: `已恢复「${name(item)}」内置默认（开启）；但本会话仍被强制静默，界面无法绕过` };
+      }
+      return { ok: true, message: `已恢复「${name(item)}」内置默认（当前 ${item.format(item.read(deps.config()))}）` };
+    },
+
+    /**
+     * Read-only example body. A clone of the effective config is used with the completion rule turned
+     * on only for the example, and the data is fixed: nothing reads the conversation, and nothing is
+     * submitted, so a preview can never notify anyone.
+     */
+    preview() {
+      const config: NotificationConfig = structuredClone(deps.config());
+      config.rules.runCompleted = { ...config.rules.runCompleted, enabled: true };
+      const failures = [{ toolName: "bash", count: 1 }];
+      const outcome: RunOutcome = {
+        sessionId: "preview", runId: "preview", status: "completed", startedAt: 0,
+        durationMs: 42300, stopReason: "end_turn", toolFailures: failures,
+        costUsd: 0.0123, assistantExcerpt: "已修复登录 bug",
+      };
+      const summary: RunSummary = {
+        runStatus: "completed", durationMs: 42300, toolFailures: failures,
+        sessionName: "示例会话", projectName: "myflow", cumulativeCostUsd: 0.0456, contextPercent: 42,
+      };
+      const request = evaluateRunOutcome({ outcome, summary }, config);
+      const lines = [
+        "示例（不会发送）：以下内容用固定数据生成，不读取你的真实对话，也不会提交投递。",
+        request
+          ? `规则：${request.kind} · 级别：${request.level} · 渠道：${request.channels.join("、") || "（无）"}`
+          : "“运行完成”规则当前被关闭，无法生成示例正文；可先开启该规则。",
+        request ? `标题：${request.title}` : "",
+        request ? `正文：${request.body}` : "",
+        "说明：实际送达取决于渠道可用性、静默时段与总开关；上面这条只是内容示意，不代表已送达。",
+      ].filter((line) => line !== "");
+      deps.log.record({ event: "notify_preview" });
+      return { ok: true, message: "通知预览（内容示意，不会发送）", lines };
     },
 
     statusLines: () => formatStatus(deps).split("\n"),

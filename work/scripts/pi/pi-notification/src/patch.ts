@@ -55,6 +55,49 @@ export function setPatchPath(patch: ConfigPatch, path: string, value: unknown): 
   return root;
 }
 
+/**
+ * Removes one path from a raw config object, pruning ancestor objects that become empty but never
+ * touching sibling branches. A missing path is a no-op, so a full user-file restore is idempotent.
+ * The input is left untouched (it is deep-cloned).
+ */
+export function removePath(source: unknown, path: string): Record<string, unknown> {
+  const clone: Record<string, unknown> = isPlainObject(source) ? structuredClone(source) : {};
+  const keys = path.split(".");
+  const parents: Array<Record<string, unknown>> = [];
+  let cursor: Record<string, unknown> = clone;
+  for (const key of keys.slice(0, -1)) {
+    const next = cursor[key];
+    if (!isPlainObject(next)) return clone; // nothing to delete
+    parents.push(cursor);
+    cursor = next;
+  }
+  const leaf = keys[keys.length - 1]!;
+  if (!Object.prototype.hasOwnProperty.call(cursor, leaf)) return clone;
+  delete cursor[leaf];
+  for (let index = parents.length - 1; index >= 0; index -= 1) {
+    const key = keys[index]!;
+    const parent = parents[index]!;
+    const value = parent[key];
+    if (isPlainObject(value) && Object.keys(value).length === 0) delete parent[key];
+    else break;
+  }
+  return clone;
+}
+
+/**
+ * Removes one field from the entry of an array field (a provider switch). The entry itself and
+ * every other array member are kept, so definition, options and sibling channels survive.
+ */
+export function removeArrayEntryField(source: unknown, arrayPath: string, id: string, field: string): Record<string, unknown> {
+  const clone: Record<string, unknown> = isPlainObject(source) ? structuredClone(source) : {};
+  const list = getPathValue(clone, arrayPath);
+  if (!Array.isArray(list)) return clone;
+  for (const entry of list) {
+    if (isPlainObject(entry) && entry.id === id) delete entry[field];
+  }
+  return clone;
+}
+
 /** Deep merge: plain objects recurse, arrays and scalars are replaced. */
 export function mergePatch<T>(base: T, patch: unknown): T {
   if (!isPlainObject(patch)) return (isPlainObject(base) ? base : patch) as T;

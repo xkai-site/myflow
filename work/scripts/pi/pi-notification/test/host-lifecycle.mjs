@@ -856,25 +856,72 @@ const K = {
   ctrlO: "\x0f",
 };
 
-/** Keys pressed in order; the trailing Escapes close the component, since Esc in a detail view only goes one level up. */
-const CLOSE = [K.esc, K.esc];
+/** Keys pressed in order; the trailing Escapes close the component, one level per page. */
+const CLOSE = [K.esc, K.esc, K.esc, K.esc, K.esc, K.esc];
 
 /**
- * Navigates to one setting and opens its detail view. The item order is the `buildSettingItems()`
- * order, which settings.ts owns, so the number of key presses is deterministic.
+ * Key sequence that walks the home page to one setting's row: home → category (→ rule) → row.
+ * The layout is derived from `settings.ts` (`SETTING_CATEGORIES`, `RULE_INFOS`, item order), so the
+ * number of key presses stays deterministic without hardcoding row positions in the test.
  */
+function routeToItem(settingsModule, items, id, config) {
+  const item = items.find((candidate) => candidate.id === id);
+  assert.ok(item, `未知配置项: ${id}`);
+  const homeRow = (key) => {
+    const index = key === "item:enabled" ? 0 : key === "item:minLevel" ? 1 : -1;
+    assert.ok(index >= 0, `未知首页行: ${key}`);
+    return index;
+  };
+  if (item.rule) {
+    const categoryIndex = 2 + settingsModule.SETTING_CATEGORIES.findIndex((category) => category.id === "rules");
+    const ruleIndex = settingsModule.RULE_INFOS.findIndex((rule) => rule.key === item.rule.key);
+    assert.ok(ruleIndex >= 0, `未知规则: ${item.rule.key}`);
+    const ruleItems = items.filter((candidate) => candidate.rule?.key === item.rule.key);
+    const rowIndex = ruleItems.findIndex((candidate) => candidate.id === id);
+    return [categoryIndex, ruleIndex, rowIndex];
+  }
+  const category = settingsModule.SETTING_CATEGORIES.find((candidate) => candidate.group === item.group);
+  if (!category) return [homeRow(`item:${id}`)];
+  const categoryIndex = 2 + settingsModule.SETTING_CATEGORIES.findIndex((candidate) => candidate.id === category.id);
+  const collapsed = category.collapsed && category.collapsed.when(config) && category.collapsed.ids.includes(id);
+  if (collapsed) {
+    const subgroupItems = items.filter((candidate) => candidate.id === id);
+    const rowIndex = subgroupItems.length > 0 ? 0 : -1;
+    assert.ok(rowIndex >= 0, `不可达配置项: ${id}`);
+    return [categoryIndex, 0, 0];
+  }
+  const groupItems = items.filter((candidate) => candidate.group === item.group && (candidate.visible?.(config) ?? true));
+  const rowIndex = groupItems.findIndex((candidate) => candidate.id === id);
+  assert.ok(rowIndex >= 0, `当前页不可见配置项: ${id}`);
+  return [categoryIndex, rowIndex];
+}
+
+/** Down-presses per page, with Enter between pages; `open` adds the Enter that opens the field. */
+function keysAlongRoute(settingsModule, items, id, { open, after, close = true, config = configModule.defaultConfig() }) {
+  const keys = [];
+  const route = routeToItem(settingsModule, items, id, config);
+  route.forEach((downs, index) => {
+    for (let step = 0; step < downs; step += 1) keys.push(K.down);
+    const isLast = index === route.length - 1;
+    if (!isLast || open) keys.push(K.enter);
+  });
+  keys.push(...after);
+  if (close) keys.push(...CLOSE);
+  return keys;
+}
+
+/** Navigates to one setting and opens its detail view. */
 async function keysToItem(id, after = []) {
   const settingsModule = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "settings.ts")).href);
   const items = settingsModule.buildSettingItems(configModule.defaultConfig());
-  const index = items.findIndex((item) => item.id === id);
-  assert.ok(index >= 0, `未知配置项: ${id}`);
-  return [...Array.from({ length: index }, () => K.down), K.enter, ...after, ...CLOSE];
+  return keysAlongRoute(settingsModule, items, id, { open: true, after });
 }
 
-/** Moves the focus to one setting without opening it: on the list Ctrl+S applies to the focused item. */
+/** Moves the focus to one page row without opening it (Ctrl+S applies to the focused field there). */
 async function keysToList(id, after = []) {
-  const keys = await keysToItem(id, []);
-  return [...keys.slice(0, keys.length - CLOSE.length), ...after, K.esc];
+  const settingsModule = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "settings.ts")).href);
+  const items = settingsModule.buildSettingItems(configModule.defaultConfig());
+  return keysAlongRoute(settingsModule, items, id, { open: false, after });
 }
 
 /**
@@ -977,15 +1024,16 @@ await step("J3 TUI：/notify 打开设置；Esc 关闭不改磁盘与内存", as
   assert.deepEqual(settings.runtimeErrors, []);
 });
 
-await step("J4 footer 常驻：每一帧末尾都有 `Ctrl+S  save as default` 与折叠的三个快捷键", async () => {
+await step("J4 footer 常驻：每一帧末尾都有 `Ctrl+S 保存为默认` 与折叠的三个快捷键", async () => {
   const delta = await driveSettings([K.down, K.esc]);
   const frames = settingsDriver.renders;
   assert.ok(frames.length >= 2, "应有按键后的渲染快照");
   for (const frame of frames) {
     const tail = frame.slice(-4).join("\n");
-    assert.match(tail, /Ctrl\+S  save as default/, `footer 丢了 Ctrl+S 提示:\n${tail}`);
-    assert.match(tail, /Ctrl\+T test/, `footer 丢了 test 快捷键:\n${tail}`);
-    assert.match(tail, /Ctrl\+O status/, `footer 丢了状态总览快捷键:\n${tail}`);
+    assert.match(tail, /Ctrl\+S 保存为默认/, `footer 丢了 Ctrl+S 提示:\n${tail}`);
+    assert.match(tail, /Ctrl\+T 自检/, `footer 丢了自检快捷键:\n${tail}`);
+    assert.match(tail, /Ctrl\+O 状态与诊断/, `footer 丢了状态与诊断快捷键:\n${tail}`);
+    assert.ok(!/save as default/.test(tail), `footer 不应再是英文:\n${tail}`);
   }
   assert.equal(delta.deliveries.length, 0);
 });
@@ -996,7 +1044,11 @@ await step("J5 Enter 只改本对话：立即生效，但用户文件一个字�
   // press of down reaches false.
   const keys = await keysToItem("rules.runCompleted.enabled", [K.down, K.enter]);
   const delta = await driveSettings(keys);
-  assert.match(settingsDriver.renders.at(-3).join("\n"), /已应用（仅本对话）/, "缺少轻量确认");
+  const applied = settingsDriver.renders.at(-3).join("\n");
+  assert.match(applied, /已应用（仅本对话）/, "缺少轻量确认");
+  assert.match(applied, /通知规则 · 运行完成 · 开关/, `反馈应写明配置项名称:\n${applied}`);
+  assert.match(applied, /= 关闭/, `反馈应写明当前值:\n${applied}`);
+  assert.match(applied, /本对话/, `反馈应写明作用范围:\n${applied}`);
   assert.equal(fs.readFileSync(settings.userConfigPath, "utf8"), before, "Enter 不得写用户文件");
   const run = await settings.prompt();
   assert.equal(run.deliveries.length, 0, "本对话选择未立即生效");
@@ -1025,6 +1077,9 @@ await step("J7 Ctrl+S：只写这一项到用户默认文件，且标记与状�
   );
   const frame = settingsDriver.renders.at(-1).join("\n");
   assert.match(frame, /已保存为默认/, "缺少保存确认");
+  assert.match(frame, /通知规则 · 运行完成 · 开关/, `保存确认应写明配置项名称:\n${frame}`);
+  assert.match(frame, /= 关闭/, `保存确认应写明当前值:\n${frame}`);
+  assert.match(frame, /以后默认/, `保存确认应写明作用范围:\n${frame}`);
   assert.deepEqual(
     readSparse(settings),
     { rules: { runCompleted: { enabled: false } } },
@@ -1042,7 +1097,7 @@ await step("J8 Ctrl+S 再保存另一项：两项并存，其余字段不出现"
   });
 });
 
-await step("J9 Ctrl+R 重读配置、Ctrl+O 状态总览可用且不产生副作用", async () => {
+await step("J9 Ctrl+R 重读配置、Ctrl+O 状态与诊断可用且不产生副作用", async () => {
   const reload = await driveSettings([K.ctrlR, K.esc]);
   assert.ok(reload.plugin.some((row) => row.event === "notify_reload"));
   assert.match(settingsDriver.renders[0].join("\n"), /已重新读取配置/);
@@ -1050,10 +1105,19 @@ await step("J9 Ctrl+R 重读配置、Ctrl+O 状态总览可用且不产生副作
 
   const status = await driveSettings([K.ctrlO, K.down, K.esc]);
   const frame = settingsDriver.renders[1].join("\n");
-  assert.match(frame, /配置来源/, `状态总览应显示状态文本:\n${frame}`);
+  assert.match(frame, /配置来源/, `状态页应显示状态文本:\n${frame}`);
   assert.match(frame, /投递统计/);
-  assert.equal(status.deliveries.length, 0, "状态总览只读，不得产生投递");
+  assert.match(frame, /送达前提/, `状态页应说明送达前提:\n${frame}`);
+  assert.match(frame, /自检/, `状态页应区分“提交自检”与“实际投递”:\n${frame}`);
+  assert.equal(status.deliveries.length, 0, "状态页只读，不得产生投递");
   assert.equal(status.notifies, 0);
+  assert.deepEqual(settings.runtimeErrors, []);
+});
+
+await step("J9b 状态与诊断：可见“重新读取配置”动作触发真实重读", async () => {
+  const delta = await driveSettings([K.ctrlO, K.enter, K.esc, K.esc]);
+  assert.ok(delta.plugin.some((row) => row.event === "notify_reload"), "状态页 Enter 应触发重读");
+  assert.match(settingsDriver.renders[1].join("\n"), /重新读取配置/, "状态页应显示可见的重读入口");
   assert.deepEqual(settings.runtimeErrors, []);
 });
 
@@ -1089,7 +1153,9 @@ await step("J12 写盘失败：状态行报错、标记不迁移、内存里当�
   const delta = await driveSettings([K.ctrlS, K.esc]);
   const frame = settingsDriver.renders.at(-1).join("\n");
   assert.match(frame, /保存失败/, `状态行应报错:\n${frame}`);
-  assert.ok(!frame.includes(" · default") || !frame.includes("已保存为默认"));
+  assert.match(frame, /基础 · 启用通知/, `保存失败应写明配置项名称:\n${frame}`);
+  assert.match(frame, /用户文件未改动/, `保存失败应说明用户文件没有被改动:\n${frame}`);
+  assert.ok(!frame.includes("· 默认") || !frame.includes("已保存为默认"));
   assert.deepEqual(settings.runtimeErrors, []);
   fs.writeFileSync(settings.userConfigPath, before);
   // After the broken file is repaired the behaviour is normal again.
@@ -1109,10 +1175,140 @@ await step("J13 强制静默不可被界面绕过：不允许把 enabled 打开�
     );
     const raw = settings.readUserConfigRaw();
     assert.equal(raw?.enabled, undefined, "强制关闭不得被写成用户默认");
+
+    // Restoring the master switch's built-in default confirms the default is back to on, yet the
+    // session-level silence still wins; the surface must say so instead of implying it is live.
+    const settingsModule = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "settings.ts")).href);
+    const items = settingsModule.buildSettingItems(configModule.defaultConfig());
+    await driveSettings(keysAlongRoute(settingsModule, items, "enabled", { open: false, after: ["?", "d", K.down, K.enter] }));
+    const restoreFrames = settingsDriver.renders.map((frame) => frame.join("\n"));
+    assert.ok(
+      restoreFrames.some((frame) => /仍被强制静默|仍强制静默/.test(frame)),
+      `恢复总开关默认后应说明仍被强制静默:\n${restoreFrames.at(-2)}`,
+    );
+    assert.equal(settings.readUserConfigRaw()?.enabled, undefined, "恢复不得把强制关闭写成用户默认");
   } finally {
     delete process.env.PI_NOTIFY_DISABLE;
   }
   assert.deepEqual(settings.runtimeErrors, []);
+});
+
+const channelsDriver = createUiDriver();
+const channels = await makeHost({
+  label: "channels",
+  extensions: [PROBE_ENTRY, PLUGIN_ENTRY],
+  mode: "tui",
+  userConfig: {
+    version: 1,
+    coalesce: { windowMs: 0, cooldownMs: 0 },
+    providers: [
+      { id: "terminal", type: "terminal", enabled: true, options: {} },
+      { id: "debug", type: "debug", enabled: true, options: { url: "https://example.invalid/hook" }, note: "keep-me" },
+    ],
+  },
+  driver: channelsDriver,
+});
+await channels.useModel("probe-fake", "fake-model");
+
+/** Opens the settings UI on the two-channel host with a key sequence and the real command dispatch. */
+async function driveChannels(keys) {
+  channelsDriver.setKeys(keys);
+  channelsDriver.opened = false;
+  const delta = await channels.command("/notify");
+  assert.equal(channelsDriver.opened, true, "TUI 下 /notify 应打开设置组件");
+  return delta;
+}
+
+await step("J13b 渠道保存隔离：Ctrl+S 只改目标渠道，不固化其他渠道的本对话选择/options/未知字段", async () => {
+  const settingsModule = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "settings.ts")).href);
+  const items = settingsModule.buildSettingItems(configModule.loadConfig({ agentDir: channels.agentDir }).config);
+  const route = (id, options) => keysAlongRoute(settingsModule, items, id, options);
+
+  // 1) 本对话把 debug 关掉（只写会话 overlay，不碰用户文件）。
+  await driveChannels(route("provider:debug", { open: true, after: [K.down, K.enter] }));
+  const toggled = channelsDriver.renders.map((frame) => frame.join("\n"));
+  assert.ok(
+    toggled.some((frame) => /渠道 · debug/.test(frame) && /关闭/.test(frame)),
+    `debug 的本对话选择未生效:\n${toggled.at(-1)}`,
+  );
+
+  // 2) 本对话把 terminal 也关掉，再 Ctrl+S 固化它（此时已生效值是关闭）。
+  await driveChannels(route("provider:terminal", { open: true, after: [K.down, K.enter] }));
+  await driveChannels(route("provider:terminal", { open: false, after: [K.ctrlS] }));
+  const savedFrame = channelsDriver.renders.at(-1).join("\n");
+  assert.match(savedFrame, /已保存为默认/, `缺少保存确认:\n${savedFrame}`);
+  assert.match(savedFrame, /渠道 · terminal/, savedFrame);
+  assert.match(savedFrame, /以后默认/, savedFrame);
+
+  const raw = channels.readUserConfigRaw();
+  assert.equal(Array.isArray(raw.providers), true, `providers 应保留为数组: ${JSON.stringify(raw.providers)}`);
+  assert.equal(raw.providers.length, 2, `其他渠道不得被删除或新增: ${JSON.stringify(raw.providers)}`);
+  const terminal = raw.providers.find((provider) => provider.id === "terminal");
+  const debug = raw.providers.find((provider) => provider.id === "debug");
+  assert.equal(terminal.enabled, false, "目标渠道未按已生效值写入");
+  assert.deepEqual(terminal.options, {}, "目标渠道的定义（options）不得被改写");
+  assert.deepEqual(debug, {
+    id: "debug",
+    type: "debug",
+    enabled: true,
+    options: { url: "https://example.invalid/hook" },
+    note: "keep-me",
+  }, `其他渠道的本对话选择/options/未知字段被写进了用户文件: ${JSON.stringify(debug)}`);
+  assert.deepEqual(channels.runtimeErrors, []);
+});
+
+await step("J13c 无启用渠道：首页与状态页都直说是送达前提问题", async () => {
+  const noChannelDriver = createUiDriver();
+  const noChannel = await makeHost({
+    label: "no-channel",
+    extensions: [PROBE_ENTRY, PLUGIN_ENTRY],
+    mode: "tui",
+    userConfig: { providers: [{ id: "terminal", type: "terminal", enabled: false, options: {} }] },
+    driver: noChannelDriver,
+  });
+  noChannelDriver.setKeys([K.esc]);
+  await noChannel.command("/notify");
+  assert.match(noChannelDriver.renders[0].join("\n"), /无启用渠道/, "首页应直说没有启用渠道");
+
+  noChannelDriver.setKeys([K.ctrlO, K.esc, K.esc]);
+  await noChannel.command("/notify");
+  assert.match(noChannelDriver.renders[0].join("\n"), /没有启用的渠道/, "状态页应解释送达前提");
+  assert.deepEqual(noChannel.runtimeErrors, []);
+});
+
+await step("J13d 清空最后一个覆盖后 /reload 不复活旧值", async () => {
+  const overlayDriver = createUiDriver();
+  const overlayHost = await makeHost({
+    label: "overlay-clear",
+    extensions: [PROBE_ENTRY, PLUGIN_ENTRY],
+    mode: "tui",
+    userConfig: NO_COALESCE,
+    driver: overlayDriver,
+  });
+  await overlayHost.useModel("probe-fake", "fake-model");
+  const driveOverlay = async (keys) => {
+    overlayDriver.setKeys(keys);
+    overlayDriver.opened = false;
+    const delta = await overlayHost.command("/notify");
+    assert.equal(overlayDriver.opened, true, "TUI 下 /notify 应打开设置组件");
+    return delta;
+  };
+  const settingsModule = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "settings.ts")).href);
+  const items = settingsModule.buildSettingItems(configModule.loadConfig({ agentDir: overlayHost.agentDir }).config);
+
+  // 1) Conversation override: runCompleted off, so the run stops being delivered.
+  await driveOverlay(keysAlongRoute(settingsModule, items, "rules.runCompleted.enabled", { open: true, after: [K.down, K.enter] }));
+  assert.equal((await overlayHost.prompt()).deliveries.length, 0, "本对话覆盖未生效");
+
+  // 2) “沿用以后默认” from the field-detail action area clears the override.
+  await driveOverlay(keysAlongRoute(settingsModule, items, "rules.runCompleted.enabled", { open: false, after: ["?", "a"] }));
+  assert.equal((await overlayHost.prompt()).deliveries.length, 1, "沿用以后默认后应恢复送达");
+
+  // 3) A reload must not resurrect the cleared override: the empty snapshot is the last entry.
+  const reloaded = await overlayHost.during(() => overlayHost.session.reload());
+  assert.ok(reloaded.plugin.some((row) => row.event === "config_loaded"), "reload 应重读配置");
+  assert.equal((await overlayHost.prompt()).deliveries.length, 1, "reload 后旧覆盖不得复活");
+  assert.deepEqual(overlayHost.runtimeErrors, []);
 });
 
 await step("J14 非 TUI 模式守卫：print/json/rpc 都不打开组件、不写盘、凭据不外泄", async () => {

@@ -261,9 +261,12 @@ export default function piNotification(pi: ExtensionAPI): void {
     }
   }
 
-  /** Each overlay is a full snapshot, so a restore simply takes the last matching entry. */
+  /**
+   * Each overlay is a full snapshot, including the empty one: that is how “everything was cleared”
+   * is expressed, so a later `/reload` cannot resurrect the previous entry's choices. Skipping the
+   * empty snapshot here would make the last non-empty entry win again on restore.
+   */
   function persistOverlay(): void {
-    if (isEmptyOverlay(overlay)) return;
     try {
       pi.appendEntry(SESSION_OVERLAY_ENTRY, {
         sessionId: currentSessionId,

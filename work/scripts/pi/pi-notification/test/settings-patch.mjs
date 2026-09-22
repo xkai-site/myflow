@@ -118,7 +118,8 @@ await step("S1 overlay 形状防御：空 overlay 与非法条目", () => {
 
   assert.equal(settings.overlayFromEntry(undefined), undefined);
   assert.equal(settings.overlayFromEntry(42), undefined);
-  assert.equal(settings.overlayFromEntry({ patch: {}, providers: {} }), undefined, "空条目等同于没有覆盖");
+  assert.deepEqual(settings.overlayFromEntry({ patch: {}, providers: {} }), { patch: {}, providers: {} },
+    "空快照是合法状态（已清空），必须保留以免 /reload 复活旧值");
   assert.deepEqual(settings.overlayFromEntry({ patch: "broken", providers: { a: "yes", b: true } }), {
     patch: {},
     providers: { b: true },
@@ -168,10 +169,238 @@ await step("S4 candidatesOf：枚举项给出全部候选，时间项给出预�
     ["info", "warning", "error"],
   );
   assert.equal(settings.candidatesOf(itemOf("quietHours.start"), config.defaultConfig()).length, 7);
-  assert.equal(settings.CUSTOM_ROW_LABEL, "custom…", "custom 行标签是 UI 与测试共用的常量");
+  assert.equal(settings.CUSTOM_ROW_LABEL, "自定义…", "custom 行标签是 UI 与测试共用的常量");
   assert.deepEqual(
     settings.candidatesOf(itemOf("quietHours.enabled"), config.defaultConfig()).map((candidate) => candidate.value),
     [true, false],
+  );
+});
+
+await step("S5 中文化只改展示：值/配置键不变，阈值与规则严重程度使用不同文案", () => {
+  const labels = (id) => settings.candidatesOf(itemOf(id), config.defaultConfig()).map((candidate) => candidate.label);
+  // Values stay the enum ids; only the labels are translated.
+  assert.deepEqual(labels("minLevel"), ["所有等级", "警告及错误", "仅错误"], "通知门槛应表达“及以上”");
+  assert.deepEqual(labels("rules.runFailed.level"), ["提示", "警告", "错误"], "规则严重程度用常见日志等级名");
+  assert.deepEqual(labels("rules.toolFailed.mode"), ["并入结果", "立即提醒"], "策略不应再是 aggregate/immediate");
+  assert.deepEqual(labels("rules.waitingForUser.kinds"), ["选择", "确认", "输入", "编辑器"]);
+  assert.deepEqual(labels("quietHours.exceptLevels"), ["提示", "警告", "错误"]);
+  assert.deepEqual(labels("content.includeCost"), ["开启", "关闭"], "布尔候选项不应再露出 true/false");
+  assert.deepEqual(labels("provider:terminal"), ["开启", "关闭"]);
+
+  // format() is the single display path: parent rows, detail rows and the summary all read it.
+  assert.equal(itemOf("minLevel").format("error"), "仅错误");
+  assert.equal(itemOf("rules.runFailed.level").format("error"), "错误");
+  assert.equal(itemOf("content.includeCost").format(false), "关闭");
+  assert.equal(itemOf("rules.runCompleted.channels").format(["terminal", "hook"]), "terminal、hook");
+  assert.equal(itemOf("quietHours.exceptLevels").format(["error"]), "错误");
+  assert.equal(itemOf("provider:terminal").format(false), "关闭");
+  assert.equal(itemOf("content.includeCost").format(undefined), "—");
+});
+
+await step("S6 时长展示用易读单位，输入写明单位与范围（底层仍为毫秒整数）", () => {
+  const windowItem = itemOf("coalesce.windowMs");
+  assert.equal(windowItem.format(1500), "1.5 秒");
+  assert.equal(windowItem.format(3000), "3 秒");
+  assert.equal(windowItem.format(60000), "60 秒");
+  assert.equal(windowItem.format(200), "200 毫秒");
+  assert.equal(windowItem.format(0), "0 毫秒");
+  // Non-round values keep their precision instead of being rounded away.
+  assert.equal(windowItem.format(4321), "4.321 秒");
+  assert.equal(itemOf("delivery.timeoutMs").format(10500), "10.5 秒");
+  // Presets go through the same formatter, so the list is not a mix of units.
+  assert.deepEqual(
+    settings.candidatesOf(windowItem, config.defaultConfig()).map((candidate) => candidate.label),
+    ["0 毫秒", "1.5 秒", "3 秒", "10 秒", "60 秒"],
+  );
+  // A unitless number stays a bare integer.
+  assert.equal(itemOf("delivery.maxRetries").format(2), "2");
+
+  assert.equal(windowItem.inputHint, "整数 0..600000（毫秒）");
+  assert.equal(itemOf("delivery.timeoutMs").inputHint, "整数 1..120000（毫秒）");
+  assert.equal(itemOf("delivery.maxRetries").inputHint, "整数 0..10");
+  assert.equal(itemOf("quietHours.start").inputHint, "HH:MM（00:00–23:59）");
+
+  // Parsing still produces plain milliseconds and still rejects out-of-range input with the unit.
+  assert.deepEqual(windowItem.parseInput("4321"), { ok: true, value: 4321 });
+  const outOfRange = windowItem.parseInput("999999");
+  assert.equal(outOfRange.ok, false);
+  assert.match(outOfRange.message, /0\.\.600000/);
+  assert.match(outOfRange.message, /毫秒/);
+});
+
+await step("S7 来源按 overlay 存在性判定：false / 空集合 / 与默认同值都算“已覆盖”", () => {
+  const boolItem = itemOf("content.includeCost");
+  const channelsItem = itemOf("rules.runCompleted.channels");
+  const minLevelItem = itemOf("minLevel");
+
+  // false is a value, not “no override”: comparing values would misreport it as inherited.
+  assert.equal(settings.sessionOverrideValue({ patch: { content: { includeCost: false } }, providers: {} }, boolItem), false);
+  assert.equal(settings.sessionOverrideValue({ patch: {}, providers: {} }, boolItem), undefined);
+  // An empty collection is still an explicit choice.
+  assert.deepEqual(
+    settings.sessionOverrideValue({ patch: { rules: { runCompleted: { channels: [] } } }, providers: {} }, channelsItem),
+    [],
+  );
+  assert.equal(settings.sessionOverrideValue({ patch: { rules: {} }, providers: {} }, channelsItem), undefined);
+  // Same value as the user default: presence decides, so it still counts as a conversation override.
+  assert.equal(settings.sessionOverrideValue({ patch: { minLevel: "info" }, providers: {} }, minLevelItem), "info");
+  assert.equal(settings.sessionOverrideValue({ patch: { minLevel: "error" }, providers: {} }, minLevelItem), "error");
+
+  // Channel switches live in the provider map, and a false switch is a real override.
+  const terminal = itemOf("provider:terminal");
+  assert.equal(settings.sessionOverrideValue({ patch: {}, providers: { terminal: false } }, terminal), false);
+  assert.equal(settings.sessionOverrideValue({ patch: {}, providers: { terminal: true } }, terminal), true);
+  assert.equal(settings.sessionOverrideValue({ patch: {}, providers: {} }, terminal), undefined);
+});
+
+await step("S8 渠道内置缺省：开关缺省为开启；定义来源看用户文件，不看同名 id", () => {
+  const terminal = itemOf("provider:terminal");
+  assert.equal(settings.builtinDefaultValue(terminal), true, "渠道开关的内置缺省是开启");
+  assert.equal(settings.builtinDefaultValue(itemOf("minLevel")), "info");
+  assert.equal(settings.builtinDefaultValue(itemOf("content.includeCost")), true);
+  // Definition origin: the user file is the only layer that can provide a definition besides the
+  // factory defaults, so a same-named user entry still means “user-provided”.
+  assert.equal(settings.providerDefinitionSource(terminal, undefined), "default");
+  assert.equal(settings.providerDefinitionSource(terminal, { providers: [{ id: "terminal", type: "webhook" }] }), "user");
+  assert.equal(settings.providerDefinitionSource(terminal, { providers: "broken" }), "default");
+
+  const customConfig = config.defaultConfig();
+  customConfig.providers = [{ id: "team.myhook", type: "debug", enabled: false, options: {} }];
+  const custom = settings.buildSettingItems(customConfig).find((item) => item.providerId === "team.myhook");
+  assert.ok(custom, "自定义渠道项缺失");
+  assert.equal(settings.providerDefinitionSource(custom, undefined), "default", "用户文件没写就按出厂默认处理");
+  assert.equal(settings.providerDefinitionSource(custom, { providers: [{ id: "team.myhook" }] }), "user");
+  // The switch itself still has a built-in default of on, matching checkProviders.
+  assert.equal(settings.builtinDefaultValue(custom), true, "自定义渠道的开关内置缺省仍为开启");
+
+  // A dotted id is addressed as a whole (array lookup / overlay map key), never split as a path.
+  assert.equal(custom.userPath, "providers.team.myhook.enabled");
+  assert.equal(settings.hasUserDefault({ providers: [{ id: "team.myhook", enabled: false }] }, custom), true);
+  assert.equal(settings.userDefaultValue({ providers: [{ id: "team.myhook", enabled: false }] }, custom), false);
+  assert.equal(settings.hasUserDefault({ providers: [{ id: "team.my", enabled: false }] }, custom), false);
+  assert.equal(settings.sessionOverrideValue({ patch: {}, providers: { "team.myhook": false } }, custom), false);
+  assert.equal(settings.sessionOverrideValue({ patch: {}, providers: { team: true } }, custom), undefined);
+
+  // Prototype members are not overrides: ids like `toString` / `constructor` must be read as own keys.
+  const weirdConfig = config.defaultConfig();
+  weirdConfig.providers = [
+    { id: "toString", type: "debug", enabled: true, options: {} },
+    { id: "constructor", type: "debug", enabled: true, options: {} },
+  ];
+  const weirdItems = settings.buildSettingItems(weirdConfig);
+  for (const id of ["toString", "constructor"]) {
+    const weird = weirdItems.find((item) => item.providerId === id);
+    assert.ok(weird, `缺少渠道项 ${id}`);
+    assert.equal(settings.sessionOverrideValue({ patch: {}, providers: {} }, weird), undefined, `${id} 不得把原型成员当覆盖`);
+    assert.equal(settings.sessionOverrideValue({ patch: {}, providers: { [id]: false } }, weird), false);
+  }
+});
+
+await step("S9 渠道用户文件补丁：只改目标 enabled，保留 options/未知字段/其他渠道", () => {
+  const raw = {
+    providers: [
+      { id: "terminal", type: "terminal", enabled: true, options: {} },
+      { id: "debug", type: "debug", enabled: true, options: { url: "https://example.invalid/hook" }, note: "keep-me" },
+    ],
+  };
+  const patched = settings.channelUserFilePatch(raw, "terminal", "terminal", false);
+  assert.deepEqual(patched, {
+    providers: [
+      { id: "terminal", type: "terminal", enabled: false, options: {} },
+      { id: "debug", type: "debug", enabled: true, options: { url: "https://example.invalid/hook" }, note: "keep-me" },
+    ],
+  }, `只应改目标渠道的 enabled: ${JSON.stringify(patched)}`);
+  // 数组是整体替换的字段，补丁必须带完整数组。
+  assert.equal(Array.isArray(patched.providers), true);
+  // 入参保持不变（不把别的渠道的本对话选择/options 当输入改掉）。
+  assert.equal(raw.providers[0].enabled, true);
+  assert.equal(raw.providers[1].enabled, true);
+
+  // 只存在于出厂默认的渠道：新增最小条目，不复制出厂 options。
+  assert.deepEqual(
+    settings.channelUserFilePatch(undefined, "terminal", "terminal", false),
+    { providers: [{ id: "terminal", type: "terminal", enabled: false }] },
+  );
+  // providers 不是数组时按空数组重建为合法数组。
+  assert.deepEqual(
+    settings.channelUserFilePatch({ providers: "broken" }, "terminal", "terminal", false),
+    { providers: [{ id: "terminal", type: "terminal", enabled: false }] },
+  );
+  // 目标不在用户文件里时只追加，不重写已有条目。
+  const appended = settings.channelUserFilePatch({ providers: [{ id: "debug", enabled: true, options: { tag: 1 } }] }, "terminal", "terminal", false);
+  assert.deepEqual(appended, {
+    providers: [
+      { id: "debug", enabled: true, options: { tag: 1 } },
+      { id: "terminal", type: "terminal", enabled: false },
+    ],
+  });
+});
+
+await step("S10 恢复清空最后一个 overlay：空快照仍然被认作有效快照（不复活旧值）", () => {
+  const entry = (sessionId, patch) => ({
+    type: "custom",
+    customType: settings.SESSION_OVERLAY_ENTRY,
+    data: { sessionId, patch, providers: {} },
+  });
+  const entries = [entry("s", { minLevel: "error" }), entry("s", {})];
+  assert.deepEqual(
+    settings.restoreOverlayFromEntries(entries, "s"),
+    { patch: {}, providers: {} },
+    "最后一条空快照表示已清空，不能被忽略而恢复成 error",
+  );
+});
+
+await step("S11 removePath：删除单项并剪空祖先，保留旁支，缺失即幂等零变化", () => {
+  assert.deepEqual(
+    patch.removePath({ content: { includeCost: false, includeDuration: true } }, "content.includeCost"),
+    { content: { includeDuration: true } },
+    "应删除单项并保留兄弟字段",
+  );
+  assert.deepEqual(
+    patch.removePath({ content: { includeCost: false } }, "content.includeCost"),
+    {},
+    "删空祖先对象，但不动其它分支",
+  );
+  assert.deepEqual(
+    patch.removePath({ content: { includeCost: false }, coalesce: { windowMs: 0 } }, "content.includeCost"),
+    { coalesce: { windowMs: 0 } },
+    "旁支必须保留",
+  );
+  assert.deepEqual(patch.removePath({}, "content.includeCost"), {}, "缺失路径是零变化");
+  assert.deepEqual(patch.removePath(undefined, "enabled"), {}, "没有用户文件时结果是空对象");
+  const source = { content: { includeCost: false } };
+  patch.removePath(source, "content.includeCost");
+  assert.deepEqual(source, { content: { includeCost: false } }, "入参不得被修改");
+});
+
+await step("S12 removeArrayEntryField：按 provider id 删一个字段，保留定义/options/未知字段/其它渠道", () => {
+  const raw = {
+    providers: [
+      { id: "terminal", type: "terminal", enabled: false, options: {} },
+      { id: "debug", type: "debug", enabled: false, options: { url: "https://example.invalid" }, note: "keep" },
+    ],
+  };
+  assert.deepEqual(patch.removeArrayEntryField(raw, "providers", "terminal", "enabled"), {
+    providers: [
+      { id: "terminal", type: "terminal", options: {} },
+      { id: "debug", type: "debug", enabled: false, options: { url: "https://example.invalid" }, note: "keep" },
+    ],
+  });
+  assert.equal(raw.providers[0].enabled, false, "入参不得被修改");
+  assert.deepEqual(patch.removeArrayEntryField({ providers: "broken" }, "providers", "terminal", "enabled"), { providers: "broken" }, "非数组时零变化");
+  assert.deepEqual(patch.removeArrayEntryField({}, "providers", "terminal", "enabled"), {}, "缺失即零变化");
+});
+
+await step("S13 clearItemOverride：只清目标项的本对话覆盖（普通字段/渠道都支持）", () => {
+  const minLevel = itemOf("minLevel");
+  const terminal = itemOf("provider:terminal");
+  assert.deepEqual(
+    settings.clearItemOverride({ patch: { minLevel: "error", enabled: false }, providers: {} }, minLevel),
+    { patch: { enabled: false }, providers: {} },
+  );
+  assert.deepEqual(
+    settings.clearItemOverride({ patch: {}, providers: { terminal: false, debug: true } }, terminal),
+    { patch: {}, providers: { debug: true } },
   );
 });
 

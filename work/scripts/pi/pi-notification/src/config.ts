@@ -21,7 +21,7 @@ import { closeSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, w
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
-import { isPlainObject, mergePatch, type ConfigPatch } from "./patch.ts";
+import { isPlainObject, mergePatch, removeArrayEntryField, removePath, type ConfigPatch } from "./patch.ts";
 
 import type {
   NotificationConfig,
@@ -540,6 +540,36 @@ export function writeUserDefault(agentDir: string, patch: ConfigPatch): ConfigWr
   // the full field validation, so an illegal value is always refused.
   const merged = mergeConfig(defaultConfig(), sparse, file);
   if (merged.errors.length > 0) return { ok: false, problems: merged.errors };
+  const written = atomicWriteConfig(agentDir, `${JSON.stringify(sparse, null, 2)}\n`);
+  if (!written.ok) return written;
+  return { ok: true, config: merged.config, problems: [], warnings: merged.warnings };
+}
+
+/**
+ * Removes one item from the sparse user file atomically (the restore operation).
+ *
+ * `path` deletes a plain field (pruning empty ancestors); `provider` deletes just that channel's
+ * `enabled`, keeping the definition. A missing file or a field that is not there is a success
+ * without a write, so repeating a restore is idempotent and never creates a config file. A corrupt
+ * file is refused, because overwriting it would freeze the degraded result into the user defaults.
+ */
+export function deleteUserDefault(
+  agentDir: string,
+  removal: { kind: "path"; path: string } | { kind: "provider"; id: string },
+): ConfigWriteResult {
+  const file = userConfigPath(agentDir);
+  const current = readUserConfigRaw(agentDir);
+  if (!current.ok) return { ok: false, problems: current.problems };
+  const base = current.raw ?? {};
+  const sparse = removal.kind === "path"
+    ? removePath(base, removal.path)
+    : removeArrayEntryField(base, "providers", removal.id, "enabled");
+  const merged = mergeConfig(defaultConfig(), sparse, file);
+  if (merged.errors.length > 0) return { ok: false, problems: merged.errors };
+  if (JSON.stringify(sparse) === JSON.stringify(base)) {
+    // Nothing to delete (missing file or already restored): do not create or rewrite the file.
+    return { ok: true, config: merged.config, problems: [], warnings: merged.warnings };
+  }
   const written = atomicWriteConfig(agentDir, `${JSON.stringify(sparse, null, 2)}\n`);
   if (!written.ok) return written;
   return { ok: true, config: merged.config, problems: [], warnings: merged.warnings };
