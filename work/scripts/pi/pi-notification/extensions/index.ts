@@ -303,7 +303,7 @@ export default function piNotification(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("notify", {
-    description: "通知设置（单一入口：分类浏览、Ctrl+S 保存为默认）",
+    description: "Notification Center",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       try {
         await handleNotifyCommand(args, ctx, {

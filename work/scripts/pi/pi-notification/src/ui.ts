@@ -113,7 +113,8 @@ const DEFAULT_SUFFIX_MIN_WIDTH = 24;
 /** Trailing marker of a row that opens another page. */
 const OPEN_MARK = " ›";
 
-const FOOTER_KEY_HINTS = "Ctrl+T 自检   Ctrl+R 重读   Ctrl+O 状态与诊断";
+const FOOTER_KEY_HINTS = "更多设置中可进行测试、重读与诊断";
+const STATUS_KEY_HINTS = "Ctrl+T 自检   Ctrl+R 重读   Ctrl+O 状态与诊断";
 
 const ACTION_LABELS: Record<"test" | "status" | "reload" | "search" | "preview", string> = {
   test: "发送测试通知",
@@ -258,24 +259,21 @@ export class NotifySettingsComponent {
     for (const category of SETTING_CATEGORIES) {
       rows.push({ key: `category:${category.id}`, kind: "category", category });
     }
-    rows.push({ key: "action:test", kind: "action", action: "test" });
-    rows.push({ key: "action:status", kind: "action", action: "status" });
-    rows.push({ key: "action:search", kind: "action", action: "search" });
-    return { kind: "menu", id: "home", title: "通知设置", rows, focus: 0 };
+    return { kind: "menu", id: "home", title: "通知", rows, focus: 0 };
   }
 
   private buildCategoryPage(category: SettingCategory): MenuPage {
     if (category.kind === "rules") {
       const rows: MenuRow[] = RULE_INFOS.map((rule) => ({ key: `rule:${rule.key}`, kind: "rule", rule }));
-      return { kind: "menu", id: `category:${category.id}`, title: `通知设置 › ${category.label}`, rows, focus: 0 };
+      return { kind: "menu", id: `category:${category.id}`, title: category.label, rows, focus: 0 };
     }
     const { items, collapsed } = categoryPageItems(category, this.items, this.host.config());
     const rows: MenuRow[] = items.map((item) => ({ key: `item:${item.id}`, kind: "field", item, label: item.label }));
-    for (const action of category.actions ?? []) rows.push({ key: action.key, kind: "action", action: action.action });
     if (category.collapsed && collapsed.length > 0) {
       rows.push({ key: `subgroup:${category.id}`, kind: "subgroup", category });
     }
-    return { kind: "menu", id: `category:${category.id}`, title: `通知设置 › ${category.label}`, rows, focus: 0 };
+    for (const action of category.actions ?? []) rows.push({ key: action.key, kind: "action", action: action.action });
+    return { kind: "menu", id: `category:${category.id}`, title: category.label, rows, focus: 0 };
   }
 
   /** Sub-page of the parameters a disabled feature collapsed; the rows are the hidden fields. */
@@ -285,14 +283,14 @@ export class NotifySettingsComponent {
       .filter((item) => ids.has(item.id))
       .map((item) => ({ key: `item:${item.id}`, kind: "field", item, label: item.label }));
     const label = category.collapsed?.label ?? category.label;
-    return { kind: "menu", id: `subgroup:${category.id}`, title: `通知设置 › ${category.label} › ${label}`, rows, focus: 0 };
+    return { kind: "menu", id: `subgroup:${category.id}`, title: label, rows, focus: 0 };
   }
 
   /** Read-only status page: one actionable row (reload) plus the host's status lines as text rows. */
   private buildStatusPage(): MenuPage {
     const rows: MenuRow[] = [{ key: "action:reload", kind: "action", action: "reload" }];
     this.host.statusLines().forEach((text, index) => rows.push({ key: `text:${index}`, kind: "text", text }));
-    return { kind: "menu", id: "status", title: "通知设置 › 状态与诊断", rows, focus: 0 };
+    return { kind: "menu", id: "status", title: "状态与诊断", rows, focus: 0 };
   }
 
   private buildRulePage(rule: { key: string; label: string }): MenuPage {
@@ -300,7 +298,7 @@ export class NotifySettingsComponent {
       .filter((item) => item.rule?.key === rule.key)
       // The page title already names the rule, so the row label drops the repeated prefix.
       .map((item) => ({ key: `item:${item.id}`, kind: "field" as const, item, label: item.label.replace(`${rule.label} · `, "") }));
-    return { kind: "menu", id: `rule:${rule.key}`, title: `通知设置 › 通知规则 · ${rule.label}`, rows, focus: 0 };
+    return { kind: "menu", id: `rule:${rule.key}`, title: rule.label, rows, focus: 0 };
   }
 
   /** Rebuilds a menu page from its stable id and keeps the focused row key when it still exists. */
@@ -454,7 +452,12 @@ export class NotifySettingsComponent {
     for (const hint of this.footerHints()) lines.push(truncateToWidth(this.theme.fg("dim", hint), content));
     const message = this.message;
     const paint = message ? this.colorForTone(message.tone) : (text: string) => this.theme.fg("dim", text);
-    const messageText = message ? message.text : "当前值仅本对话生效；Ctrl+S 固化到用户默认";
+    const fieldFocused = this.focusedFieldItem() !== undefined && (this.view.kind === "menu" || this.view.kind === "detail");
+    const messageText = message
+      ? message.text
+      : fieldFocused
+        ? "Enter 修改本次对话；Ctrl+S 设为以后默认"
+        : "";
     // Bounded and wrapped, so the item name, scope and failure text stay readable without a long
     // message pushing the list off screen.
     for (const line of this.boundedWrap(messageText, content, 3)) lines.push(truncateToWidth(paint(line), content));
@@ -491,11 +494,11 @@ export class NotifySettingsComponent {
     if (view.kind === "confirm") return ["↑↓ 选择   Enter 确认   Esc 取消（默认取消）"];
     if (view.kind === "preview") return ["↑↓ 滚动   Esc 返回"];
     if (view.kind === "help") return ["a 沿用以后默认   d 恢复内置默认   ↑↓ 滚动   Esc 返回", FOOTER_KEY_HINTS];
-    if (view.kind === "menu" && view.id === "status") return ["↑↓ 滚动   Enter 重读配置   Esc 返回", FOOTER_KEY_HINTS];
+    if (view.kind === "menu" && view.id === "status") return ["↑↓ 滚动   Enter 重读配置   Esc 返回", STATUS_KEY_HINTS];
     if (view.kind === "menu" && view.rows[view.focus]?.kind !== "field") {
       return ["↑↓ 移动   Enter 打开   Esc 返回", FOOTER_KEY_HINTS];
     }
-    return ["Ctrl+S 保存为默认   ↑↓ 移动   Enter 打开/选择   Space 切换   Esc 返回", FOOTER_KEY_HINTS];
+    return ["↑↓ 移动   Enter 修改   Space 快速切换   Esc 返回", "Ctrl+S 设为以后默认"];
   }
 
   /**
@@ -512,14 +515,14 @@ export class NotifySettingsComponent {
   private titleText(): string {
     const view = this.view;
     if (view.kind === "menu") return view.title;
-    if (view.kind === "search") return "通知设置 › 搜索设置";
-    if (view.kind === "preview") return "通知设置 › 通知内容 › 通知预览";
+    if (view.kind === "search") return "搜索设置";
+    if (view.kind === "preview") return "通知预览";
     const item = this.itemById(view.itemId);
-    if (!item) return "通知设置";
-    if (view.kind === "input") return "通知设置 › 自定义输入";
-    if (view.kind === "help") return `通知设置 › 字段详情 · ${item.group} · ${item.label}`;
-    if (view.kind === "confirm") return `通知设置 › 恢复确认 · ${item.label}`;
-    return `通知设置 › ${item.group} · ${item.label}`;
+    if (!item) return "通知";
+    if (view.kind === "input") return "自定义输入";
+    if (view.kind === "help") return `字段说明 · ${item.label}`;
+    if (view.kind === "confirm") return `恢复默认 · ${item.label}`;
+    return item.label;
   }
 
   /**

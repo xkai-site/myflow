@@ -307,7 +307,7 @@ function openItem(harness, id) {
 // N: home page and navigation
 // ---------------------------------------------------------------------------
 
-await step("N1 首页固定十项：两个全局字段 + 五个分类 + 三个动作，不平铺全部字段", () => {
+await step("N1 首页简洁：两个全局字段 + 五个场景入口，不平铺全部字段", () => {
   const harness = makeHarness();
   const rows = harness.state().rows;
   assert.deepEqual(rows, [
@@ -318,20 +318,17 @@ await step("N1 首页固定十项：两个全局字段 + 五个分类 + 三个�
     "category:quietHours",
     "category:channels",
     "category:advanced",
-    "action:test",
-    "action:status",
-    "action:search",
   ], `首页行不符: ${JSON.stringify(rows)}`);
   const frame = harness.render(80).join("\n");
   assert.match(frame, /启用通知/);
   assert.match(frame, /通知门槛/);
-  assert.match(frame, /通知规则/);
+  assert.match(frame, /通知场景/);
   assert.match(frame, /通知内容/);
-  assert.match(frame, /免打扰/);
-  assert.match(frame, /通知渠道/);
-  assert.match(frame, /高级设置/);
-  assert.match(frame, /发送测试通知/);
-  assert.match(frame, /状态与诊断/);
+  assert.match(frame, /安静时间/);
+  assert.match(frame, /通知方式/);
+  assert.match(frame, /更多设置/);
+  assert.doesNotMatch(frame, /发送测试通知/);
+  assert.doesNotMatch(frame, /状态与诊断/);
   // Not a flat dump: a field buried in 高级设置 must not be on the home page.
   assert.ok(!/单次投递超时/.test(frame), "首页不应平铺高级设置字段");
   // The two global fields show their current value inline.
@@ -343,13 +340,13 @@ await step("N2 分类行带摘要：通知渠道计数、免打扰开关状态�
   const harness = makeHarness();
   let frame = harness.render(80).join("\n");
   assert.match(frame, /1 个已启用/, "渠道分类应显示启用数量");
-  assert.match(frame, /未开启/, "免打扰默认应显示未开启");
+  assert.match(frame, /未开启/, "安静时间默认应显示未开启");
 
   const quiet = itemOf(harness, "quietHours.enabled");
   harness.host.setValue(quiet, true);
   harness.redraw();
   frame = harness.render(80).join("\n");
-  assert.match(frame, /23:00–08:00/, "免打扰开启后摘要应显示时段");
+  assert.match(frame, /23:00–08:00/, "安静时间开启后摘要应显示时段");
 
   const debug = { providers: [{ id: "hook", type: "debug", enabled: false }] };
   const two = makeHarness(debug);
@@ -470,12 +467,12 @@ await step("N8 窄屏修复：菜单标签可读、摘要简短让位，footer �
     assert.ok(lines.every((line) => tui.visibleWidth(line) <= width), `${width} 列：行超宽`);
     const frame = squash(lines);
     // Labels must survive: the summary yields, not the category name.
-    assert.ok(frame.includes("通知规则"), `${width} 列：分类标签被摘要挤掉`);
-    assert.ok(frame.includes("通知渠道"), `${width} 列：分类标签被摘要挤掉`);
+    assert.ok(frame.includes("通知场景"), `${width} 列：分类标签被摘要挤掉`);
+    assert.ok(frame.includes("通知方式"), `${width} 列：分类标签被摘要挤掉`);
     // The core save key stays visible (it is the first item on the footer line).
     assert.ok(
-      lines.some((line) => line.includes("Ctrl+S 保存为默认")),
-      `${width} 列：footer 看不到 Ctrl+S 保存为默认\n${lines.join("\n")}`,
+      lines.some((line) => line.includes("Ctrl+S 设为以后默认")),
+      `${width} 列：footer 看不到 Ctrl+S 设为以后默认\n${lines.join("\n")}`,
     );
     const footerLine = lines.find((line) => line.includes("Ctrl+S"));
     assert.ok(footerLine !== undefined && footerLine.indexOf("Ctrl+S") <= 2, `${width} 列：Ctrl+S 应排在最前`);
@@ -494,7 +491,7 @@ await step("SE1 搜索：覆盖完整字段表（含当前不生效项）、结�
   const frame = harness.render(80).join("\n");
   assert.match(frame, /工具失败聚合窗口/, `搜索应能找到当前不生效的字段:\n${frame}`);
   assert.ok(harness.state().rows.includes("item:coalesce.toolFailureWindowMs"), "结果应携带该字段");
-  assert.match(squash(harness.render(80)), /高级设置/, "结果应携带路径");
+  assert.match(squash(harness.render(80)), /高级设置|更多设置/, "结果应携带路径");
   assert.match(squash(harness.render(80)), /未生效/, "应标出当前不生效");
 
   // Enter opens the field even though it is hidden from the advanced page right now.
@@ -631,8 +628,11 @@ await step("RA1 全页面渲染扫描：20/24/30/40/80 列无 undefined/[object/
   };
 
   scan("home");
-  // Every action label must be defined; `undefined` here was a real 80-column bug once.
-  assert.match(harness.render(80).join("\n"), /搜索设置/, "首页应有搜索设置入口");
+  // Search is intentionally tucked into 更多设置 rather than competing with the main overview.
+  goHome(harness);
+  openRow(harness, "category:advanced");
+  assert.match(harness.render(80).join("\n"), /搜索设置/, "更多设置页应有搜索入口");
+  goHome(harness);
 
   for (const id of ["category:rules", "category:content", "category:quietHours", "category:channels", "category:advanced"]) {
     goHome(harness);
@@ -977,6 +977,7 @@ await step("K4 Space 快速切换布尔（本对话）；复杂字段 Space 打�
 
   // An action row must not react to Space.
   goHome(harness);
+  openRow(harness, "category:advanced");
   moveToRow(harness, "action:test");
   harness.press(KEY.space);
   assert.equal(harness.calls.test, 0, "Space 不得触发送测试通知");
@@ -1159,15 +1160,15 @@ await step("I4 custom… 越界输入：报错写明单位与范围，当前值�
 // V: footer and folded actions
 // ---------------------------------------------------------------------------
 
-await step("V1 footer 常驻：字段/详情页含 `Ctrl+S 保存为默认`，状态页给出自己的可用键", () => {
+await step("V1 footer 常驻：字段/详情页含 `Ctrl+S 设为以后默认`，状态页给出自己的可用键", () => {
   const harness = makeHarness();
   const tail = () => harness.render(80).slice(-5).join("\n");
-  assert.match(tail(), /Ctrl\+S 保存为默认/, "首页字段行应常驻保存提示");
+  assert.match(tail(), /Ctrl\+S 设为以后默认/, "首页字段行应常驻保存提示");
   harness.press(KEY.enter); // 启用通知详情
-  assert.match(tail(), /Ctrl\+S 保存为默认/, "详情页应常驻保存提示");
+  assert.match(tail(), /Ctrl\+S 设为以后默认/, "详情页应常驻保存提示");
   harness.press(KEY.ctrlO);
   assert.match(tail(), /Enter 重读配置/, "状态页应给出自己的可用键");
-  assert.match(tail(), /Ctrl\+T 自检/, "全局快捷键保持可见");
+  assert.match(tail(), /Ctrl\+T 自检/, "状态页应给出自检快捷键");
   harness.press(KEY.escape); // 回详情
   assert.equal(harness.finished, undefined, "Esc 只在首页才结束组件");
 });
@@ -1210,21 +1211,19 @@ await step("V3 Esc 在首页结束组件，并带回摘要", () => {
 await step("F1 footer 按焦点类型给出可用操作：分类行不宣称 Ctrl+S/Space，输入页只给 Enter/Esc", () => {
   const harness = makeHarness();
   /** Footer hint lines only (they carry a navigation key or the global Ctrl+T hint). */
-  const hints = () => harness.render(80).filter((line) => /↑↓|Enter 应用|Ctrl\+T 自检/.test(line)).join("\n");
+  const hints = () => harness.render(80).filter((line) => /↑↓|Enter 应用|Ctrl\+T 自检|Ctrl\+S/.test(line)).join("\n");
 
   // Home, focused on the global switch: save and quick toggle are available.
-  assert.match(hints(), /Ctrl\+S 保存为默认/, "字段行应提供 Ctrl+S");
-  assert.match(hints(), /Space 切换/, "字段行应提供 Space");
+  assert.match(hints(), /Ctrl\+S 设为以后默认/, "字段行应提供 Ctrl+S");
+  assert.match(hints(), /Space 快速切换/, "字段行应提供 Space");
 
   // Home, focused on a category row: no save/quick toggle, only open.
   moveToRow(harness, "category:rules");
-  assert.doesNotMatch(hints(), /Ctrl\+S 保存为默认/, "分类行不得宣称 Ctrl+S");
-  assert.doesNotMatch(hints(), /Space 切换/, "分类行不得宣称 Space");
+  assert.doesNotMatch(hints(), /Ctrl\+S 设为以后默认/, "分类行不得宣称 Ctrl+S");
+  assert.doesNotMatch(hints(), /Space 快速切换/, "分类行不得宣称 Space");
   assert.match(hints(), /Enter 打开/, "分类行应提供 Enter 打开");
-  assert.match(hints(), /Ctrl\+O 状态与诊断/, "全局快捷键保持可见");
-
   openItem(harness, "minLevel");
-  assert.match(hints(), /Ctrl\+S 保存为默认/, "详情页应提供 Ctrl+S");
+  assert.match(hints(), /Ctrl\+S 设为以后默认/, "详情页应提供 Ctrl+S");
 
   // Text input: only apply/cancel, no external action advertised.
   openItem(harness, "delivery.timeoutMs");

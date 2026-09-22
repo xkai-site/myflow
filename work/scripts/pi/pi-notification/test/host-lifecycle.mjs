@@ -1024,15 +1024,14 @@ await step("J3 TUI：/notify 打开设置；Esc 关闭不改磁盘与内存", as
   assert.deepEqual(settings.runtimeErrors, []);
 });
 
-await step("J4 footer 常驻：每一帧末尾都有 `Ctrl+S 保存为默认` 与折叠的三个快捷键", async () => {
+await step("J4 footer 分层提示：字段页显示 Ctrl+S，首页不堆叠高级快捷键", async () => {
   const delta = await driveSettings([K.down, K.esc]);
   const frames = settingsDriver.renders;
   assert.ok(frames.length >= 2, "应有按键后的渲染快照");
   for (const frame of frames) {
     const tail = frame.slice(-4).join("\n");
-    assert.match(tail, /Ctrl\+S 保存为默认/, `footer 丢了 Ctrl+S 提示:\n${tail}`);
-    assert.match(tail, /Ctrl\+T 自检/, `footer 丢了自检快捷键:\n${tail}`);
-    assert.match(tail, /Ctrl\+O 状态与诊断/, `footer 丢了状态与诊断快捷键:\n${tail}`);
+    assert.match(tail, /Ctrl\+S 设为以后默认/, `footer 丢了 Ctrl+S 提示:\n${tail}`);
+    assert.ok(!/Ctrl\+T 自检|Ctrl\+O 状态与诊断/.test(tail), `首页不应堆叠高级快捷键:\n${tail}`);
     assert.ok(!/save as default/.test(tail), `footer 不应再是英文:\n${tail}`);
   }
   assert.equal(delta.deliveries.length, 0);

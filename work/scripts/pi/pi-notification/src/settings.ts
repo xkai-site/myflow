@@ -634,8 +634,8 @@ export interface SettingCategory {
    * They stay reachable through that row instead of disappearing from the UI entirely.
    */
   collapsed?: { when(config: NotificationConfig): boolean; label: string; note: string; ids: readonly string[] };
-  /** Extra action rows appended after the fields (e.g. the content category's preview entry). */
-  actions?: ReadonlyArray<{ key: string; action: "preview" }>;
+  /** Extra action rows appended after the fields (e.g. preview and advanced maintenance actions). */
+  actions?: ReadonlyArray<{ key: string; action: "test" | "status" | "reload" | "search" | "preview" }>;
 }
 
 /**
@@ -661,7 +661,7 @@ export function categoryPageItems(
 export const SETTING_CATEGORIES: readonly SettingCategory[] = [
   {
     id: "rules",
-    label: "通知规则",
+    label: "通知场景",
     kind: "rules",
     summary: (config) => {
       const enabled = RULE_INFOS.filter((rule) => config.rules[rule.key as keyof NotificationConfig["rules"]].enabled).length;
@@ -673,7 +673,7 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
   { id: "content", label: "通知内容", kind: "fields", group: "内容", summary: () => "耗时、会话名等", actions: [{ key: "action:preview", action: "preview" }] },
   {
     id: "quietHours",
-    label: "免打扰",
+    label: "安静时间",
     kind: "fields",
     group: "免打扰",
     summary: (config) => (config.quietHours.enabled ? `${config.quietHours.start}–${config.quietHours.end}` : "未开启"),
@@ -688,7 +688,7 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
   },
   {
     id: "channels",
-    label: "通知渠道",
+    label: "通知方式",
     kind: "fields",
     group: "渠道",
     summary: (config) => {
@@ -696,7 +696,19 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
       return enabled === 0 ? "无启用渠道" : `${enabled} 个已启用`;
     },
   },
-  { id: "advanced", label: "高级设置", kind: "fields", group: "高级设置", summary: () => "频率限制与投递" },
+  {
+    id: "advanced",
+    label: "更多设置",
+    kind: "fields",
+    group: "高级设置",
+    summary: () => "高级选项、测试与诊断",
+    actions: [
+      { key: "action:test", action: "test" },
+      { key: "action:status", action: "status" },
+      { key: "action:reload", action: "reload" },
+      { key: "action:search", action: "search" },
+    ],
+  },
 ];
 
 /**
