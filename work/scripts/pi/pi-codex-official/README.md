@@ -2,7 +2,7 @@
 
 在 Pi 中只读复用 Codex 的 ChatGPT OAuth 登录和模型缓存，注册 **`openai-codex` provider**。
 
-- **不是生成工具**：没有注册 LLM 工具，Agent 不能直接 tool call 本插件；也没有插件专属斜杠命令或参数解析器。
+- **不是生成工具**：没有注册 LLM 工具，Agent 不能直接 tool call 本插件。插件提供 `/usage-openai` 查询命令，不调用模型生成。
 - `/login`、`/model`、`/thinking`、`/reload` 都是 **Pi 内置交互命令**，在 Pi 编辑器中输入，不是 shell 命令。
 - 选中模型后，普通提示词由 Pi 经内置 `openai-codex-responses` 协议直接发送到 `https://chatgpt.com/backend-api`，不是 Codex CLI 代发。
 - 插件不启动 Codex、不发现线上模型、不刷新 token、不写回 Codex 文件，也不读取 CC Switch 数据库。CC Switch 不是必装依赖，使用它切账号也不会自动让请求经过其代理。
@@ -85,6 +85,7 @@ OpenAI Codex (Codex 本地凭据)
 | `/login` | 在选择器中选“Codex 本地凭据” | 建立 Pi OAuth 登录缓存 |
 | `/model` | 选择 `openai-codex` 的模型 | 切换当前模型；选择器中 Ctrl+S 保存启动默认值 |
 | `/thinking` | 选择当前模型支持的推理等级 | 切换推理等级；插件不改默认值 |
+| `/usage-openai` | 无 | 查询当前 Codex/ChatGPT 账号的套餐、已识别用量窗口已用比例及重置时间；不发起模型生成请求 |
 | `/reload` | 无 | 重读磁盘模型缓存，不刷新 Codex 登录或线上列表 |
 | `pi --list-models openai-codex`（终端） | 搜索词 `openai-codex` | 列出可用模型；空列表也可能是未登录 |
 | `/session` | 无 | 查看当前会话文件路径、token 用量和费用 |
@@ -128,6 +129,12 @@ OpenAI Codex (Codex 本地凭据)
 | 切账号后模型无权限或新模型未出现 | 让 Codex 为当前账号更新缓存，再 `/reload` 并选可用模型；线上权限仍由服务端决定 |
 
 缓存校验失败时不部分注册、不保留插件旧快照或使用备用列表；reload 会先撤销上轮覆盖。Pi 自带 provider 仍可能出现，且 `--list-models` 可能在 stderr 报错后仍以退出码 0 列出内置模型。只开 `/model`、重新 `/login` 或 `pi update --models` 都不能替代 Codex 更新缓存。
+
+## 用量查询与接口限制
+
+`/usage-openai` 使用 Codex `auth.json` 中当前 ChatGPT OAuth 登录，向 `https://chatgpt.com/backend-api/wham/usage` 发起只读查询。凭据缺失、过期或接口拒绝时，请先通过 Codex 更新登录后重试；插件不会自动刷新或写回 token。
+
+该 `wham` 地址是 ChatGPT 的**未公开内部接口**，不属于受支持的公共 API；接口结构和可用性可能变化。命令只显示接口能识别的套餐与用量窗口，不能保证代表 ChatGPT 所有功能的完整订阅额度。若接口变更，命令可能提示无法识别用量字段。
 
 ## 费用与凭据风险
 

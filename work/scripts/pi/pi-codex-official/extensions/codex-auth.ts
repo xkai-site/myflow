@@ -137,8 +137,8 @@ export function createLiveCodexOAuthConfig(authPath: string = codexAuthFile()): 
       return readLiveCodexCredential(authPath);
     },
     getApiKey(_credentials) {
-      // Pi 的 credential 只用于满足 OAuth 生命周期。实际请求始终重新读取
-      // Codex live auth，因此账号切换无需 /login 或重启 Pi。
+      // Pi's cached credential only satisfies OAuth lifecycle hooks; rereading Codex auth
+      // here makes account switches take effect without re-login or restart.
       return readLiveCodexCredential(authPath).access;
     },
   };
