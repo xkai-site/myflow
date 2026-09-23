@@ -98,10 +98,20 @@ OpenAI Codex (Codex 本地凭据)
 | --- | --- | --- |
 | 切换账号 | 用 Codex 或 CC Switch 更新当前 Codex `auth.json`，再发下一条请求 | 下一请求使用新账号；已发请求不变，无需 `/login` 或 `/reload` |
 | token 过期 / 即将过期 | 在 Codex 更新登录，或用 CC Switch 刷新并写入该 auth 文件，再重试 | 插件只重读，不调用 refresh 端点、不轮换或回写 token |
-| 更新模型列表 | 先让 Codex 更新 `models_cache.json`，再在 Pi `/reload` | 启动 / reload 才同步；切账号本身不更新列表 |
+| 更新模型列表 | 按下方「新模型更新 SOP」操作 | 启动 / reload 才同步；切账号本身不更新列表 |
 | 更新 Pi 内置模型元数据 | 升级 Pi 后重启 | 可能补齐新模型输出上限；不替代 Codex 更新缓存 |
 
 **Codex auth 决定实际请求账号，Pi auth 只满足 OAuth 生命周期。** Pi 缓存仍显示旧账号不影响下一请求读取新账号；仅希望同步缓存显示时可重新 `/login`。CC Switch 若未更新 Codex auth，切换不会生效。
+
+## 新模型更新 SOP
+
+新模型发布后，**由 Codex 刷新缓存，必要时升级 Codex；不编辑插件模型清单**。按顺序执行：
+
+1. 在终端运行 `codex --version`，确认调用的是预期的 Codex CLI。若版本较旧或新模型要求升级，按原安装方式升级；npm 安装可运行 `npm install -g @openai/codex@latest`，再运行 `codex --version` 确认升级生效。
+2. 联网运行 `codex debug models`，由 Codex 刷新当前 `CODEX_HOME`（默认 `~/.codex`）下的 `models_cache.json`。**不要加 `--bundled`**，它只查看内置目录，不刷新远程目录；不要手工修改或分享完整缓存/命令输出。
+3. 在缓存的 `models` 中确认目标 `slug`，且 `visibility` 为 `list`、`supported_in_api` 为 `true`。运行 `pi --list-models openai-codex` 核对注册结果与 stderr 无 `[pi-codex-official]` 错误；已运行的 Pi 输入 `/reload`，再用 `/model` 选择新模型。注册成功无需改插件代码，实际调用权限以服务端为准。
+
+**未出现时只查对应环节：**缓存没有目标模型 → 核对 Codex 版本、账号/工作区权限与新模型的上线范围，升级后重新执行第 2 步；旧版 Codex 再次运行可能把缓存写回旧列表。缓存已有但 Pi 没有 → 确认 Pi 与 Codex 使用同一个 `CODEX_HOME`，执行 `/reload`，并检查 `[pi-codex-official]` 缓存校验错误；登录问题按下表处理。Pi 内置目录出现某模型不代表当前 Codex 账号已获得权限，不要把它手工补进缓存。
 
 ## 模型边界与失败恢复
 
