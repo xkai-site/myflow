@@ -20,7 +20,7 @@
 
 - **认证与传输边界**：Codex 插件只读复用登录，不自行刷新 token；图片插件通过 `openai-codex` 获取认证。把该 provider 改成普通网关地址或本地 API Key，不是无缝替换。涉及网关时先检查当前认证和端点契约。
 - **网关路线不能混同**：CC Switch v3.20.3 的 Codex Official 认证透传与 Claude-tab Codex OAuth Messages 桥接不是同一种行为。历史中关于占位 API Key 的泛化建议已被后续调查纠正；其他版本需重新核实。
-- **网络故障尚无定论**：历史图片请求约 60 秒断连未确定根因。合成直连/CONNECT 的 70 秒测试通过，不代表真实 Clash/TLS/上游路径通过；另一次 HTTP 429 也不能解释先前断连。详见 [请求调查](../../openai-image-request-investigation.md)。
+- **网络故障尚无定论**：历史图片请求约 60 秒断连未确定根因。合成直连/CONNECT 的 70 秒测试通过，不代表真实 Clash/TLS/上游路径通过；另一次 HTTP 429 也不能解释先前断连。详见 [请求调查](../pi-image-generation/openai-image-request-investigation.md)。
 - **测试证据有边界**：离线 mock、请求基线比较、宿主渲染检查与真实后端调用是不同层次的证据。历史通过数量不能作为当前测试状态；应在目标插件重新运行适用测试。真实生成可能消耗额度，不属于归档操作或默认离线验证。
 
 ## 容易误读的旧记录

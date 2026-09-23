@@ -4,7 +4,7 @@
 >
 > | 文档 | 用途 |
 > |---|---|
-> | [插件 README](../work/scripts/pi/pi-notification/README.md) | **当前实现状态的权威**：安装、配置、命令、能力与缺口、105 条断言、未验证项 |
+> | [插件 README](../../../work/scripts/pi/pi-notification/README.md) | **当前实现状态的权威**：安装、配置、命令、能力与缺口、105 条断言、未验证项 |
 > | [设计文档](pi-notification-plugin-design.md)（v1.2） | 架构与设计依据；M3 实现状态已同步（§7/§8/§10/§15） |
 > | [M2 记录](pi-notification-plugin-m2.md) | S4+S6+S7 的历史决策、验收与风险，不代表当前待办 |
 > | 本文件 | 新会话入口、人工验收待办、环境陷阱、实现期发现 |
