@@ -88,6 +88,18 @@ export function removePath(source: unknown, path: string): Record<string, unknow
  * Removes one field from the entry of an array field (a provider switch). The entry itself and
  * every other array member are kept, so definition, options and sibling channels survive.
  */
+export function removeProviderOption(source: unknown, id: string, optionPath: string): Record<string, unknown> {
+  const clone: Record<string, unknown> = isPlainObject(source) ? structuredClone(source) : {};
+  const providers = getPathValue(clone, "providers");
+  if (!Array.isArray(providers)) return clone;
+  const entry = providers.find((item) => isPlainObject(item) && item.id === id);
+  if (!isPlainObject(entry) || !isPlainObject(entry.options)) return clone;
+  const options = removePath({ options: entry.options }, `options.${optionPath}`).options;
+  if (isPlainObject(options)) entry.options = options;
+  if (isPlainObject(entry.options) && Object.keys(entry.options).length === 0) delete entry.options;
+  return clone;
+}
+
 export function removeArrayEntryField(source: unknown, arrayPath: string, id: string, field: string): Record<string, unknown> {
   const clone: Record<string, unknown> = isPlainObject(source) ? structuredClone(source) : {};
   const list = getPathValue(clone, arrayPath);

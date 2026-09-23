@@ -73,6 +73,8 @@ export function createService(options: ServiceOptions): NotificationService {
     active: 0,
     delivered: 0,
     failed: 0,
+    skipped: 0,
+    byProvider: {},
     deduped: 0,
     dropped: 0,
     coalesced: 0,
@@ -175,51 +177,55 @@ export function createService(options: ServiceOptions): NotificationService {
   async function deliver(req: NotificationRequest): Promise<void> {
     const controller = new AbortController();
     inFlight.add(controller);
-    const timeoutMs = Number.isFinite(config.delivery.timeoutMs) ? config.delivery.timeoutMs : 8000;
+    const timeoutMs = Number.isFinite(config.delivery.timeoutMs) ? config.delivery.timeoutMs : 30000;
     const signal = timeoutMs > 0
       ? AbortSignal.any([AbortSignal.timeout(timeoutMs), controller.signal])
       : controller.signal;
     const startedAt = now();
     try {
-      // One attempt only; retry and circuit breaking live in the reliability decorators.
-      for (const providerId of req.channels) {
-        const notifier = notifierFor(providerId);
-        let result: DeliveryResult;
-        try {
-          await notifier.send(req, signal);
-          result = { providerId, ok: true, attempts: 1, durationMs: now() - startedAt };
-        } catch (error) {
-          result = {
-            providerId,
-            ok: false,
-            attempts: 1,
-            error: sanitizeError(error instanceof Error ? error.message : String(error)),
-            durationMs: now() - startedAt,
-          };
-        }
-        stats.lastAttemptAt = now();
-        if (result.ok) {
-          stats.delivered += 1;
-          stats.lastOkAt = stats.lastAttemptAt;
-        } else {
-          stats.failed += 1;
-          stats.lastError = result.error;
-        }
-        log.record({
-          event: "delivery",
-          kind: req.kind,
-          level: req.level,
-          dedupeKey: req.dedupeKey,
-          sessionId: req.meta.sessionId,
-          runId: req.meta.runId,
-          providerId: result.providerId,
-          ok: result.ok,
-          attempts: result.attempts,
-          durationMs: result.durationMs,
-          ...(result.error ? { error: result.error } : {}),
-        });
-        if (!result.ok) {
-          log.log("warning", `通知投递失败: id=${providerId} kind=${req.kind} ${result.error ?? ""}`);
+      const maxParallel = Math.max(1, Math.min(8, Math.floor(config.delivery.channelConcurrency || 4)));
+      // Bounded concurrent fan-out per notification: one slow channel cannot hold up the others.
+      for (let offset = 0; offset < req.channels.length; offset += maxParallel) {
+        const batch = req.channels.slice(offset, offset + maxParallel);
+        const results = await Promise.all(batch.map(async (providerId): Promise<DeliveryResult> => {
+          const notifier = notifierFor(providerId);
+          const channelStarted = now();
+          if (notifier.skipped) return { providerId, ok: false, skipped: true, attempts: 0, error: notifier.skipped, durationMs: 0 };
+          try {
+            await notifier.send(req, signal);
+            return { providerId, ok: true, attempts: 1, durationMs: now() - channelStarted };
+          } catch (error) {
+            return {
+              providerId, ok: false, attempts: 1,
+              error: sanitizeError(error instanceof Error ? error.message : String(error)),
+              durationMs: now() - channelStarted,
+            };
+          }
+        }));
+        for (const result of results) {
+          const at = now();
+          stats.lastAttemptAt = at;
+          const perProvider = stats.byProvider[result.providerId] ??= { delivered: 0, failed: 0, skipped: 0 };
+          if (result.skipped) {
+            stats.skipped += 1;
+            perProvider.skipped += 1;
+          } else if (result.ok) {
+            stats.delivered += 1;
+            perProvider.delivered += 1;
+            stats.lastOkAt = at;
+          } else {
+            stats.failed += 1;
+            perProvider.failed += 1;
+            perProvider.lastError = result.error;
+            stats.lastError = result.error;
+          }
+          log.record({
+            event: "delivery", kind: req.kind, level: req.level, dedupeKey: req.dedupeKey,
+            sessionId: req.meta.sessionId, runId: req.meta.runId, providerId: result.providerId,
+            ok: result.ok, skipped: result.skipped ?? false, attempts: result.attempts,
+            durationMs: result.durationMs, ...(result.error ? { error: result.error } : {}),
+          });
+          if (!result.ok && !result.skipped) log.log("warning", `通知投递失败: id=${result.providerId} kind=${req.kind} ${result.error ?? ""}`);
         }
       }
     } finally {

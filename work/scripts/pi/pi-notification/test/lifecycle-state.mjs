@@ -150,14 +150,13 @@ await step("L4 无 run 的 settle：给出 orphan 键，且时钟回退时时长
   assert.equal(outcome.durationMs, 0, "时钟回退时时长取 0 而不是负数");
 });
 
-await step("L5 成本累计：只认有限正值，本 run 与会话累计分开，换会话复位", () => {
+await step("L5 成本累计：保留运行时上报的零值，缺失时为未知；本 run 与会话累计分开", () => {
   const harness = makeLifecycle();
   startRun(harness);
   harness.lifecycle.onAssistantMessage({ sessionId: "s1", stopReason: "stop", usageCostUsd: 0.25 });
   harness.lifecycle.onAssistantMessage({ sessionId: "s1", stopReason: "stop", usageCostUsd: 0.75 });
-  harness.lifecycle.onAssistantMessage({ sessionId: "s1", stopReason: "stop", usageCostUsd: Number.NaN });
-  harness.lifecycle.onAssistantMessage({ sessionId: "s1", stopReason: "stop", usageCostUsd: -1 });
-  assert.equal(harness.lifecycle.sessionCostUsd(), 1);
+  harness.lifecycle.onAssistantMessage({ sessionId: "s1", stopReason: "stop", usageCostUsd: 0 });
+  assert.equal(harness.lifecycle.sessionCostUsd(), 1, "明确上报的零值也属于已知成本");
 
   const outcome = harness.lifecycle.onSettled({ sessionId: "s1", isIdle: true });
   assert.equal(outcome.costUsd, 1, "本 run 成本是多轮 usage 之和");
@@ -169,7 +168,20 @@ await step("L5 成本累计：只认有限正值，本 run 与会话累计分开
   assert.equal(harness.lifecycle.sessionCostUsd(), 1.5, "会话累计跨 run 累加");
 
   harness.lifecycle.onSessionStart({ sessionId: "s2", reason: "new" });
-  assert.equal(harness.lifecycle.sessionCostUsd(), 0, "换会话后累计归零");
+  assert.equal(harness.lifecycle.sessionCostUsd(), undefined, "换会话后累计成本回到未知，不能伪报为零");
+
+  const incomplete = makeLifecycle();
+  startRun(incomplete);
+  incomplete.lifecycle.onAssistantMessage({ sessionId: "s1", stopReason: "toolUse", usageCostUsd: 0.2 });
+  incomplete.lifecycle.onAssistantMessage({ sessionId: "s1", stopReason: "stop", usageCostUsd: Number.NaN });
+  const partial = incomplete.lifecycle.onSettled({ sessionId: "s1", isIdle: true });
+  assert.equal(partial.costUsd, undefined, "某一轮未上报时不把部分合计冒充完整成本");
+  assert.equal(incomplete.lifecycle.sessionCostUsd(), undefined, "累计成本不完整时报告未知");
+
+  const zero = makeLifecycle();
+  startRun(zero);
+  zero.lifecycle.onAssistantMessage({ sessionId: "s1", stopReason: "stop", usageCostUsd: 0 });
+  assert.equal(zero.lifecycle.onSettled({ sessionId: "s1", isIdle: true }).costUsd, 0, "运行时明确上报的零成本应保留");
 });
 
 await step("L6 工具失败与压缩失败：失败计数、累积顺序与标志位", () => {

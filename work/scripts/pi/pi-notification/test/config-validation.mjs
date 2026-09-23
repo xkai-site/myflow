@@ -93,6 +93,9 @@ await step("C3 数值字段边界：边界值通过，越界/非整数/字符串
     ["delivery.concurrency", 1, true],
     ["delivery.concurrency", 0, false],
     ["delivery.concurrency", 9, false],
+    ["delivery.channelConcurrency", 1, true],
+    ["delivery.channelConcurrency", 8, true],
+    ["delivery.channelConcurrency", 9, false],
     ["delivery.queueLimit", 1, true],
     ["delivery.queueLimit", 0, false],
     ["delivery.queueLimit", 1001, false],
@@ -147,9 +150,58 @@ await step("C6 providers：重复 id / 缺 type / options 非对象报错；非�
   assert.deepEqual(errorPaths({ providers: [null] }), ["providers[0]"]);
 
   const mixed = merge({ providers: [{ id: "ok", type: "debug" }, { id: "bad" }] });
-  assert.deepEqual(mixed.config.providers.map((provider) => provider.id), ["ok"], "合法渠道应保留");
+  assert.deepEqual(mixed.config.providers.map((provider) => provider.id), ["ok", "email"], "合法渠道保留，旧数组补入内置 email");
   assert.deepEqual(mixed.config.providers[0].options, {}, "options 缺失时补空对象");
-  assert.equal(mixed.config.providers[0].enabled, true, "enabled 缺失时默认开启");
+  assert.equal(mixed.config.providers[0].enabled, true, "自定义 provider 缺 enabled 时默认开启");
+  assert.equal(mixed.config.providers[1].enabled, false, "自动补入的 email 默认关闭");
+});
+
+await step("C6c 邮箱默认关闭、稀疏 options 继承，旧用户 providers 数组兼容", () => {
+  const defaults = config.defaultConfig();
+  const email = defaults.providers.find((provider) => provider.id === "email");
+  assert.equal(email.enabled, false);
+  assert.deepEqual(email.options.to, []);
+  assert.equal(email.options.from, "");
+  assert.deepEqual(merge({ providers: [{ id: "email", type: "email", options: { from: "sender@qq.com" } }] }).config.providers, [
+    { ...email, options: { ...email.options, from: "sender@qq.com" } },
+    defaults.providers.find((provider) => provider.id === "terminal"),
+  ]);
+  const legacy = merge({ providers: [{ id: "terminal", type: "terminal", enabled: false }] }).config.providers;
+  assert.deepEqual(legacy.map((provider) => provider.id), ["terminal", "email"]);
+  assert.equal(legacy[0].enabled, false, "保留旧渠道显式开关");
+  assert.equal(legacy[1].enabled, false, "补入邮箱默认关闭");
+  const invalid = merge({ providers: [{ id: "email", type: "email", options: { from: "not-an-address", authCode: "do-not-echo" } }] });
+  assert.ok(invalid.errors.some((problem) => problem.path === "providers[0].options"));
+  assert.doesNotMatch(JSON.stringify(invalid.errors), /do-not-echo|not-an-address/, "错误不得回显敏感字段值");
+  const invalidFrom = merge({ providers: [{ id: "email", type: "email", options: { from: "not-an-address" } }] });
+  assert.ok(invalidFrom.errors.some((problem) => problem.path === "providers[0].options.from"));
+  assert.ok(merge({ providers: [{ id: "email", type: "email", options: { to: ["a@b.com", "c@d.org"] } }] }).errors.length === 0);
+});
+
+await step("C6d 逐项保存邮箱参数不丢本机渠道，显式关闭与自定义渠道语义保留", async () => {
+  const settings = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "settings.ts")).href);
+  const agentDir = cleanAgentDir("email-sparse-save");
+  for (const [field, value] of [["from", "sender@qq.com"], ["to", ["recipient@example.org"]]]) {
+    const raw = config.readUserConfigRaw(agentDir).raw;
+    const result = config.writeUserDefault(agentDir, settings.providerOptionUserFilePatch(raw, "email", "email", field, value));
+    assert.equal(result.ok, true);
+    const loaded = config.loadConfig({ agentDir }).config;
+    assert.equal(loaded.providers.find((p) => p.id === "terminal")?.enabled, true);
+    assert.equal(loaded.providers.find((p) => p.id === "email")?.enabled, false, "保存地址不应自动启用邮箱");
+    assert.deepEqual(loaded.rules.runCompleted.channels, ["terminal"], "不自动改变用户事件路由");
+  }
+  let raw = config.readUserConfigRaw(agentDir).raw;
+  assert.equal(raw.providers.length, 1, "写盘保持稀疏，不固化本机默认");
+  assert.equal(config.writeUserDefault(agentDir, settings.channelUserFilePatch(raw, "email", "email", true)).ok, true);
+  let loaded = config.loadConfig({ agentDir }).config;
+  assert.equal(loaded.providers.find((p) => p.id === "terminal")?.enabled, true);
+  assert.equal(loaded.providers.find((p) => p.id === "email")?.enabled, true);
+  raw = config.readUserConfigRaw(agentDir).raw;
+  config.writeUserDefault(agentDir, settings.channelUserFilePatch(raw, "terminal", "terminal", false));
+  loaded = config.loadConfig({ agentDir }).config;
+  assert.equal(loaded.providers.find((p) => p.id === "terminal")?.enabled, false, "不得复活显式关闭的本机渠道");
+  assert.equal(merge({ providers: [] }).config.providers.some((p) => p.id === "terminal"), false);
+  assert.equal(merge({ providers: [{ id: "debug", type: "debug" }] }).config.providers.some((p) => p.id === "terminal"), false);
 });
 
 await step("C6b providers[].enabled 非布尔必须报错，而不是静默当作 true", () => {
@@ -159,7 +211,7 @@ await step("C6b providers[].enabled 非布尔必须报错，而不是静默当�
   }
   // The invalid entry is dropped, so it cannot be used even before degradation kicks in.
   const merged = merge({ providers: [{ id: "ok", type: "debug" }, { id: "bad", type: "debug", enabled: "false" }] });
-  assert.deepEqual(merged.config.providers.map((provider) => provider.id), ["ok"]);
+  assert.deepEqual(merged.config.providers.map((provider) => provider.id), ["ok", "email"]);
 });
 
 await step("C7 degradedConfig 形状：仅失败通知、error 门槛、唯一渠道、不启用静默时段", () => {
@@ -214,7 +266,7 @@ await step("C9 isDisabledByEnv 只认 1/true；describeConfig 汇总开关与渠
   assert.match(described, /minLevel=info/);
   assert.match(described, /rules=runCompleted,runFailed,toolFailed,compactFailed/);
   assert.match(described, /providers=terminal:terminal/);
-  assert.match(described, /timeoutMs=8000/);
+  assert.match(described, /timeoutMs=30000/);
 
   const empty = config.defaultConfig();
   empty.providers = [];

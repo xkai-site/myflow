@@ -34,15 +34,29 @@ export type { ConfigPatch };
 export interface SessionOverlay {
   patch: ConfigPatch;
   providers: Record<string, boolean>;
+  providerOptions: Record<string, Record<string, unknown>>;
+}
+
+/** Explain the first unmet prerequisite without conflating a missing credential with a closed switch. */
+export const QQ_MAIL_URL = "https://mail.qq.com/";
+
+export function emailTestBlockReason(config: NotificationConfig, hasAuthCode: boolean): string | undefined {
+  if (!config.enabled) return "全局通知已关闭，请先开启通知。";
+  const provider = config.providers.find((candidate) => candidate.id === "email" && candidate.type === "email");
+  if (!provider?.enabled) return "邮箱渠道未开启，请在「通知渠道 → 邮箱」开启邮箱。";
+  if (typeof provider.options.from !== "string" || !provider.options.from) return "邮箱渠道已开启，但发件 QQ 邮箱未配置。";
+  if (!Array.isArray(provider.options.to) || provider.options.to.length === 0) return "邮箱渠道已开启，但收件邮箱未配置。";
+  if (!hasAuthCode) return "邮箱渠道已开启，但 Windows 凭据管理器和 PI_NOTIFY_QQ_SMTP_AUTH_CODE 都没有授权码。可在本页设置授权码。";
+  return undefined;
 }
 
 export function emptyOverlay(): SessionOverlay {
-  return { patch: {}, providers: {} };
+  return { patch: {}, providers: {}, providerOptions: {} };
 }
 
 /** Empty overlay means no session entry is written and the config is left as read. */
 export function isEmptyOverlay(overlay: SessionOverlay): boolean {
-  return Object.keys(overlay.patch).length === 0 && Object.keys(overlay.providers).length === 0;
+  return Object.keys(overlay.patch).length === 0 && Object.keys(overlay.providers).length === 0 && Object.keys(overlay.providerOptions ?? {}).length === 0;
 }
 
 /**
@@ -59,10 +73,21 @@ export function overlayFromEntry(value: unknown): SessionOverlay | undefined {
       if (typeof enabled === "boolean") providers[id] = enabled;
     }
   }
-  return { patch, providers };
+  const providerOptions: Record<string, Record<string, unknown>> = {};
+  if (isPlainObject(value.providerOptions)) {
+    for (const [id, options] of Object.entries(value.providerOptions)) {
+      if (isPlainObject(options)) providerOptions[id] = options;
+    }
+  }
+  return { patch, providers, providerOptions };
 }
 
 export const SESSION_OVERLAY_ENTRY = "notify-session-overlay";
+
+/** Session snapshot: only non-sensitive options are exposed by the settings items. */
+export function overlayEntryData(sessionId: string | undefined, overlay: SessionOverlay, at: number) {
+  return { sessionId, patch: overlay.patch, providers: overlay.providers, providerOptions: overlay.providerOptions, at };
+}
 
 /**
  * Restores the overlay of **this** session from session entries.
@@ -98,12 +123,15 @@ export function applyOverlay(
 ): { config: NotificationConfig; problems: ConfigProblem[] } {
   if (isEmptyOverlay(overlay)) return { config: base, problems: [] };
   const raw: ConfigPatch = structuredClone(overlay.patch);
-  if (Object.keys(overlay.providers).length > 0) {
-    raw.providers = base.providers.map((provider) => (
-      overlay.providers[provider.id] === undefined
-        ? { ...provider }
-        : { ...provider, enabled: overlay.providers[provider.id] }
-    ));
+  if (Object.keys(overlay.providerOptions ?? {}).length > 0 || Object.keys(overlay.providers).length > 0) {
+    raw.providers = base.providers.map((provider) => {
+      const options = overlay.providerOptions?.[provider.id];
+      return {
+        ...provider,
+        ...(options ? { options: mergePatch(provider.options, options) } : {}),
+        ...(overlay.providers[provider.id] === undefined ? {} : { enabled: overlay.providers[provider.id] }),
+      };
+    });
   }
   const merged = mergeConfig(base, raw, SESSION_OVERLAY_ENTRY);
   if (merged.errors.length > 0) return { config: base, problems: merged.errors };
@@ -122,7 +150,8 @@ export type SettingPatch =
   /** Plain field: one path serves both the session overlay and the sparse user file. */
   | { kind: "path"; path: string; value: unknown }
   /** Provider switch: the overlay uses the provider map, the user file gets the whole array. */
-  | { kind: "providers"; id: string; value: boolean };
+  | { kind: "providers"; id: string; value: boolean }
+  | { kind: "providerOption"; id: string; optionPath: string; value: unknown };
 
 export interface SettingCandidate {
   value: SettingValue;
@@ -146,6 +175,7 @@ export interface SettingItem {
   /** Path of this item inside the raw user JSON; provider items use `providerId` instead. */
   userPath: string;
   providerId?: string;
+  providerOptionPath?: string;
   /** Rule this item belongs to; the UI groups a rule's fields onto one page. */
   rule?: { key: string; label: string };
   /**
@@ -156,7 +186,7 @@ export interface SettingItem {
   /** Extra information such as the provider type. */
   detail?(config: NotificationConfig): string | undefined;
   /** Input parsing for number and time items, used by the `custom…` row. */
-  parseInput?(text: string): { ok: true; value: SettingValue } | { ok: false; message: string };
+  parseInput?(text: string): { ok: true; value: SettingValue | SettingValue[] } | { ok: false; message: string };
   /** Unit and range shown while editing a `custom…` value; undefined when the item has no free input. */
   inputHint?: string;
 }
@@ -346,6 +376,10 @@ const TIME_PRESETS = ["00:00", "07:00", "08:00", "12:00", "18:00", "22:00", "23:
  */
 export function sessionOverrideValue(overlay: SessionOverlay, item: SettingItem): unknown {
   if (item.providerId !== undefined) {
+    if (item.providerOptionPath) {
+      const options = overlay.providerOptions?.[item.providerId];
+      return options ? getPathValue(options, item.providerOptionPath) : undefined;
+    }
     // Own-property check: an id like `toString` or `constructor` would otherwise read an inherited
     // Object.prototype member and be reported as a conversation override that does not exist.
     return Object.prototype.hasOwnProperty.call(overlay.providers, item.providerId)
@@ -362,7 +396,13 @@ export function sessionOverrideValue(overlay: SessionOverlay, item: SettingItem)
  * user-provided (and therefore absent from `defaultConfig().providers`).
  */
 export function builtinDefaultValue(item: SettingItem): unknown {
-  if (item.providerId !== undefined) return true;
+  if (item.providerId !== undefined) {
+    if (item.providerOptionPath) {
+      const provider = defaultConfig().providers.find((candidate) => candidate.id === item.providerId);
+      return provider ? getPathValue(provider.options, item.providerOptionPath) : undefined;
+    }
+    return item.providerId === "email" ? false : true;
+  }
   return item.read(defaultConfig());
 }
 
@@ -459,7 +499,7 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
 
   items.push(makeItem({ group: "内容", label: "包含耗时", path: "content.includeDuration", kind: "boolean" }));
   items.push(makeItem({ group: "内容", label: "包含失败工具名", path: "content.includeToolFailureNames", kind: "boolean" }));
-  items.push(makeItem({ group: "内容", label: "包含会话标识", path: "content.includeSessionLabel", kind: "boolean" }));
+  items.push(makeItem({ group: "内容", label: "标题包含窗口标识", path: "content.includeSessionLabel", kind: "boolean" }));
   items.push(makeItem({ group: "内容", label: "包含助手摘录", path: "content.includeAssistantExcerpt", kind: "boolean" }));
   items.push(makeItem({ group: "内容", label: "包含成本与上下文", path: "content.includeCost", kind: "boolean" }));
   items.push(makeItem({
@@ -588,6 +628,38 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
       userPath: `providers.${provider.id}.enabled`,
       detail: () => provider.type,
     });
+    if (provider.id === "email" && provider.type === "email") {
+      const emailOption = (optionPath: "from" | "to" | "subjectPrefix", label: string, list = false): SettingItem => ({
+        id: `provider:email:${optionPath}`,
+        group: "邮箱",
+        label,
+        kind: list ? "collection" : "enum",
+        providerId: "email",
+        providerOptionPath: optionPath,
+        read: (current) => getPathValue(current.providers.find((entry) => entry.id === "email")?.options, optionPath),
+        patch: (value) => ({ kind: "providerOption", id: "email", optionPath, value: list ? (Array.isArray(value) ? value : []) : value }),
+        candidates: () => [],
+        format: (value) => Array.isArray(value) ? (value.length ? value.join(", ") : "（未配置）") : String(value ?? "（未配置）"),
+        userPath: `providers.email.options.${optionPath}`,
+        inputHint: list ? "多个邮箱以逗号分隔，最多 50 个" : "邮箱地址 / 文本，最长 254 字符",
+        parseInput: (text) => {
+          const value = text.trim();
+          if (value.length > (list ? 12700 : 254) || /[\r\n\0]/.test(value)) return { ok: false, message: "输入过长或包含换行" };
+          if (list) {
+            const addresses = [...new Set(value.split(/[,，]/).map((part) => part.trim()).filter(Boolean))];
+            if (addresses.length > 50 || addresses.some((address) => !/^[^\s@,，<>]+@[^\s@,，<>]+\.[^\s@,，<>]+$/.test(address))) {
+              return { ok: false, message: "请提供最多 50 个有效邮箱地址，以逗号分隔" };
+            }
+            return { ok: true, value: addresses };
+          }
+          if (optionPath === "from" && value && !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value)) return { ok: false, message: "请输入有效发件邮箱地址" };
+          return { ok: true, value };
+        },
+      });
+      items.push(emailOption("from", "发件 QQ 邮箱"));
+      items.push(emailOption("to", "收件邮箱（多个）", true));
+      items.push(emailOption("subjectPrefix", "主题前缀"));
+    }
   }
 
   // Rule items are tagged by id so the UI can group one rule's fields onto a single page without
@@ -635,7 +707,7 @@ export interface SettingCategory {
    */
   collapsed?: { when(config: NotificationConfig): boolean; label: string; note: string; ids: readonly string[] };
   /** Extra action rows appended after the fields (e.g. preview and advanced maintenance actions). */
-  actions?: ReadonlyArray<{ key: string; action: "test" | "status" | "reload" | "search" | "preview" }>;
+  actions?: ReadonlyArray<{ key: string; action: "test" | "emailTest" | "status" | "reload" | "search" | "preview" }>;
 }
 
 /**
@@ -720,7 +792,9 @@ export function hasUserDefault(rawUser: unknown, item: SettingItem): boolean {
     const providers = getPathValue(rawUser, "providers");
     if (!Array.isArray(providers)) return false;
     const entry = providers.find((candidate) => isPlainObject(candidate) && candidate.id === item.providerId);
-    return entry !== undefined && hasPath(entry, "enabled");
+    return entry !== undefined && (item.providerOptionPath
+      ? hasPath(entry, `options.${item.providerOptionPath}`)
+      : hasPath(entry, "enabled"));
   }
   return hasPath(rawUser, item.userPath);
 }
@@ -733,7 +807,9 @@ export function userDefaultValue(rawUser: unknown, item: SettingItem): unknown {
     const entry = Array.isArray(providers)
       ? providers.find((candidate) => isPlainObject(candidate) && candidate.id === item.providerId)
       : undefined;
-    return isPlainObject(entry) ? entry.enabled : undefined;
+    return isPlainObject(entry) ? (item.providerOptionPath
+      ? getPathValue(entry, `options.${item.providerOptionPath}`)
+      : entry.enabled) : undefined;
   }
   return getPathValue(rawUser, item.userPath);
 }
@@ -749,6 +825,20 @@ export function userDefaultValue(rawUser: unknown, item: SettingItem): unknown {
  * channels; a channel that only exists in the factory defaults gets a minimal new entry
  * (`id`, `type`, `enabled`) rather than a copy of its factory options.
  */
+export function providerOptionUserFilePatch(rawUser: unknown, providerId: string, providerType: string, optionPath: string, value: unknown): ConfigPatch {
+  const rawProviders = getPathValue(rawUser, "providers");
+  const entries: unknown[] = Array.isArray(rawProviders)
+    ? rawProviders.map((entry) => (isPlainObject(entry) ? structuredClone(entry) : entry))
+    : [];
+  let entry = entries.find((candidate) => isPlainObject(candidate) && candidate.id === providerId);
+  if (!isPlainObject(entry)) {
+    entry = { id: providerId, type: providerType, options: {} };
+    entries.push(entry);
+  }
+  entry.options = setPatchPath(isPlainObject(entry.options) ? entry.options : {}, optionPath, value);
+  return { providers: entries };
+}
+
 export function channelUserFilePatch(
   rawUser: unknown,
   providerId: string,
@@ -774,11 +864,18 @@ export function channelUserFilePatch(
  */
 export function clearItemOverride(overlay: SessionOverlay, item: SettingItem): SessionOverlay {
   if (item.providerId !== undefined) {
+    if (item.providerOptionPath) {
+      const providerOptions = { ...(overlay.providerOptions ?? {}) };
+      const nextOptions = removePath(providerOptions[item.providerId] ?? {}, item.providerOptionPath);
+      if (Object.keys(nextOptions).length === 0) delete providerOptions[item.providerId];
+      else providerOptions[item.providerId] = nextOptions;
+      return { patch: overlay.patch, providers: { ...overlay.providers }, providerOptions };
+    }
     const providers = { ...overlay.providers };
     delete providers[item.providerId];
-    return { patch: overlay.patch, providers };
+    return { patch: overlay.patch, providers, providerOptions: { ...overlay.providerOptions } };
   }
-  return { patch: removePath(overlay.patch, item.userPath), providers: { ...overlay.providers } };
+  return { patch: removePath(overlay.patch, item.userPath), providers: { ...overlay.providers }, providerOptions: { ...overlay.providerOptions } };
 }
 
 /** Compares a candidate against the current value; collection kinds match by membership. */

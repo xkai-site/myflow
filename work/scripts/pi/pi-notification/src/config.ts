@@ -21,7 +21,7 @@ import { closeSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, w
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
-import { isPlainObject, mergePatch, removeArrayEntryField, removePath, type ConfigPatch } from "./patch.ts";
+import { isPlainObject, mergePatch, removeArrayEntryField, removePath, removeProviderOption, type ConfigPatch } from "./patch.ts";
 
 import type {
   NotificationConfig,
@@ -121,7 +121,7 @@ export function defaultConfig(): NotificationConfig {
     content: {
       includeDuration: true,
       includeToolFailureNames: true,
-      // Leading identity label: session name when available, else the project directory name.
+      // Put the session name or project directory name in the title to disambiguate windows.
       includeSessionLabel: true,
       // Assistant replies are not forwarded by default: they can carry file content or secrets.
       includeAssistantExcerpt: false,
@@ -129,14 +129,28 @@ export function defaultConfig(): NotificationConfig {
       maxMessageChars: 300,
     },
     delivery: {
-      timeoutMs: 8000,
+      timeoutMs: 30000,
       // Retry and circuit breaking are applied by the reliability decorators.
       maxRetries: 1,
       concurrency: 1,
+      channelConcurrency: 4,
       queueLimit: 50,
       circuitBreakerFailures: 3,
     },
-    providers: [{ id: "terminal", type: "terminal", enabled: true, options: {} }],
+    providers: [
+      { id: "terminal", type: "terminal", enabled: true, options: {} },
+      {
+        id: "email",
+        type: "email",
+        enabled: false,
+        options: {
+          transport: { type: "smtp", profile: "qq" },
+          from: "",
+          to: [],
+          subjectPrefix: "[Pi]",
+        },
+      },
+    ],
     // Maximum wait allowed inside `session_shutdown`: the exit path must stay short.
     shutdownFlushMs: 200,
   };
@@ -153,6 +167,7 @@ export function defaultConfig(): NotificationConfig {
 export function degradedConfig(): NotificationConfig {
   const config = defaultConfig();
   config.minLevel = "error";
+  config.providers = [{ id: "terminal", type: "terminal", enabled: true, options: {} }];
   config.rules = {
     runCompleted: { enabled: false, level: "info", channels: ["terminal"] },
     runFailed: { enabled: true, level: "error", channels: ["terminal"] },
@@ -296,7 +311,11 @@ function checkRules(
   return result as Partial<Record<string, RuleConfig>>;
 }
 
-function checkProviders(value: unknown, errors: ConfigProblem[]): ProviderConfig[] | undefined {
+function checkProviders(
+  value: unknown,
+  errors: ConfigProblem[],
+  defaults: ProviderConfig[],
+): ProviderConfig[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) {
     errors.push({ path: "providers", message: "必须是数组" });
@@ -329,6 +348,40 @@ function checkProviders(value: unknown, errors: ConfigProblem[]): ProviderConfig
       errors.push({ path: `${fieldPath}.options`, message: "必须是对象" });
       return;
     }
+    if (id === "email" && type === "email" && isPlainObject(options)) {
+      const containsSensitiveKey = (value: unknown): boolean => isPlainObject(value)
+        ? Object.entries(value).some(([key, nested]) => /password|auth.?code|credential|secret/i.test(key) || containsSensitiveKey(nested))
+        : Array.isArray(value) ? value.some(containsSensitiveKey) : false;
+      const sensitive = containsSensitiveKey(options);
+      if (sensitive) {
+        errors.push({ path: `${fieldPath}.options`, message: "邮箱凭据禁止明文配置；请在 UI 使用 Windows 凭据管理器，或设置授权码环境变量" });
+        return;
+      }
+      const checkString = (key: string, max: number, required = false): void => {
+        const value = options[key];
+        if (value === undefined) return;
+        if (typeof value !== "string" || value.length > max || /[\r\n\0]/.test(value)) {
+          errors.push({ path: `${fieldPath}.options.${key}`, message: `必须是无换行且不超过 ${max} 字符的字符串` });
+        } else if (required && value.trim() === "") {
+          errors.push({ path: `${fieldPath}.options.${key}`, message: "不能为空" });
+        }
+      };
+      checkString("from", 254);
+      if (typeof options.from === "string" && options.from !== "" && !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(options.from)) {
+        errors.push({ path: `${fieldPath}.options.from`, message: "必须是有效邮箱地址" });
+      }
+      checkString("subjectPrefix", 120);
+      if (options.transport !== undefined && (!isPlainObject(options.transport)
+        || options.transport.type !== "smtp" || options.transport.profile !== "qq")) {
+        errors.push({ path: `${fieldPath}.options.transport`, message: "首期仅支持 smtp/qq 预置传输" });
+      }
+      if (options.to !== undefined && (!Array.isArray(options.to) || options.to.length > 50
+        || options.to.some((value) => typeof value !== "string" || value.length > 254 || /[\r\n\0]/.test(value)))) {
+        errors.push({ path: `${fieldPath}.options.to`, message: "必须是最多 50 个、每个不超过 254 字符且无换行的地址字符串数组" });
+      } else if (Array.isArray(options.to) && options.to.some((value) => !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value as string))) {
+        errors.push({ path: `${fieldPath}.options.to`, message: "收件人必须是有效邮箱地址" });
+      }
+    }
     // A non-boolean `enabled` (for example the string "false") used to be coerced to true, which
     // silently turned a channel on; it must degrade loudly like every other boolean in this file.
     if (item.enabled !== undefined && typeof item.enabled !== "boolean") {
@@ -339,10 +392,22 @@ function checkProviders(value: unknown, errors: ConfigProblem[]): ProviderConfig
     providers.push({
       id,
       type,
-      enabled: typeof item.enabled === "boolean" ? item.enabled : true,
-      options: (options as Record<string, unknown> | undefined) ?? {},
+      enabled: typeof item.enabled === "boolean" ? item.enabled : id === "email" && type === "email" ? false : true,
+      options: id === "email" && type === "email"
+        ? mergePatch(defaults.find((provider) => provider.id === "email" && provider.type === "email")?.options ?? {}, options ?? {})
+        : (options as Record<string, unknown> | undefined) ?? {},
     });
   });
+  // Saving the first email field/switch creates an email-only sparse array. It must not
+  // remove the built-in local channel. Email-only delivery requires an explicit terminal=false;
+  // retain the legacy replacement semantics for empty/custom provider arrays.
+  if (value.length === 1 && providers.length === 1 && providers[0].id === "email" && providers[0].type === "email") {
+    const terminal = defaults.find((provider) => provider.id === "terminal" && provider.type === "terminal");
+    if (terminal) providers.push(structuredClone(terminal));
+  }
+  // Old provider arrays still gain the new email entry, disabled by default.
+  const defaultEmail = defaults.find((provider) => provider.id === "email" && provider.type === "email");
+  if (defaultEmail && !seen.has(defaultEmail.id)) providers.push(structuredClone(defaultEmail));
   return providers;
 }
 
@@ -423,6 +488,7 @@ export function mergeConfig(base: NotificationConfig, raw: unknown, source: stri
       checkPositiveInt(raw.delivery, "timeoutMs", config.delivery as unknown as Record<string, unknown>, "delivery.timeoutMs", errors, { min: 1, max: 120000 });
       checkPositiveInt(raw.delivery, "maxRetries", config.delivery as unknown as Record<string, unknown>, "delivery.maxRetries", errors, { min: 0, max: 10 });
       checkPositiveInt(raw.delivery, "concurrency", config.delivery as unknown as Record<string, unknown>, "delivery.concurrency", errors, { min: 1, max: 8 });
+      checkPositiveInt(raw.delivery, "channelConcurrency", config.delivery as unknown as Record<string, unknown>, "delivery.channelConcurrency", errors, { min: 1, max: 8 });
       checkPositiveInt(raw.delivery, "queueLimit", config.delivery as unknown as Record<string, unknown>, "delivery.queueLimit", errors, { min: 1, max: 1000 });
       checkPositiveInt(raw.delivery, "circuitBreakerFailures", config.delivery as unknown as Record<string, unknown>, "delivery.circuitBreakerFailures", errors, { min: 0, max: 100 });
     }
@@ -442,7 +508,7 @@ export function mergeConfig(base: NotificationConfig, raw: unknown, source: stri
 
   checkPositiveInt(raw, "shutdownFlushMs", config as unknown as Record<string, unknown>, "shutdownFlushMs", errors, { min: 0, max: 5000 });
 
-  const providers = checkProviders(raw.providers, errors);
+  const providers = checkProviders(raw.providers, errors, base.providers);
   if (providers) config.providers = providers;
 
   return { config, errors, warnings };
@@ -555,7 +621,7 @@ export function writeUserDefault(agentDir: string, patch: ConfigPatch): ConfigWr
  */
 export function deleteUserDefault(
   agentDir: string,
-  removal: { kind: "path"; path: string } | { kind: "provider"; id: string },
+  removal: { kind: "path"; path: string } | { kind: "provider"; id: string } | { kind: "providerOption"; id: string; optionPath: string },
 ): ConfigWriteResult {
   const file = userConfigPath(agentDir);
   const current = readUserConfigRaw(agentDir);
@@ -563,7 +629,9 @@ export function deleteUserDefault(
   const base = current.raw ?? {};
   const sparse = removal.kind === "path"
     ? removePath(base, removal.path)
-    : removeArrayEntryField(base, "providers", removal.id, "enabled");
+    : removal.kind === "provider"
+      ? removeArrayEntryField(base, "providers", removal.id, "enabled")
+      : removeProviderOption(base, removal.id, removal.optionPath);
   const merged = mergeConfig(defaultConfig(), sparse, file);
   if (merged.errors.length > 0) return { ok: false, problems: merged.errors };
   if (JSON.stringify(sparse) === JSON.stringify(base)) {

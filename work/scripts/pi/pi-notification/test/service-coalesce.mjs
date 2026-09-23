@@ -51,7 +51,7 @@ function makeHarness({ mutateConfig, send } = {}) {
       validate: () => undefined,
       async send(req, signal) {
         sends.push({ id, kind: req.kind, dedupeKey: req.dedupeKey, at: nowMs });
-        if (send) return send(req, signal, sends.length);
+        if (send) return send(req, signal, sends.length, id);
         return undefined;
       },
       async dispose() {},
@@ -362,6 +362,25 @@ await step("Q exceptLevels 严格数组/去重，enabled/end 同样严格校验"
   for (const quietHours of [{ exceptLevels: "error" }, { exceptLevels: ["loud"] }, { exceptLevels: [null] }, { enabled: 1 }, { end: "24:00" }, { end: "08:60" }, null]) {
     assert.ok(configModule.mergeConfig(base, { quietHours }, "test").errors.length > 0);
   }
+});
+
+await step("F 同消息多渠道有界并发，noop 计为跳过且终端不等待邮箱", async () => {
+  const h = makeHarness({ mutateConfig: (c) => { c.delivery.channelConcurrency = 2; }, send: async (_req, _signal, _index, id) => {
+    if (id === "slow-mail") await new Promise((resolve) => setTimeout(resolve, 40));
+  } });
+  h.config.providers = [
+    { id: "terminal", type: "terminal", enabled: true, options: {} },
+    { id: "slow-mail", type: "debug", enabled: true, options: {} },
+    { id: "disabled", type: "debug", enabled: false, options: {} },
+  ];
+  h.service.submit(request({ channels: ["terminal", "slow-mail", "disabled"], dedupeKey: "fan-out" }));
+  await h.settle();
+  assert.deepEqual(h.sends.map((entry) => entry.id), ["terminal", "slow-mail"]);
+  const snapshot = h.service.snapshot();
+  assert.equal(snapshot.delivered, 2);
+  assert.equal(snapshot.skipped, 1);
+  assert.equal(snapshot.byProvider.terminal.delivered, 1);
+  assert.equal(snapshot.byProvider.disabled.skipped, 1);
 });
 
 for (const item of failures) {

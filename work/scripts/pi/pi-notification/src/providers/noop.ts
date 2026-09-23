@@ -13,6 +13,7 @@ export function createNoopNotifier(id: string, type: string, reason?: string): N
   return {
     id,
     type,
+    skipped: reason ?? "渠道不可用",
     validate: () => reason,
     async send(): Promise<void> {},
     async dispose(): Promise<void> {},

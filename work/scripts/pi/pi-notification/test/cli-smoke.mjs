@@ -201,7 +201,8 @@ await step("H 假 provider + 真实 prompt：投递 1 条 run_completed", async 
   const sent = run.plugin.filter((row) => row.event === "delivery");
   assert.equal(sent.length, 1, `H: 期望 1 条投递，实际 ${sent.length} 条`);
   assert.equal(sent[0].kind, "run_completed");
-  assert.equal(sent[0].ok, true);
+  assert.equal(sent[0].ok, false, "noop 不得伪装为已送达成功");
+  assert.equal(sent[0].skipped, true, "非 TTY 本地渠道应统计为跳过");
   assert.equal(sent[0].level, "info");
 
   // stdout belongs to the caller (here a pipe), so no terminal control sequence may enter it.

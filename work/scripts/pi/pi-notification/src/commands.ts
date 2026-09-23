@@ -20,6 +20,7 @@
  */
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { spawn } from "node:child_process";
 
 import {
   describeConfig,
@@ -31,9 +32,10 @@ import {
   type ConfigLoadResult,
 } from "./config.ts";
 import { sanitize, sanitizeError } from "./log.ts";
+import { resolveQqCredential, saveQqCredential, deleteQqCredential } from "./mail/credentials.ts";
 import { createDefaultTerminalIo, selectTerminalChannel } from "./providers/terminal.ts";
 import { evaluateRunOutcome } from "./rules.ts";
-import { builtinDefaultValue, clearItemOverride, sessionOverrideValue, setPatchPath, channelUserFilePatch, type SessionOverlay } from "./settings.ts";
+import { builtinDefaultValue, clearItemOverride, emailTestBlockReason, QQ_MAIL_URL, sessionOverrideValue, setPatchPath, channelUserFilePatch, providerOptionUserFilePatch, type SessionOverlay } from "./settings.ts";
 import { NotifySettingsComponent, type ItemValue, type NotifySettingsSummary, type SettingsHost, type SettingsRestriction } from "./ui.ts";
 import type { Logger, NotificationConfig, NotificationService, RunOutcome, RunSummary } from "./types.ts";
 
@@ -65,9 +67,14 @@ function formatStatus(deps: CommandDeps): string {
   const snapshot = deps.service().snapshot();
   const selection = selectTerminalChannel(createDefaultTerminalIo().environment());
 
+  const email = config.providers.find((provider) => provider.id === "email");
+  const emailConfigured = email?.enabled === true
+    && typeof email.options.from === "string" && email.options.from !== ""
+    && Array.isArray(email.options.to) && email.options.to.length > 0;
   const lines: string[] = [];
   lines.push(`pi-notification: ${config.enabled && !deps.isSilenced() ? "开启" : "关闭"}${deps.isSilenced() ? "（--no-notify）" : ""}`);
   lines.push(`  规则/渠道: ${describeConfig(config)}`);
+  if (deps.sessionId()) lines.push(`  会话: ${deps.sessionId()}${deps.isWaitingForUser?.() ? "（正在等你输入）" : ""}`);
   // “Rule enabled” only means “passes the filter”; it is never a promise that a notification was
   // delivered, and no enabled channel is a state worth spelling out.
   const enabledProviders = config.providers.filter((provider) => provider.enabled);
@@ -81,15 +88,27 @@ function formatStatus(deps: CommandDeps): string {
   const quiet = config.quietHours;
   lines.push(`  静默时段: ${quiet.start}–${quiet.end}（${!quiet.enabled ? "未开启" : deps.service().isQuietHours() ? "当前生效" : "当前未生效"}；本地时间；例外 ${quiet.exceptLevels.join(",") || "无"}）`);  lines.push(`  配置来源: ${load.sources.join(" → ")}${load.degraded ? "（已降级）" : ""}`);
   lines.push(`  用户默认: ${userConfigPath(deps.agentDir())}（单项保存，未保存的项跟随出厂默认）`);
-  lines.push(`  终端机制: ${selection.channel}${selection.reason ? `（${selection.reason}）` : ""}`);
+  const credentialSource = resolveQqCredential().source;
+  const credentialStatus = credentialSource === "vault" ? "Windows 凭据管理器已设置" : credentialSource === "environment" ? "环境变量已设置（回退）" : "未设置";
+  lines.push(`  终端机制: ${selection.channel}${selection.reason ? `（${selection.reason}）` : ""}；邮箱 ${email?.enabled ? (emailConfigured ? "已启用且参数齐全" : "已启用但不可用") : "已关闭"}；QQ SMTP 授权码：${credentialStatus}`);
   lines.push(
-    `  投递统计: 成功 ${snapshot.delivered} / 失败 ${snapshot.failed} / 去重 ${snapshot.deduped}`
+    `  投递统计: 成功 ${snapshot.delivered} / 失败 ${snapshot.failed} / 跳过 ${snapshot.skipped} / 去重 ${snapshot.deduped}`
     + ` / 合并 ${snapshot.coalesced} / 冷却 ${snapshot.cooled}`
     + ` / 丢弃 ${snapshot.dropped} / 在队 ${snapshot.queued} / 在途 ${snapshot.active}`,
   );
+  for (const [providerId, counts] of Object.entries(snapshot.byProvider)) {
+    lines.push(`  渠道 ${providerId}: 成功 ${counts.delivered} / 失败 ${counts.failed} / 跳过 ${counts.skipped}`);
+  }
   lines.push(`  上次成功: ${snapshot.lastOkAt ? new Date(snapshot.lastOkAt).toLocaleString() : "—"}`);
-  if (snapshot.lastError) lines.push(`  上次错误: ${snapshot.lastError}`);
-  if (deps.sessionId()) lines.push(`  会话: ${deps.sessionId()}${deps.isWaitingForUser?.() ? "（正在等你输入）" : ""}`);
+  if (snapshot.lastError) {
+    const smtpDiagnostic = /^(.*)，SMTP 错误代码：([A-Z0-9_]{1,32})$/.exec(snapshot.lastError);
+    if (smtpDiagnostic) {
+      lines.push(`  上次错误: ${smtpDiagnostic[1]}`);
+      lines.push(`  SMTP 错误代码: ${smtpDiagnostic[2]}`);
+    } else {
+      lines.push(`  上次错误: ${snapshot.lastError}`);
+    }
+  }
   // The four diagnostic groups the status page keeps apart: config blocking, current silence, the
   // self-test submission and the real delivery counters. Placed after the session line so the
   // waiting state stays inside the first page.
@@ -138,11 +157,13 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
 
   const applyPatch = (item: Parameters<SettingsHost["setValue"]>[0], value: ItemValue): { ok: true; message: string } | { ok: false; message: string } => {
     const patch = item.patch(value);
+    const prior = deps.overlay();
     const next: SessionOverlay = {
-      patch: patch.kind === "providers" ? deps.overlay().patch : setPatchPath(deps.overlay().patch, patch.path, patch.value),
-      providers: patch.kind === "providers"
-        ? { ...deps.overlay().providers, [patch.id]: patch.value }
-        : { ...deps.overlay().providers },
+      patch: patch.kind === "path" ? setPatchPath(prior.patch, patch.path, patch.value) : prior.patch,
+      providers: patch.kind === "providers" ? { ...prior.providers, [patch.id]: patch.value } : { ...prior.providers },
+      providerOptions: patch.kind === "providerOption"
+        ? { ...prior.providerOptions, [patch.id]: setPatchPath(prior.providerOptions[patch.id] ?? {}, patch.optionPath, patch.value) }
+        : { ...prior.providerOptions },
     };
     deps.setOverlay(next);
     return { ok: true, message: `已应用（仅本对话）「${name(item)}」= ${item.format(item.read(deps.config()))}；Ctrl+S 可设为以后默认` };
@@ -167,13 +188,10 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
       }
       const patch = item.patch(value);
       const filePatch = patch.kind === "providers"
-        ? channelUserFilePatch(
-          deps.userRaw(),
-          patch.id,
-          deps.config().providers.find((provider) => provider.id === patch.id)?.type ?? "terminal",
-          patch.value,
-        )
-        : setPatchPath({}, patch.path, patch.value);
+        ? channelUserFilePatch(deps.userRaw(), patch.id, deps.config().providers.find((provider) => provider.id === patch.id)?.type ?? "terminal", patch.value)
+        : patch.kind === "providerOption"
+          ? providerOptionUserFilePatch(deps.userRaw(), patch.id, deps.config().providers.find((provider) => provider.id === patch.id)?.type ?? "email", patch.optionPath, patch.value)
+          : setPatchPath({}, patch.path, patch.value);
       const result = writeUserDefault(deps.agentDir(), filePatch);
       if (!result.ok) {
         const problems = result.problems.map((problem) => sanitizeError(`${problem.path}: ${problem.message}`));
@@ -181,8 +199,56 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
         return { ok: false, message: `保存失败「${name(item)}」：用户文件未改动（${problems.join("; ")}）` };
       }
       deps.reload(ctx); // Re-read only after a successful write, so both layers refresh together.
-      deps.log.record({ event: "notify_default_saved", item: item.id, path: patch.kind === "providers" ? `providers.${patch.id}.enabled` : patch.path });
+      deps.log.record({ event: "notify_default_saved", item: item.id, path: patch.kind === "providers" ? `providers.${patch.id}.enabled` : patch.kind === "providerOption" ? `providers.${patch.id}.options.${patch.optionPath}` : patch.path });
       return { ok: true, message: `已保存为默认「${name(item)}」= ${item.format(item.read(deps.config()))}（作用范围：以后默认；${sanitize(userConfigPath(deps.agentDir()), 2000)}）` };
+    },
+
+    testEmail() {
+      const config = deps.config();
+      const reason = emailTestBlockReason(config, resolveQqCredential().source !== "missing");
+      if (reason) return { ok: false, message: `邮箱测试未发送：${reason}` };
+      const now = Date.now();
+      deps.service().submit({
+        level: "error", kind: "run_completed", title: "Pi 邮箱渠道测试",
+        body: "这是固定的邮箱渠道测试内容。SMTP 接受不等于最终送达，请检查收件箱及垃圾邮件。",
+        dedupeKey: `manual-email:${now}`, channels: ["email"],
+        meta: { sessionId: deps.sessionId() ?? "manual", runId: String(now), level: "error" },
+      }, { bypassFilters: true });
+      deps.log.record({ event: "notify_email_test_submitted" });
+      return { ok: true, message: "已提交邮箱测试；提交或 SMTP 接受不等于最终送达，请到状态页查看结果并检查收件箱。" };
+    },
+
+    credentialStatus() {
+      const source = resolveQqCredential().source;
+      return source === "vault" ? "已保存于 Windows 凭据管理器" : source === "environment" ? "使用环境变量（兼容回退）" : "未设置";
+    },
+
+    saveCredential(value) {
+      const ok = saveQqCredential(value);
+      deps.log.record({ event: "notify_qq_credential_saved", ok });
+      return ok
+        ? { ok: true, message: "QQ SMTP 授权码已保存到 Windows 凭据管理器（未写入配置或会话）。" }
+        : { ok: false, message: "保存授权码失败：当前系统的 Windows 凭据管理器不可用，或输入不符合要求。" };
+    },
+
+    deleteCredential() {
+      const ok = deleteQqCredential();
+      deps.log.record({ event: "notify_qq_credential_deleted", ok });
+      return ok
+        ? { ok: true, message: resolveQqCredential().source === "environment" ? "已从 Windows 凭据管理器移除；仍会使用环境变量中的授权码。" : "已从 Windows 凭据管理器移除授权码。" }
+        : { ok: false, message: "移除失败：Windows 凭据管理器不可用或没有可移除的授权码。" };
+    },
+
+    openQqSettings() {
+      if (process.platform !== "win32") return { ok: false, message: `请在浏览器中打开 ${QQ_MAIL_URL}，登录后进入「设置 → 帐户」。` };
+      try {
+        const child = spawn("explorer.exe", [QQ_MAIL_URL], { detached: true, stdio: "ignore" });
+        child.on("error", () => {});
+        child.unref();
+        return { ok: true, message: "正在打开 QQ 邮箱官网；登录后进入「设置 → 帐户」，开启 SMTP 并生成授权码。" };
+      } catch {
+        return { ok: false, message: `未能打开浏览器，请手动访问 ${QQ_MAIL_URL}` };
+      }
     },
 
     test() {
@@ -232,7 +298,9 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
     /** “恢复此项内置默认”: clear the user default and the conversation override for one item. */
     restoreBuiltinDefault(item) {
       const removal = item.providerId !== undefined
-        ? { kind: "provider" as const, id: item.providerId }
+        ? item.providerOptionPath
+          ? { kind: "providerOption" as const, id: item.providerId, optionPath: item.providerOptionPath }
+          : { kind: "provider" as const, id: item.providerId }
         : { kind: "path" as const, path: item.userPath };
       const result = deleteUserDefault(deps.agentDir(), removal);
       if (!result.ok) {

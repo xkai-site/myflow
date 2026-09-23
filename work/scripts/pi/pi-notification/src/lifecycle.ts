@@ -67,7 +67,8 @@ export interface Lifecycle {
   onShutdown(reason: ShutdownReason): void;
   currentSessionId(): string | undefined;
   /** Cost accumulated for this session inside this instance. */
-  sessionCostUsd(): number;
+  /** Cost reported by the runtime in this session for this extension instance; undefined means unknown. */
+  sessionCostUsd(): number | undefined;
   /** True while a user prompt is open; shown by `/notify status`. */
   isWaitingForUser(): boolean;
   isStale(): boolean;
@@ -97,8 +98,10 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
     stopReason?: AssistantStopReason;
     errorMessage?: string;
     sawAssistant: boolean;
-    /** Assistant usage accumulated in this run; extra turns and retries stay in the same run. */
+    /** Assistant usage accumulated in this run; shown only if every assistant message reported a cost. */
     costUsd?: number;
+    assistantMessageCount: number;
+    costReportCount: number;
     /** Last non-empty assistant text of this run. */
     assistantText?: string;
     /** Tool failures in this run, deduplicated by tool name, in first-failure order. */
@@ -110,7 +113,8 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
    * rebuilds the instance and resets it. Reading it from the session store would mean
    * pulling session content into this layer, which breaks the plain-data boundary.
    */
-  let sessionCostUsd = 0;
+  let sessionCostUsd: number | undefined;
+  let sessionCostComplete = true;
   /**
    * Depth of open user prompts.
    * Nested or overlapping prompts do not produce an inner span and `ui_prompt_end.kind`
@@ -127,6 +131,8 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
       runId: `${instanceToken}-${counter}`,
       startedAt: now(),
       sawAssistant: false,
+      assistantMessageCount: 0,
+      costReportCount: 0,
       toolFailures: new Map(),
       compactFailed: false,
     };
@@ -166,7 +172,8 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
       if (stale) return;
       boundSessionId = sessionId;
       activeRun = undefined;
-      sessionCostUsd = 0;
+      sessionCostUsd = undefined;
+      sessionCostComplete = true;
       log.record({ event: "lifecycle_session_start", sessionId, reason });
     },
 
@@ -182,11 +189,15 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
       // Allowed without `agent_start` (the instance may take over mid-run), but never invents a start time.
       const run = ensureRun(sessionId);
       run.sawAssistant = true;
+      run.assistantMessageCount += 1;
       run.stopReason = stopReason;
       if (errorMessage !== undefined) run.errorMessage = errorMessage;
-      if (typeof usageCostUsd === "number" && Number.isFinite(usageCostUsd) && usageCostUsd > 0) {
+      if (typeof usageCostUsd === "number" && Number.isFinite(usageCostUsd) && usageCostUsd >= 0) {
+        run.costReportCount += 1;
         run.costUsd = (run.costUsd ?? 0) + usageCostUsd;
-        sessionCostUsd += usageCostUsd;
+        sessionCostUsd = (sessionCostUsd ?? 0) + usageCostUsd;
+      } else {
+        sessionCostComplete = false;
       }
       // Keep only the latest non-empty text: at settle time it is the final assistant reply.
       if (typeof text === "string" && text !== "") run.assistantText = text;
@@ -266,7 +277,9 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
         errorMessage: run?.errorMessage,
         toolFailures,
         ...(run?.compactFailed ? { compactFailed: true } : {}),
-        ...(run?.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
+        ...(run?.costUsd !== undefined && run.costReportCount === run.assistantMessageCount
+          ? { costUsd: run.costUsd }
+          : {}),
         ...(run?.assistantText ? { assistantExcerpt: run.assistantText } : {}),
       };
 
@@ -298,8 +311,8 @@ export function createLifecycle(options: LifecycleOptions): Lifecycle {
       return boundSessionId;
     },
 
-    sessionCostUsd(): number {
-      return sessionCostUsd;
+    sessionCostUsd(): number | undefined {
+      return sessionCostComplete ? sessionCostUsd : undefined;
     },
 
     isWaitingForUser(): boolean {

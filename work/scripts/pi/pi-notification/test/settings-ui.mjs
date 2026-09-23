@@ -116,6 +116,7 @@ function makeHarness(userConfig, options = {}) {
       calls.set.push({ id: item.id, value });
       const patch = item.patch(value);
       if (patch.kind === "providers") overlay.providers[patch.id] = patch.value;
+      else if (patch.kind === "providerOption") overlay.providerOptions[patch.id] = settings.setPatchPath(overlay.providerOptions[patch.id] ?? {}, patch.optionPath, patch.value);
       else overlay.patch = settings.setPatchPath(overlay.patch, patch.path, patch.value);
       return { ok: true, message: "已选择（仅本对话）" };
     },
@@ -124,7 +125,9 @@ function makeHarness(userConfig, options = {}) {
       const patch = item.patch(value);
       const configPatch = patch.kind === "providers"
         ? settings.channelUserFilePatch(host.userRaw(), patch.id, effective().providers.find((provider) => provider.id === patch.id)?.type ?? "terminal", patch.value)
-        : settings.setPatchPath({}, patch.path, patch.value);
+        : patch.kind === "providerOption"
+          ? settings.providerOptionUserFilePatch(host.userRaw(), patch.id, "email", patch.optionPath, patch.value)
+          : settings.setPatchPath({}, patch.path, patch.value);
       const result = configModule.writeUserDefault(agentDir, configPatch);
       return result.ok
         ? { ok: true, message: "已保存为默认" }
@@ -134,6 +137,17 @@ function makeHarness(userConfig, options = {}) {
       calls.test += 1;
       return { ok: true, message: "已提交自检通知" };
     },
+    testEmail() { return { ok: true, message: "已提交邮箱测试；SMTP 接受不等于送达" }; },
+    credentialStatus: () => options.vault?.value ? "已保存于 Windows 凭据管理器" : "未设置",
+    saveCredential(value) {
+      if (options.vault) options.vault.value = value;
+      return { ok: true, message: "授权码已保存" };
+    },
+    deleteCredential() {
+      if (options.vault) delete options.vault.value;
+      return { ok: true, message: "授权码已移除" };
+    },
+    openQqSettings: () => { calls.openQqSettings = (calls.openQqSettings ?? 0) + 1; return { ok: true, message: "已打开 QQ 邮箱" }; },
     reload() {
       calls.reload += 1;
       return { ok: true, message: "已重新读取配置" };
@@ -144,7 +158,7 @@ function makeHarness(userConfig, options = {}) {
     },
     preview() {
       calls.preview += 1;
-      return { ok: true, message: "通知预览（内容示意，不会发送）", lines: ["示例（不会发送）：固定数据", "标题：任务完成", "正文：[示例会话] · 用时 42.3 秒"] };
+      return { ok: true, message: "通知预览（内容示意，不会发送）", lines: ["示例（不会发送）：固定数据", "标题：任务完成 · 示例会话", "正文：本次成本 $0.0123 · 当前会话已知累计 $0.0456"] };
     },
     followUserDefault(item) {
       calls.follow.push(item.id);
@@ -351,6 +365,68 @@ await step("N2 分类行带摘要：通知渠道计数、免打扰开关状态�
   const debug = { providers: [{ id: "hook", type: "debug", enabled: false }] };
   const two = makeHarness(debug);
   assert.match(two.render(80).join("\n"), /0 个已启用|无启用渠道/, "关闭的渠道不应计入启用数");
+});
+
+await step("N2b 邮箱配置位于通知渠道子页并包含规则开关、地址编辑与专用测试", () => {
+  const harness = makeHarness();
+  openRow(harness, "category:channels");
+  assert.ok(harness.state().rows.includes("email-config"));
+  openRow(harness, "email-config");
+  assert.ok(harness.state().rows.includes("item:provider:email"));
+  assert.ok(harness.state().rows.includes("item:provider:email:from"));
+  assert.ok(harness.state().rows.includes("item:provider:email:to"));
+  assert.ok(harness.state().rows.includes("action:email-test"));
+  assert.ok(harness.state().rows.includes("action:credential-save"));
+  assert.ok(harness.state().rows.includes("action:credential-delete"));
+  assert.ok(harness.state().rows.includes("qq:settings"));
+});
+
+await step("N2c 邮箱已开启时测试前提准确指出缺失项，而非误报开关关闭", () => {
+  const harness = makeHarness();
+  openRow(harness, "category:channels");
+  openRow(harness, "email-config");
+  moveToRow(harness, "item:provider:email");
+  harness.press(KEY.space);
+  let effective = harness.host.config();
+  assert.equal(effective.providers.find((provider) => provider.id === "email").enabled, true);
+  assert.match(settings.emailTestBlockReason(effective, false), /已开启.*发件/);
+  harness.host.setValue(itemOf(harness, "provider:email:from"), "sender@qq.com");
+  effective = harness.host.config();
+  assert.match(settings.emailTestBlockReason(effective, false), /已开启.*收件/);
+  harness.host.setValue(itemOf(harness, "provider:email:to"), ["reader@example.org"]);
+  effective = harness.host.config();
+  assert.match(settings.emailTestBlockReason(effective, false), /已开启.*凭据管理器.*PI_NOTIFY_QQ_SMTP_AUTH_CODE/);
+  assert.equal(settings.emailTestBlockReason(effective, true), undefined);
+  effective.providers.find((provider) => provider.id === "email").enabled = false;
+  assert.match(settings.emailTestBlockReason(effective, true), /邮箱渠道未开启/);
+});
+
+await step("N2d 遮蔽输入只进凭据管理器；蓝色官网链接可点击且 Enter 可打开", () => {
+  const vault = {};
+  const harness = makeHarness(undefined, { vault });
+  openRow(harness, "category:channels");
+  openRow(harness, "email-config");
+  moveToRow(harness, "qq:settings");
+  const linked = harness.render(80).join("\n");
+  assert.match(linked, /\x1b\[94m\x1b\]8;;https:\/\/mail\.qq\.com\//);
+  harness.press(KEY.enter);
+  assert.equal(harness.calls.openQqSettings, 1);
+  openRow(harness, "action:credential-save");
+  assert.equal(harness.state().view.kind, "secret");
+  const secret = "qQTOKEN_1234";
+  for (const char of secret) harness.press(char);
+  assert.ok(!harness.render(80).join("\n").includes(secret), "遮蔽输入不应泄露明文");
+  harness.press(KEY.enter);
+  assert.equal(vault.value, secret);
+  assert.ok(!JSON.stringify(harness.host.userRaw() ?? {}).includes(secret), "用户配置不应包含授权码");
+  assert.ok(!harness.render(80).join("\n").includes(secret));
+  openRow(harness, "action:credential-delete");
+  harness.press(KEY.enter); // 默认取消
+  assert.equal(vault.value, secret);
+  openRow(harness, "action:credential-delete");
+  harness.press(KEY.down);
+  harness.press(KEY.enter);
+  assert.equal(vault.value, undefined);
 });
 
 await step("N3 Enter 打开分类/规则，Esc 逐级返回且恢复父级焦点", () => {
@@ -948,12 +1024,12 @@ await step("K3 长页面滚动：焦点行始终在可视窗口内，位置提�
   const providers = Array.from({ length: 15 }, (_, index) => ({ id: `c${String(index + 1).padStart(2, "0")}`, type: "debug", enabled: true }));
   const harness = makeHarness({ providers });
   openRow(harness, "category:channels");
-  assert.equal(harness.state().rows.length, 15, "分类页应有 15 个渠道行");
+  assert.equal(harness.state().rows.length, 16, "分类页包含新增 email 与 15 个自定义渠道");
   for (let index = 0; index < 14; index += 1) harness.press(KEY.down);
   const lines = harness.render(80);
   const focus = focusRow(lines);
   assert.match(focus, /c15/, `焦点应已移到列表下部: ${focus}`);
-  assert.ok(lines.some((line) => /\d+–\d+\/15/.test(line)), `位置提示应在某一行:\n${lines.join("\n")}`);
+  assert.ok(lines.some((line) => /\d+–\d+\/16/.test(line)), `位置提示应在某一行:\n${lines.join("\n")}`);
   const body = lines.slice(2, 14);
   const focusIndex = body.findIndex((line) => line.startsWith("→ "));
   assert.ok(focusIndex >= 6, `滚动后焦点应位于窗口下半部，实际第 ${focusIndex} 行`);
@@ -1298,6 +1374,18 @@ await step("S4 applyOverlay：渠道开关只带 id → enabled，options 不进
   assert.equal(JSON.stringify(overlay).includes("secretEnv"), false, "覆盖里不得出现渠道凭据/options");
 });
 
+await step("S4b 邮箱会话选项快照可恢复，且不把授权码存进会话", () => {
+  const overlay = { patch: {}, providers: { email: true }, providerOptions: { email: { from: "sender@qq.com", to: ["reader@example.org"] } } };
+  const data = settings.overlayEntryData("s", overlay, 1);
+  assert.equal(JSON.stringify(data).includes("PI_NOTIFY_QQ_SMTP_AUTH_CODE"), false);
+  const restored = settings.restoreOverlayFromEntries([{ type: "custom", customType: settings.SESSION_OVERLAY_ENTRY, data }], "s");
+  assert.deepEqual(restored, overlay);
+  const applied = settings.applyOverlay(configModule.defaultConfig(), restored);
+  assert.equal(applied.problems.length, 0);
+  assert.equal(applied.config.providers.find((provider) => provider.id === "email").enabled, true);
+  assert.deepEqual(applied.config.providers.find((provider) => provider.id === "email").options.to, ["reader@example.org"]);
+});
+
 await step("S5 会话覆盖恢复：只认本 sessionId；fork 复制来的旧条目必须忽略", () => {
   const entry = (sessionId, minLevel) => ({
     type: "custom",
@@ -1308,12 +1396,12 @@ await step("S5 会话覆盖恢复：只认本 sessionId；fork 复制来的旧�
   const forB = settings.restoreOverlayFromEntries(entries, "session-B");
   assert.equal(forB.patch.minLevel, "warning", "应恢复本会话自己的覆盖");
   const forC = settings.restoreOverlayFromEntries(entries, "session-C");
-  assert.deepEqual(forC, { patch: {}, providers: {} }, "fork 出来的新会话不得继承旧覆盖");
+  assert.deepEqual(forC, { patch: {}, providers: {}, providerOptions: {} }, "fork 出来的新会话不得继承旧覆盖");
   const twice = [entry("session-B", "error"), entry("session-B", "warning")];
   assert.equal(settings.restoreOverlayFromEntries(twice, "session-B").patch.minLevel, "warning");
   const noise = [{ type: "message" }, { type: "custom", customType: "tools-config", data: { sessionId: "session-B" } }, ...twice];
   assert.equal(settings.restoreOverlayFromEntries(noise, "session-B").patch.minLevel, "warning");
-  assert.deepEqual(settings.restoreOverlayFromEntries(noise, undefined), { patch: {}, providers: {} });
+  assert.deepEqual(settings.restoreOverlayFromEntries(noise, undefined), { patch: {}, providers: {}, providerOptions: {} });
 });
 
 // ---------------------------------------------------------------------------

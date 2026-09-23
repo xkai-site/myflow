@@ -145,6 +145,10 @@ const deliveries = (list) => list.filter((row) => row.event === "delivery");
 /** Extracts the body from a raw OSC 777 sequence, used to assert on body content. */
 const OSC777_HEAD = new RegExp("^\\u001b\\]777;notify;");
 const OSC777_TAIL = new RegExp("\\u0007$");
+function oscTitle(sequence) {
+  const inner = sequence.replace(OSC777_HEAD, "").replace(OSC777_TAIL, "");
+  return inner.includes(";") ? inner.slice(0, inner.indexOf(";")) : inner;
+}
 function oscBody(sequence) {
   const inner = sequence.replace(OSC777_HEAD, "").replace(OSC777_TAIL, "");
   return inner.includes(";") ? inner.slice(inner.indexOf(";") + 1) : "";
@@ -636,6 +640,7 @@ await step("F 失败运行投递 1 条 run_failed(error)", async () => {
   const delta = await host.prompt("hi");
   assert.equal(delta.deliveries.length, 1, `期望 1 条投递，实际 ${delta.deliveries.length} 条`);
   assert.equal(delta.deliveries[0].kind, "run_failed");
+  assert.ok(delta.osc.osc777[0].includes("任务未完成"), "失败标题应明确提示任务未完成");
   assert.equal(delta.deliveries[0].level, "error");
   assert.equal(delta.deliveries[0].ok, true);
   assert.equal(delta.notifies, 1, "失败运行也应恰好写出 1 条终端通知");
@@ -1374,13 +1379,16 @@ async function withEnv(values, run) {
   }
 }
 
-/** Runs one successful run and returns the body of that run's terminal notification. */
-async function runBody(toolFailures = []) {
+/** Runs one successful run and returns its title/body pair from the terminal notification. */
+async function runNotification(toolFailures = []) {
   const delta = toolFailures.length > 0
     ? await contentHost.promptWithToolFailures(toolFailures)
     : await contentHost.prompt("hi");
   assert.equal(delta.osc.osc777.length, 1, `应恰好写出 1 条终端通知，实际 ${delta.osc.osc777.length} 条`);
-  return oscBody(delta.osc.osc777[0]);
+  return { title: oscTitle(delta.osc.osc777[0]), body: oscBody(delta.osc.osc777[0]) };
+}
+async function runBody(toolFailures = []) {
+  return (await runNotification(toolFailures)).body;
 }
 
 await step("R1 内容字段默认值与字段替换：no-op 字段已删，新字段仍严格校验", () => {
@@ -1388,7 +1396,7 @@ await step("R1 内容字段默认值与字段替换：no-op 字段已删，新�
   assert.equal(content.includeSessionLabel, true);
   assert.equal(content.includeAssistantExcerpt, false);
   assert.equal(content.includeCost, true);
-  assert.ok(!("includeSessionName" in content), "首段标识已更名为 includeSessionLabel（语义含项目目录名回退）");
+  assert.ok(!("includeSessionName" in content), "窗口标识字段为 includeSessionLabel（语义含项目目录名回退）");
   assert.ok(!("includePromptExcerpt" in content), "已删除的 no-op 字段不得复活（它会静默失效）");
   // A leftover field from an older config: it is no longer meaningful, but one removed field must not
   // degrade the whole config.
@@ -1402,14 +1410,16 @@ await step("R1 内容字段默认值与字段替换：no-op 字段已删，新�
   }
 });
 
-await step("R2 首段标识：未命名时回退项目目录名，`/name` 后会话名优先，可整栏关闭", async () => {
-  // This host's cwd is TMP/content, so an unnamed session must fall back to [content].
-  const fallback = await runBody();
-  assert.ok(fallback.startsWith(`[${contentHost.label}]`), `未命名时应回退到项目目录名: ${fallback}`);
+await step("R2 窗口标识：标题显示项目/会话名，不暴露内部 session ID，可关闭人类可读名称", async () => {
+  // This host's cwd is TMP/content, so an unnamed session title must fall back to the project basename.
+  const fallback = await runNotification();
+  assert.equal(fallback.title, `任务完成 · ${contentHost.label}`, `未命名时应标出项目名: ${fallback.title}`);
+  assert.doesNotMatch(fallback.title, /session|#[A-Z0-9]{4,}/i, "标题不得暴露 session ID");
 
   contentHost.session.setSessionName("重构登录");
   await contentHost.drain(); // `session_info_changed` 是 void 发出的，先等 handler 落盘
-  assert.ok(await runBody().then((body) => body.startsWith("[重构登录]")), "会话名应优先于项目目录名");
+  const named = await runNotification();
+  assert.equal(named.title, "任务完成 · 重构登录", "会话名应优先于项目目录名");
   const changed = findBy(readJsonl(contentHost.pluginFile), (row) => row.event === "session_name_changed", "session_name_changed");
   assert.equal(changed.hasName, true);
   assert.ok(!JSON.stringify(changed).includes("重构登录"), "日志不得记下会话名本身");
@@ -1417,8 +1427,9 @@ await step("R2 首段标识：未命名时回退项目目录名，`/name` 后会
   // Turning both sources off removes the whole column.
   contentHost.writeUserConfig({ ...CONTENT_CONFIG, content: { includeAssistantExcerpt: true, includeSessionLabel: false } });
   await reloadViaUi(contentHost);
-  const off = await runBody();
-  assert.ok(!off.startsWith("["), `关掉 includeSessionLabel 后不该再有标识: ${off}`);
+  const off = await runNotification();
+  assert.doesNotMatch(off.title, /content|重构登录/, `关闭 includeSessionLabel 后不应显示项目/会话名: ${off.title}`);
+  assert.doesNotMatch(off.title, /#[A-Z0-9]+|session/i, "任何情况下都不应暴露 session ID");
   contentHost.writeUserConfig(CONTENT_CONFIG);
   await reloadViaUi(contentHost);
 });
@@ -1467,11 +1478,13 @@ await step("R4 成本：本次 + 会话累计；includeCost=false 时两者一�
     // First run: this run and the cumulative total are equal, so the value is shown once instead of
     // repeating the same number as "cumulative".
     const first = await runBody();
-    assert.ok(first.includes("成本 $0.0123"), `缺少本次成本: ${first}`);
-    assert.ok(!first.includes("累计"), `首次运行不该重复累计值: ${first}`);
+    assert.ok(first.includes("本次成本 $0.0123"), `缺少本次成本: ${first}`);
+    assert.ok(first.includes("当前会话累计相同"), `首次运行应说明当前累计与本次相同: ${first}`);
+    assert.ok(!first.includes("当前会话已知累计"), `首次运行不应重复成本数值: ${first}`);
     // Second run: the total accumulates across runs inside one instance.
     const second = await runBody();
-    assert.ok(second.includes("成本 $0.0123（累计 $0.0246）"), `累计口径不对: ${second}`);
+    assert.ok(second.includes("本次成本 $0.0123"), `缺少本次成本: ${second}`);
+    assert.ok(second.includes("当前会话已知累计 $0.0246"), `累计口径不对: ${second}`);
   });
   // With the switch off, cost and context usage disappear together: one switch governs both fields.
   contentHost.writeUserConfig({ ...CONTENT_CONFIG, content: { includeAssistantExcerpt: true, includeCost: false } });
@@ -1575,7 +1588,7 @@ await step("K1 聚合模式：工具失败并入运行结果，一次运行仍�
   assert.equal(delta.deliveries.length, 1, `期望 1 条投递，实际 ${delta.deliveries.length} 条`);
   assert.equal(delta.deliveries[0].kind, "run_completed");
   assert.equal(delta.notifies, 1, "工具失败不得另发一条");
-  assert.ok(delta.osc.osc777[0].includes("1 个工具失败: bash"), `结果通知应包含失败工具名: ${delta.osc.osc777[0]}`);
+  assert.ok(delta.osc.osc777[0].includes("结果含工具失败 1 次：bash"), `结果通知应包含失败工具名: ${delta.osc.osc777[0]}`);
   const settled = findBy(readJsonl(s6.pluginFile), (row) => row.event === "run_settled", "run_settled");
   assert.equal(settled.toolFailures, 1, "lifecycle 未累积工具失败");
 });
@@ -1586,7 +1599,7 @@ await step("K2 运行结果不通知时，聚合的工具失败自己发一条�
   assert.equal(delta.deliveries.length, 1);
   assert.equal(delta.deliveries[0].kind, "tool_failed");
   assert.equal(delta.deliveries[0].level, "warning");
-  assert.ok(delta.osc.osc777[0].includes("2 个工具失败: bash, read"), `聚合文案不对: ${delta.osc.osc777[0]}`);
+  assert.ok(delta.osc.osc777[0].includes("工具失败 2 次：bash、read"), `聚合文案不对: ${delta.osc.osc777[0]}`);
 });
 
 await step("K3 immediate 模式：工具一失败就提醒，同 run 的后续事件被合并窗口吸收", async () => {
@@ -1624,6 +1637,7 @@ await step("K4 压缩失败立即提醒（error）；用户自己取消（aborte
     }));
   assert.equal(failed.deliveries.length, 1, "压缩失败必须能发出去（手工 /compact 没有 settled 可等）");
   assert.equal(failed.deliveries[0].kind, "compact_failed");
+  assert.ok(failed.osc.osc777[0].includes("上下文压缩未完成"), "标题应说明压缩未完成");
   assert.equal(failed.deliveries[0].level, "error");
   assert.equal(failed.notifies, 1);
 
@@ -1643,6 +1657,7 @@ await step("K5 等待输入：真 select 触发一条；custom 永久排除；en
   const delta = await s6.command("/probe-prompt");
   assert.equal(delta.deliveries.length, 1, `等待输入未通知: ${JSON.stringify(delta.deliveries)}`);
   assert.equal(delta.deliveries[0].kind, "waiting_for_user");
+  assert.ok(delta.osc.osc777[0].includes("需要你回复"), "标题应明确表示需要用户回复");
   assert.equal(delta.deliveries[0].level, "info");
   assert.ok(delta.osc.osc777[0].includes("选择 A"), `标题应带过来: ${delta.osc.osc777[0]}`);
 

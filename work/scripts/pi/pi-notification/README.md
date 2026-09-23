@@ -1,6 +1,6 @@
 # pi-notification
 
-Pi 扩展：**在一次 agent 运行真正结束时**（而不是每次底层 run 结束时）产生一条**系统桌面通知或 Webhook**，可配置、可关闭。
+Pi 扩展：**在一次 agent 运行真正结束时**（而不是每次底层 run 结束时）产生一条**终端、Webhook 或邮件通知**，可配置、可关闭。
 
 设计方案与全部实测依据：`plans/pi-notification-plugin-design.md`（v1.2，§17 渠道抽象、§18 实测修订）。
 交接与后续计划：`plans/pi-notification-handoff.md`、`plans/pi-notification-plugin-m2.md`。
@@ -8,7 +8,7 @@ Pi 扩展：**在一次 agent 运行真正结束时**（而不是每次底层 ru
 > 当前进度：**MVP + S4 + S6 + S7 + M3-1/M3-2 + M4 + UX-1 已完成** —— 新增 `quietHours` 静默时段、
 > **S5 完整配置面**（原子写盘）、**M4 内容字段**（会话名 / 成本本次+累计 / 上下文占比 / assistant 摘录）、
 > **UX-1 通知设置**（单一入口 + 分类列表 + 内联当前值/用户默认 + Ctrl+S 单项固化）。
-> 尚未做：macOS 原生横幅（`osascript`）、Telegram/Discord/Slack、通知历史与状态行
+> 尚未做：macOS 原生横幅（`osascript`）、Gmail OAuth/API、Telegram/Discord/Slack 专用 provider、通知历史
 > （详见下方「当前能力与缺口」与 `plans/pi-notification-handoff.md` §2）。
 
 ---
@@ -50,11 +50,11 @@ pi remove <同一个路径>       # 卸载（只删登记，不删你的代码�
 pi -e work/scripts/pi/pi-notification/extensions/index.ts
 ```
 
-装完确认一下：TUI 里跑 `/notify`，应看到「通知设置」首页（十个入口，不平铺全部字段），底部常驻 `Ctrl+S 保存为默认`。
+装完确认一下：TUI 里跑 `/notify`，应看到「通知设置」首页（分类导航，不平铺全部字段），底部常驻 `Ctrl+S 保存为默认`。
 想直接确认开关状态就按 `Ctrl+O` 看状态与诊断里的 `pi-notification: 开启/关闭`。
 `PI_NOTIFY_LOG_FILE` 可临时打开诊断记录（能直接看到 `plugin_session_start` 的 `enabled`/`providers`/`degraded`）。
 
-本插件**没有任何第三方依赖**（HTTP 用 Node 内置 `fetch`），也不注册模型 provider、不注册
+本插件使用 Nodemailer（MIT-0）实现 SMTP 邮件发送；HTTP Webhook 用 Node 内置 `fetch`。也不注册模型 provider、不注册
 `tool_call` / `input` / `session_before_*`。
 
 ---
@@ -127,22 +127,25 @@ pi -e work/scripts/pi/pi-notification/extensions/index.ts
   "content": {
     "includeDuration": true,           // 时长
     "includeToolFailureNames": true,   // 工具失败名（关掉只给数量）
-    "includeSessionLabel": true,     // 正文首段：会话名（/name）→ 未命名时用项目目录名
+    "includeSessionLabel": true,     // 标题窗口标识：会话名（/name）→ 未命名时用项目目录名
     "includeCost": true,               // 成本（本次+累计）与上下文占比
     "includeAssistantExcerpt": false,   // **默认关**：assistant 回复前 10 字，可能带出文件内容/密钥
     "maxMessageChars": 300
   },
 
   "delivery": {
-    "timeoutMs": 8000,            // 单次投递的总预算（超时算失败）
+    "timeoutMs": 30000,           // 单次投递的总预算（超时算失败）
     "maxRetries": 1,              // 额外重试次数（指数退避；每次尝试有自己的 deadline）
-    "concurrency": 1,
+    "concurrency": 1,          // 同时处理的通知数
+    "channelConcurrency": 4,   // 同一通知最多并行投递的渠道数（1..8）
     "queueLimit": 50,
     "circuitBreakerFailures": 3   // 连续失败多少次后熔断该渠道（30s 后放行一次探测）
   },
 
   "providers": [
     { "id": "terminal", "type": "terminal", "enabled": true, "options": {} },
+    { "id": "email", "type": "email", "enabled": false,
+      "options": { "transport": { "type": "smtp", "profile": "qq" }, "from": "", "to": [], "subjectPrefix": "[Pi]" } },
     { "id": "hook", "type": "webhook", "enabled": false,
       "options": {
         "url": "https://example.invalid/hook",   // 只允许 http/https，且不得内嵌凭据
@@ -178,7 +181,7 @@ pi -e work/scripts/pi/pi-notification/extensions/index.ts
 底部按焦点类型常驻可用键；Ctrl+S 保存为默认 保留 Ctrl+T 自检 · Ctrl+R 重读 · Ctrl+O 状态与诊断
 ```
 
-首页固定十项，不平铺全部字段；分类行带一行摘要：
+首页固定基础字段和分类入口，不平铺全部字段；分类行带一行摘要：
 
 ```
 通知设置
@@ -234,7 +237,7 @@ Ctrl+S： 已保存为默认「通知规则 · 运行完成 · 开关」= 关闭
 **渠道保存隔离**：`providers` 是数组字段，写盘时整体替换，所以 Ctrl+S 一个渠道开关时，补丁会
 **从原始用户文件重建整份数组**，只改目标渠道的 `enabled`；其他渠道的本对话选择、`options`、未知字段
 与顺序都原样保留（不会把“本对话临时关掉另一个渠道”固化进去，也不会把出厂 `options` 冻结到用户文件）。
-只存在于出厂默认里的渠道会补一条最小条目（`id`/`type`/`enabled`）。
+只存在于出厂默认里的渠道会补一条最小条目（`id`/`type`/`enabled`）。仅保存邮箱字段产生的 email-only 稀疏列表在加载时仍继承内置本机渠道；若只要邮件通知，请显式关闭 `terminal`，不要通过省略它来关闭。
 
 **强制静默是额外限制**：`--no-notify` / `PI_NOTIFY_DISABLE=1` 生效时，界面在列表下方常驻一行
 “额外限制：强制静默（原因）—— 会话级限制，覆盖开关，不代表你的默认被关闭”，
@@ -267,27 +270,30 @@ Windows 的 POSIX mode 不代表 ACL 隔离，测试仅验证创建/替换不报
 
 ### 通知正文里有什么
 
-正文按“先看是哪个任务，再看结果，最后才是可选信息”的顺序用 ` · ` 拼接，整串仍受 `maxMessageChars` 限制：
+通知按“状态 → 项目/会话”组织标题，正文优先给异常与成本，再给耗时和上下文；正文整串仍受 `maxMessageChars` 限制。例：
 
 ```
-[重构登录] · 用时 42.3s · 但 1 个工具失败: bash · 成本 $0.0123（累计 $0.0456） · 上下文 42% · 已修复登录 bug…
+标题：任务完成（含工具失败） · 重构登录
+正文：结果含工具失败 1 次：bash · 本次成本 $0.0123 · 当前会话已知累计 $0.0456 · 用时 42.3s · 上下文 42%
 ```
 
-首段标识的取值顺序是 **会话名（`/name`）→ 项目目录名（`ctx.cwd` 的 basename）→ 两者都无则整段省略**。
-例：未命名会话在 `…/myflow` 下跑完，首段是 `[myflow]`；`/name 重构登录` 之后变成 `[重构登录]`。
+标题会优先显示 `/name` 设置的会话名，否则显示项目目录名；通知不会暴露 session ID。多个窗口若在同一项目下运行，建议分别用 `/name 前端修复`、`/name 后端测试` 命名，便于识别来源。成本严格取 Pi 上报的 `usage.cost.total`：运行时没上报会明确显示“未上报”，不会误显示成免费；运行时明确报 `$0` 时会显示 `$0.0000`。累计口径仅覆盖当前扩展实例；只有窗口内每条 assistant 消息都上报成本时才显示累计值，缺一条就标为“未上报”，避免把部分金额冒充总额。重载后重新累计。
+
+失败时标题为「任务未完成」，正文以「失败原因：」引出已脱敏错误；达到输出长度时标题为「输出已截断」，正文说明已达长度上限并建议检查末尾、决定是否继续。邮件与本机通知复用同一标题/正文（邮件主题额外带前缀）；默认不附 AI 回复摘录，避免把文件内容或敏感信息发出。
+
+标题人类可读标识的取值顺序是 **会话名（`/name`）→ 项目目录名（`ctx.cwd` 的 basename）→ 两者都无则省略**；不附加内部 session ID。
 
 | 字段 | 默认 | 语义 |
 |---|---|---|
 | `includeDuration` | 开 | 本次运行时长 |
-| `includeToolFailureNames` | 开 | 失败工具名；关掉只给“N 个工具失败” |
-| `includeSessionLabel` | 开 | 正文首段 `[标识]`：会话名优先，未命名时回退项目目录名；都无则省略 |
-| `includeCost` | 开 | `成本 <本次>`，有历史运行时附 `（累计 <本实例会话累计>）`；另加 `上下文 <占比>%` |
+| `includeToolFailureNames` | 开 | 失败工具名；关掉只给“工具失败 N 次” |
+| `includeSessionLabel` | 开 | 标题附人类可读窗口标识：会话名优先，未命名时回退项目目录名；关闭后仍不显示 session ID |
+| `includeCost` | 开 | `本次成本 <本次>` + `当前会话已知累计 <已上报累计>`；未上报时明确标注；另加 `上下文 <占比>%` |
 | `includeAssistantExcerpt` | **关** | assistant 最终回复的**前 10 个字**（先清洗、再截断；真截断时标 `…`） |
 
 五条边界（都是刻意的）：
 
-1. **拿不到就不写，不猜一个数字**：`provider` 不报 `usage`、金额为 0（本地模型/免费额度）、
-   拿不到 `model.contextWindow` 时，对应片段直接不出。所以**免费模型不会显示“$0.0000”**。
+1. **成本不猜**：Pi 没有上报 `usage.cost.total` 时明确显示“未上报”；明确上报为 0 才显示 `$0.0000`。上下文比例仍只有拿到 `model.contextWindow` 才展示，低于 1% 不显示。
 2. **累计成本是“本实例内存”口径**：同一会话内跨多次运行累加，`/reload` 或换会话后归零
    （不读 `SessionManager`，不让会话内容进到判定层）。本次与累计相同时只显示一次，避免重复同一个数字。
 3. **上下文占比低于 1% 不显示**（“上下文 0%”是噪声）；占比来自 `ctx.getContextUsage()` 与 `ctx.model.contextWindow`。
@@ -299,8 +305,8 @@ Windows 的 POSIX mode 不代表 ACL 隔离，测试仅验证创建/替换不报
 
 > 原本的 `content.includePromptExcerpt`（用户输入摘录）**已删除**：它被校验但无人读取，属于“设了也没效果”的
 > 假开关。需要“这是哪个任务”用 `includeSessionLabel`，需要“这事办完没有”用 `includeAssistantExcerpt`，
-> 两者都不外传用户输入原文。注意首段标识（会话名或**项目目录名**）会随正文发到所有已配渠道，
-> 包括 Webhook——不想让它外传就关掉 `includeSessionLabel`。
+> 两者都不外传用户输入原文。注意窗口标识（会话名或**项目目录名**）会随标题发到所有已配渠道，
+> 包括 Webhook——不想让人类可读窗口名外传就关掉 `includeSessionLabel`。通知标题/正文不显示 session ID；Webhook 结构化载荷仍按既有契约包含完整 `sessionId`/`runId` 字段。
 
 ### 配置写错会怎样（重要）
 
@@ -360,10 +366,21 @@ CLI 开关：`--no-notify` 让本会话不发通知（不改配置文件）。
 | `terminal` | **OSC 777** | 其它有 TTY 的环境（默认） |
 | `terminal` | **Windows toast** | `platform === "win32"`（Windows Terminal 不渲染 OSC 777） |
 | `webhook` | **HTTP POST** | 需要 `url`；有 `secretEnv` 时对**实际发送的字节**做 HMAC-SHA256 签名 |
+| `email` | QQ SMTP/TLS | 渠道默认关闭；需配置发件人、多个收件人、环境变量授权码，并在每条通知规则中单独勾选 |
 
 本地三种机制按上表自动选择，也可用 `PI_NOTIFY_CHANNEL` 强制。
 **能不能真的看见，取决于终端模拟器**（设计 §13 第 18 项：没有终端焦点 API）。
 macOS 只走 OSC 777，因此 Apple Terminal 不会显示；原生横幅（`osascript`）未实现。
+
+### QQ 邮箱 / 邮件传输
+
+`/notify → 通知渠道 → 邮箱` 开启邮箱并配置 QQ 发件地址、收件人（逗号分隔，支持其他邮箱服务商）和主题前缀。Enter/Space 只对本对话生效，Ctrl+S 可把各项保存为以后默认。邮箱渠道默认关闭；启用后仍需到「通知规则」逐类勾选 `email`，默认规则不会自动增加邮件。要让正常 AI 回复同时触发本机和邮箱通知，请将「运行完成 → 渠道」设为 `terminal` + `email`，并分别 Ctrl+S 保存邮箱开关和规则渠道。邮箱测试只验证邮件链路，不会替你启用正常事件路由。正常邮件的标题/正文复用本机通知内容（邮件标题额外带主题前缀），不会默认发送完整 AI 回复。
+
+1. 在 QQ 邮箱网页设置中开启 SMTP 服务并生成**授权码**（不是 QQ 登录密码）；预置服务器为 `smtp.qq.com:465`、TLS。
+2. 在邮箱页选择「设置 / 更换授权码（遮蔽输入）」，在 Pi 的隐藏输入中输入刚生成的授权码；授权码写入当前 Windows 用户的**凭据管理器**，不写进配置文件、会话或日志。可以随时移除凭据；Pi 状态页只显示存储来源/是否配置，不显示内容。旧的 `PI_NOTIFY_QQ_SMTP_AUTH_CODE` 仍受支持为低优先级回退；凭据管理器中已保存的值优先。建议从 Pi 启动器或秘密管理器注入旧环境变量，不把它写入项目文件。
+3. `/notify → 通知渠道 → 邮箱 → 发送邮箱测试` 只向配置的收件人发固定文本；测试前需启用邮箱并填好发件、收件地址和授权码。缺少任一前提时界面会指出具体原因；“已提交”或 SMTP 接受均不保证最终进入收件箱，需检查收件箱/垃圾邮件以及 `Ctrl+O` 状态统计。邮箱页的蓝色「QQ 邮箱网页版设置 ↗」链接通过 Pi 的默认浏览器打开官方登录页（`https://mail.qq.com/`）；登录后进入「设置 → 帐户」开启 SMTP 并生成授权码。
+
+邮件 sender 通过独立 `MailSender` 接口与邮件通知 provider 解耦。当前只实现 `smtp/qq`；后续可加 Gmail SMTP OAuth 或 Gmail API sender，本期不包含 Gmail。每个收件人分别发送，避免暴露收件列表；服务商可能限制发送频率，失败重试无法在连接中断时保证严格 exactly-once。
 
 ### Webhook 细节
 
@@ -375,8 +392,8 @@ macOS 只走 OSC 777，因此 Apple Terminal 不会显示；原生横幅（`osas
   "version": 1,
   "event": "run_failed",
   "level": "error",
-  "title": "任务失败",
-  "body": "用时 1.2s · 1 个工具失败: bash",
+  "title": "任务未完成",
+  "body": "失败原因：provider error · 用时 1.2s · 工具失败 1 次：bash",
   "dedupeKey": "<sessionId>:<runId>:run_failed",
   "sessionId": "…", "runId": "…", "durationMs": 1200, "at": 1700000000000
 }
@@ -425,7 +442,7 @@ macOS 只走 OSC 777，因此 Apple Terminal 不会显示；原生横幅（`osas
 ## 当前能力与缺口
 
 **能做**：判定 completed/failed/aborted/unknown（含 `length` → warning）→ 规则映射等级与渠道 →
-门槛/去重/**静默时段/合并窗口/冷却** → 入队 → 在独立任务里投递（终端/系统通知、Webhook）→
+门槛/去重/**静默时段/合并窗口/冷却** → 入队 → 在独立任务里并发投递（终端/系统通知、Webhook、QQ SMTP 邮件）→
 内置超时/重试/熔断/脱敏；工具失败聚合、压缩失败、等待输入；
 正文内容字段（会话名 / 成本本次+累计 / 上下文占比 / assistant 摘录）；
 用户级默认读盘（含降级、**无项目级层**）；设置界面的单项稀疏原子写盘；
@@ -476,14 +493,15 @@ macOS 只走 OSC 777，因此 Apple Terminal 不会显示；原生横幅（`osas
 ```bash
 cd work/scripts/pi/pi-notification
 
-MSYS_NO_PATHCONV=1 npm test                        # 全部十套（211 步）
+MSYS_NO_PATHCONV=1 npm test                        # 全部回归（含离线邮箱 sender/provider 测试）
 MSYS_NO_PATHCONV=1 node test/config-validation.mjs  # 配置校验矩阵：字段边界/降级/稀疏与原子写盘（不需要 SDK，13 步）
 MSYS_NO_PATHCONV=1 node test/settings-patch.mjs     # 稀疏补丁与配置项助手：合并/删除语义、overlay、用户默认、渠道补丁（不需要 SDK，17 步）
 MSYS_NO_PATHCONV=1 node test/registry-log.mjs       # 渠道注册降级 + 脱敏/清洗/日志 sink（不需要 SDK，9 步）
 MSYS_NO_PATHCONV=1 node test/lifecycle-state.mjs    # 状态机结构性丢弃与投递服务边界（注入假时钟，13 步）
 MSYS_NO_PATHCONV=1 node test/terminal-channel.mjs   # 终端渠道：选择/渲染/注入面/TTY 纪律（不需要 SDK，10 步）
 MSYS_NO_PATHCONV=1 node test/service-coalesce.mjs   # 投递服务：门槛/去重/静默/合并/冷却/队列/超时（注入假时钟，22 步）
-MSYS_NO_PATHCONV=1 node test/webhook-channel.mjs    # Webhook + 装饰器（回环 HTTP 服务，不出网，13 步）
+MSYS_NO_PATHCONV=1 node test/webhook-channel.mjs    # Webhook + 装饰器（回环 HTTP 服务，不出网）
+MSYS_NO_PATHCONV=1 node test/email-channel.mjs      # 邮箱 sender/provider（注入假 SMTP，不接公网/不需真实授权码）
 MSYS_NO_PATHCONV=1 node test/settings-ui.mjs        # 设置界面纯组件：首页/导航/搜索/预览/恢复/条件展示/全页渲染扫描（50 步）
 MSYS_NO_PATHCONV=1 node test/host-lifecycle.mjs     # 真实宿主会话：判定/去重/阻塞/配置/单一入口与三层值/导航/恢复（54 步）
 MSYS_NO_PATHCONV=1 node test/cli-smoke.mjs          # 真实 pi 进程（G–N，10 步）
@@ -534,11 +552,11 @@ M4 之后建议顺手看一眼（不必单独一轮）：正文里会话名、�
 | Webhook + 装饰器（13） | URL/`secretEnv`/headers 校验、载荷字段形状、真实 POST + HMAC 可复算、无密钥不签名、非 2xx 报错且脱敏、不跟随重定向、abort、重试与退避、熔断开/半开/关闭、单次 deadline、出口脱敏、`validate/format/dispose` 透传 |
 | 判定与去重（A–F, H, 对照） | 纯命令不产生生命周期、一次运行 1 条投递且真的写出 1 条通知、settled→下一次 run < 250ms（取 3 次最小值，**带阻塞对照组**）、reload 后不叠加、失败判定、非 TTY 跳过留痕、不改写配置文件 |
 | 配置（I1–I9） | 默认值、`enabled=false`、`minLevel` 门槛、规则开关、**损坏配置降级且失败通知仍发得出**、非法字段值、渠道切换、未定义渠道、**项目级层已删除**（文件存在且项目被信任也不读） |
-| 设置组件（N/SE/PR/RS/RA/R/K/D/C/I/V/F/S/X，50 条） | 首页固定十项与分类摘要、分类/规则/字段导航栈与 Esc 逐级返回、状态/输入/帮助/搜索返回原入口并保留父级焦点、条件收起（免打扰/规则关闭/immediate 专用窗口）、Space 切换与 footer 按焦点给键、窄屏菜单标签优先且 footer 含 Ctrl+S、**全页面 20/24/30/40/80 列渲染扫描（无 `undefined`/`[object`/`null` 占位且不超宽）**、搜索覆盖全字段并标注未生效、纯本地预览零投递、`a`/`d` 单项恢复与确认页默认取消、恢复失败不改盘且不提前清会话值、字段行内联当前值（中文）、标记列固定占位、Ctrl+S 标记迁移与状态行确认、稀疏单项落盘、Ctrl+S 只写已生效值、集合多选与整数组保存、数值/时间自定义输入校验、强制静默作额外限制、overlay 优先级与 base 继承、fork 不继承 |
+| 设置组件（N/SE/PR/RS/RA/R/K/D/C/I/V/F/S/X，50 条） | 首页固定字段与分类摘要、邮箱子页与测试动作、分类/规则/字段导航栈与 Esc 逐级返回、状态/输入/帮助/搜索返回原入口并保留父级焦点、条件收起（免打扰/规则关闭/immediate 专用窗口）、Space 切换与 footer 按焦点给键、窄屏菜单标签优先且 footer 含 Ctrl+S、**全页面 20/24/30/40/80 列渲染扫描（无 `undefined`/`[object`/`null` 占位且不超宽）**、搜索覆盖全字段并标注未生效、纯本地预览零投递、`a`/`d` 单项恢复与确认页默认取消、恢复失败不改盘且不提前清会话值、字段行内联当前值（中文）、标记列固定占位、Ctrl+S 标记迁移与状态行确认、稀疏单项落盘、Ctrl+S 只写已生效值、集合多选与整数组保存、数值/时间自定义输入校验、强制静默作额外限制、overlay 优先级与 base 继承、fork 不继承 |
 | 单一入口与三层值（J1–J14） | 非 TUI 只打印状态/路径且不写盘不投递、旧子命令只给指路、TUI 打开组件且 Esc 不改盘、Enter 只改本对话且立即生效（反馈写明字段名/值/范围）、覆盖跨 `/reload` 保留、**清空最后一项后 `/reload` 不复活旧值**、Ctrl+S 单项稀疏写盘（两项并存，确认写明字段名/值/以后默认）、Ctrl+R/Ctrl+O/Ctrl+T 折叠动作等价、状态页可见重读动作、无启用渠道时解释送达前提、恢复总开关默认时如实说明仍强制静默、写盘失败报错并写明字段名、**渠道保存隔离**、强制静默不可绕过、非 TUI/RPC 守卫与凭据隐藏 |
 | 合并/冷却（L0–L2） | 默认参数符合设计、默认配置下 1.5s 内两次运行只发一条（并留 `cooldown_drop`）、`cooldownMs=0` 后恢复每条 |
 | 工具失败/压缩失败/等待输入（K1–K6） | 聚合进结果通知、结果不通知时单独发、immediate 立刻发且并行失败被合并、压缩失败 error（用户取消不发）、真 `select` 触发等待通知、`custom` 排除、`end`/reload 复位等待 |
-| 正文内容字段（R1–R5） | 新字段默认值与更名、已删 no-op 字段不复活（且旧配置不因此降级）+ 新字段类型错仍降级、首段标识的项目名回退/会话名优先/整栏关闭/日志不记名字、摘录默认关闭 + 10 字截断 + `…` 标记 + 悬空标点去除 + 恰好 10 字不补标记 + 换行归一 + 转义序列整段删除（注入面）、成本本次与跨 run 累计 + 关闭后与占比一起消失、上下文占比 42% 显示且 <1% 不显示 |
+| 正文内容字段（R1–R5） | 新字段默认值与更名、已删 no-op 字段不复活（且旧配置不因此降级）+ 新字段类型错仍降级、标题窗口标识的项目名回退/会话名优先/可关闭人类可读名/日志不记名字、摘录默认关闭 + 10 字截断 + `…` 标记 + 悬空标点去除 + 恰好 10 字不补标记 + 换行归一 + 转义序列整段删除（注入面）、成本本次与跨 run 累计 + 关闭后与占比一起消失、上下文占比 42% 显示且 <1% 不显示 |
 | Webhook 端到端（M1–M3） | 真实 POST + HMAC、日志不出现 query/密钥、非法配置降级为 noop 且不发、`§17.3` 反回退（lifecycle/rules 无渠道名、service 不认识 webhook、未注册 `agent_end`） |
 | 真实 CLI（G–N） | `/notify` 在真实进程里可派发、退出干净、stdout 未被污染、非 TUI 不写盘；旧子命令只给指路且不改写用户文件；**稀疏用户默认跨进程生效**（预置单项 `runCompleted.enabled=false` 后新进程零投递，未保存字段仍跟随出厂默认） |
 

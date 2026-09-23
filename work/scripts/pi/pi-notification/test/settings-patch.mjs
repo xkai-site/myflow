@@ -111,18 +111,19 @@ await step("P4 补丁不能替换结果的原型：__proto__ / constructor / pro
 });
 
 await step("S1 overlay 形状防御：空 overlay 与非法条目", () => {
-  assert.deepEqual(settings.emptyOverlay(), { patch: {}, providers: {} });
+  assert.deepEqual(settings.emptyOverlay(), { patch: {}, providers: {}, providerOptions: {} });
   assert.equal(settings.isEmptyOverlay(settings.emptyOverlay()), true);
-  assert.equal(settings.isEmptyOverlay({ patch: { enabled: false }, providers: {} }), false);
-  assert.equal(settings.isEmptyOverlay({ patch: {}, providers: { terminal: false } }), false);
+  assert.equal(settings.isEmptyOverlay({ patch: { enabled: false }, providers: {}, providerOptions: {} }), false);
+  assert.equal(settings.isEmptyOverlay({ patch: {}, providers: { terminal: false }, providerOptions: {} }), false);
 
   assert.equal(settings.overlayFromEntry(undefined), undefined);
   assert.equal(settings.overlayFromEntry(42), undefined);
-  assert.deepEqual(settings.overlayFromEntry({ patch: {}, providers: {} }), { patch: {}, providers: {} },
+  assert.deepEqual(settings.overlayFromEntry({ patch: {}, providers: {} }), { patch: {}, providers: {}, providerOptions: {} },
     "空快照是合法状态（已清空），必须保留以免 /reload 复活旧值");
   assert.deepEqual(settings.overlayFromEntry({ patch: "broken", providers: { a: "yes", b: true } }), {
     patch: {},
     providers: { b: true },
+    providerOptions: {},
   }, "非对象 patch 归一为空，providers 只保留布尔值");
 });
 
@@ -345,7 +346,7 @@ await step("S10 恢复清空最后一个 overlay：空快照仍然被认作有�
   const entries = [entry("s", { minLevel: "error" }), entry("s", {})];
   assert.deepEqual(
     settings.restoreOverlayFromEntries(entries, "s"),
-    { patch: {}, providers: {} },
+    { patch: {}, providers: {}, providerOptions: {} },
     "最后一条空快照表示已清空，不能被忽略而恢复成 error",
   );
 });
@@ -395,12 +396,12 @@ await step("S13 clearItemOverride：只清目标项的本对话覆盖（普通�
   const minLevel = itemOf("minLevel");
   const terminal = itemOf("provider:terminal");
   assert.deepEqual(
-    settings.clearItemOverride({ patch: { minLevel: "error", enabled: false }, providers: {} }, minLevel),
-    { patch: { enabled: false }, providers: {} },
+    settings.clearItemOverride({ patch: { minLevel: "error", enabled: false }, providers: {}, providerOptions: {} }, minLevel),
+    { patch: { enabled: false }, providers: {}, providerOptions: {} },
   );
   assert.deepEqual(
-    settings.clearItemOverride({ patch: {}, providers: { terminal: false, debug: true } }, terminal),
-    { patch: {}, providers: { debug: true } },
+    settings.clearItemOverride({ patch: {}, providers: { terminal: false, debug: true }, providerOptions: {} }, terminal),
+    { patch: {}, providers: { debug: true }, providerOptions: {} },
   );
 });
 

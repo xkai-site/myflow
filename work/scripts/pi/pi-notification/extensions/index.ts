@@ -37,6 +37,7 @@ import { createLifecycle } from "../src/lifecycle.ts";
 import { createLogger } from "../src/log.ts";
 import { withReliability } from "../src/providers/decorators.ts";
 import { createDebugNotifier } from "../src/providers/debug.ts";
+import { createEmailNotifier } from "../src/providers/email.ts";
 import { createRegistry } from "../src/providers/registry.ts";
 import { createTerminalNotifier } from "../src/providers/terminal.ts";
 import { createWebhookNotifier, type WebhookOptions } from "../src/providers/webhook.ts";
@@ -52,6 +53,7 @@ import {
   applyOverlay,
   emptyOverlay,
   isEmptyOverlay,
+  overlayEntryData,
   restoreOverlayFromEntries,
   type SessionOverlay,
 } from "../src/settings.ts";
@@ -151,6 +153,11 @@ export default function piNotification(pi: ExtensionAPI): void {
   // Diagnostic channel: writes the notification as one log line instead of touching the output.
   registry.register("debug", (id) =>
     reliable(createDebugNotifier(id, { log, maxChars: config.content.maxMessageChars })));
+  // QQ SMTP email channel; transport protocol selection stays behind MailSender.
+  registry.register("email", (id, options) =>
+    reliable(createEmailNotifier(id, (options ?? {}) as Record<string, unknown>, {
+      log, maxChars: config.content.maxMessageChars, timeoutMs: config.delivery.timeoutMs,
+    })));
   // Generic HTTP POST channel, the only type that needs credentials and the network.
   registry.register("webhook", (id, options) =>
     reliable(createWebhookNotifier(id, (options ?? {}) as WebhookOptions, { log, maxChars: config.content.maxMessageChars })));
@@ -268,12 +275,7 @@ export default function piNotification(pi: ExtensionAPI): void {
    */
   function persistOverlay(): void {
     try {
-      pi.appendEntry(SESSION_OVERLAY_ENTRY, {
-        sessionId: currentSessionId,
-        patch: overlay.patch,
-        providers: overlay.providers,
-        at: Date.now(),
-      });
+      pi.appendEntry(SESSION_OVERLAY_ENTRY, overlayEntryData(currentSessionId, overlay, Date.now()));
     } catch (error) {
       // Without a session file `appendEntry` may be unavailable; the in-memory overlay still applies.
       log.log("warning", "本对话覆盖未能写入会话（仅本次进程内有效）", {

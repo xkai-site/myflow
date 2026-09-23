@@ -67,21 +67,16 @@ function joinBody(parts: string[], config: NotificationConfig): string {
   return sanitize(parts.filter((part) => part !== "").join(" · "), config.content.maxMessageChars);
 }
 
-/**
- * Cost rendering.
- * Both "provider reports no usage" (undefined) and "reported as 0" (local model,
- * free quota) stay silent: printing `$0.0000` would wrongly suggest it was free.
- */
+/** Cost rendering preserves the difference between an explicit zero and a missing runtime report. */
 function formatUsd(value: number | undefined): string {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return "";
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "未上报";
   // A single call is often a fraction of a cent: four decimals for small amounts, two for large.
-  const text = value < 1 ? value.toFixed(4) : value.toFixed(2);
-  return Number(text) <= 0 ? "" : `$${text}`;
+  return value < 1 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
 }
 
 /**
- * Leading identity label: session name first, else the project directory name.
- * Most users never run `/name`, so without the fallback this part of the body
+ * Human-readable window identity: session name first, else the project directory name.
+ * Most users never run `/name`, so without the fallback this part of the title
  * would never appear for them. White-space-only values count as absent.
  */
 function identityLabel(summary: RunSummary | undefined): string {
@@ -121,13 +116,17 @@ function request(input: {
   runId: string;
   durationMs?: number;
   maxChars: number;
+  /** Human-readable session/project label; no internal session identifier is exposed. */
+  identity?: string;
   /** Optional per-request coalescing window (defaults to `config.coalesce.windowMs`). */
   coalesceWindowMs?: number;
 }): NotificationRequest {
+  const identity = input.identity ? sanitize(input.identity, 24) : "";
+  const titleBudget = identity ? Math.max(1, 60 - identity.length - 3) : 60;
   return {
     level: input.level,
     kind: input.kind,
-    title: sanitize(input.title, 60),
+    title: identity ? `${sanitize(input.title, titleBudget)} · ${identity}` : sanitize(input.title, 60),
     body: sanitize(input.body, input.maxChars),
     dedupeKey: input.dedupeKey,
     ...(input.coalesceWindowMs !== undefined ? { coalesceWindowMs: input.coalesceWindowMs } : {}),
@@ -154,9 +153,9 @@ function ruleOf(config: NotificationConfig, kind: NotificationKind) {
 export function describeToolFailures(failures: ToolFailure[], config: NotificationConfig): string {
   if (failures.length === 0) return "";
   const total = failures.reduce((sum, failure) => sum + failure.count, 0);
-  if (!config.content.includeToolFailureNames) return `${total} 个工具失败`;
-  const names = failures.map((failure) => failure.toolName).join(", ");
-  return `${total} 个工具失败: ${names}`;
+  if (!config.content.includeToolFailureNames) return `工具失败 ${total} 次`;
+  const names = failures.map((failure) => failure.toolName).join("、");
+  return `工具失败 ${total} 次：${names}`;
 }
 
 /**
@@ -181,30 +180,30 @@ export function evaluateRunOutcome(
 
   const truncated = outcome.stopReason === "length";
   const title =
-    kind === "run_completed" ? (truncated ? "任务完成（输出被截断）" : "任务完成")
-      : kind === "run_failed" ? "任务失败"
+    kind === "run_completed" ? (truncated ? "输出已截断" : outcome.toolFailures.length > 0 ? "任务完成（含工具失败）" : "任务完成")
+      : kind === "run_failed" ? "任务未完成"
         : "任务已取消";
 
   const parts: string[] = [];
-  // Order is reading priority: which task, then the result, then cost and the excerpt
-  // the user may not want.
-  if (config.content.includeSessionLabel) {
-    const label = identityLabel(input.summary);
-    if (label !== "") parts.push(`[${label}]`);
-  }
+  // Status and the named window are in the title; the body prioritizes result and cost.
+  const identity = config.content.includeSessionLabel ? identityLabel(input.summary) : "";
   if (kind === "run_failed" && outcome.errorMessage) {
-    parts.push(sanitizeError(outcome.errorMessage, config.content.maxMessageChars));
+    parts.push(`失败原因：${sanitizeError(outcome.errorMessage, config.content.maxMessageChars)}`);
   }
+  if (truncated) parts.push("已达到输出长度上限；请检查末尾并决定是否继续");
   if (config.content.includeDuration && outcome.durationMs > 0) {
     parts.push(`用时 ${formatDuration(outcome.durationMs)}`);
   }
   const failures = describeToolFailures(outcome.toolFailures, config);
-  if (failures !== "") parts.push(kind === "run_completed" ? `但 ${failures}` : failures);
+  if (failures !== "") parts.push(kind === "run_completed" ? `结果含${failures}` : failures);
   if (config.content.includeCost) {
     const cost = formatUsd(outcome.costUsd);
-    if (cost !== "") {
-      const cumulative = formatUsd(input.summary?.cumulativeCostUsd);
-      parts.push(cumulative === "" || cumulative === cost ? `成本 ${cost}` : `成本 ${cost}（累计 ${cumulative}）`);
+    const cumulative = formatUsd(input.summary?.cumulativeCostUsd);
+    if (cost !== "未上报" && cost === cumulative) {
+      parts.push(`本次成本 ${cost}（当前会话累计相同）`);
+    } else {
+      parts.push(`本次成本 ${cost}`);
+      parts.push(`当前会话已知累计 ${cumulative}`);
     }
     const percent = input.summary?.contextPercent;
     if (typeof percent === "number" && Number.isFinite(percent) && percent >= MIN_CONTEXT_PERCENT) {
@@ -228,6 +227,7 @@ export function evaluateRunOutcome(
     runId: outcome.runId,
     durationMs: outcome.durationMs,
     maxChars: config.content.maxMessageChars,
+    ...(identity ? { identity } : {}),
   });
 }
 
@@ -273,7 +273,7 @@ export function evaluateToolFailure(
   return request({
     kind: "tool_failed",
     level: rule.level,
-    title: immediate ? `工具 ${input.toolName} 失败` : "工具失败",
+    title: immediate ? `工具执行失败：${input.toolName}` : "工具执行失败",
     body,
     dedupeKey: immediate
       ? `${input.sessionId}:${input.runId}:tool_failed:${input.toolName}`
@@ -352,7 +352,7 @@ export function evaluateCompactFailure(
   return request({
     kind: "compact_failed",
     level: rule.level,
-    title: "上下文压缩失败",
+    title: "上下文压缩未完成",
     body: joinBody(parts, config),
     dedupeKey: `${input.sessionId}:compact_failed:${input.seq}`,
     channels: rule.channels,
@@ -380,13 +380,13 @@ export function evaluateWaitingForUser(
   if (!rule.kinds.includes(input.kind as (typeof rule.kinds)[number])) return null;
 
   const body = input.title && input.title.trim() !== ""
-    ? `等待你确认：${input.title}`
+    ? `需要你处理：${input.title}`
     : `Pi 正在等待你输入（${input.kind}）`;
 
   return request({
     kind: "waiting_for_user",
     level: rule.level,
-    title: "轮到你输入",
+    title: "需要你回复",
     body,
     dedupeKey: `${input.sessionId}:waiting_for_user:${input.seq}`,
     channels: rule.channels,

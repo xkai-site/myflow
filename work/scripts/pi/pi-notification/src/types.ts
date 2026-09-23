@@ -165,6 +165,8 @@ export type RuleEvaluator = (
 export interface Notifier {
   readonly id: string;
   readonly type: string;
+  /** Present on Null Object channels: work was skipped, not delivered successfully. */
+  readonly skipped?: string;
   /** Validates its own options; a returned string means unusable. Must not throw. */
   validate(options: unknown): string | undefined;
   /** Optional channel-specific payload; falls back to the generic title/body. */
@@ -186,6 +188,7 @@ export interface NotifierRegistry {
 export interface DeliveryResult {
   providerId: string;
   ok: boolean;
+  skipped?: boolean;
   attempts: number;
   /** Already redacted. */
   error?: string;
@@ -218,6 +221,8 @@ export interface ServiceSnapshot {
   active: number;
   delivered: number;
   failed: number;
+  skipped: number;
+  byProvider: Record<string, { delivered: number; failed: number; skipped: number; lastError?: string }>;
   deduped: number;
   dropped: number;
   /** Notifications dropped by the per-run coalescing window. */
@@ -285,7 +290,7 @@ export interface NotificationConfig {
   content: {
     includeDuration: boolean;
     includeToolFailureNames: boolean;
-    /** Leading identity label: session name, else project directory name, else omitted. */
+    /** Add session name or project directory to the title; a short session id is always shown. */
     includeSessionLabel: boolean;
     /** Leading characters of the final assistant reply; off by default (may carry file content or secrets). */
     includeAssistantExcerpt: boolean;
@@ -297,6 +302,7 @@ export interface NotificationConfig {
     timeoutMs: number;
     maxRetries: number;
     concurrency: number;
+    channelConcurrency: number;
     queueLimit: number;
     /** Consecutive failures before a channel is tripped open; 0 disables the breaker. */
     circuitBreakerFailures: number;
