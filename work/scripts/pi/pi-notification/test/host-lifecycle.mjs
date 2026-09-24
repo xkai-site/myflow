@@ -865,40 +865,53 @@ const K = {
 const CLOSE = [K.esc, K.esc, K.esc, K.esc, K.esc, K.esc];
 
 /**
- * Key sequence that walks the home page to one setting's row: home → category (→ rule) → row.
- * The layout is derived from `settings.ts` (`SETTING_CATEGORIES`, `RULE_INFOS`, item order), so the
- * number of key presses stays deterministic without hardcoding row positions in the test.
+ * Key sequence that walks the task-oriented home page to a setting. Home rows and nested section
+ * positions mirror buildHomePage/buildCategoryPage; field ordering still comes from settings.ts.
  */
 function routeToItem(settingsModule, items, id, config) {
   const item = items.find((candidate) => candidate.id === id);
   assert.ok(item, `未知配置项: ${id}`);
   const homeRow = (key) => {
-    const index = key === "item:enabled" ? 0 : key === "item:minLevel" ? 1 : -1;
+    const index = key === "item:enabled" ? 0 : -1;
     assert.ok(index >= 0, `未知首页行: ${key}`);
     return index;
   };
   if (item.rule) {
-    const categoryIndex = 2 + settingsModule.SETTING_CATEGORIES.findIndex((category) => category.id === "rules");
     const ruleIndex = settingsModule.RULE_INFOS.findIndex((rule) => rule.key === item.rule.key);
     assert.ok(ruleIndex >= 0, `未知规则: ${item.rule.key}`);
     const ruleItems = items.filter((candidate) => candidate.rule?.key === item.rule.key);
     const rowIndex = ruleItems.findIndex((candidate) => candidate.id === id);
-    return [categoryIndex, ruleIndex, rowIndex];
+    return [1, ruleIndex, rowIndex]; // home → 提醒时机 → rule field
+  }
+  if (id === "minLevel") return [4, 0]; // home → 更多设置 → 提醒级别
+  if (id === "provider:email" || item.providerOptionPath) {
+    const channelItems = settingsModule.categoryPageItems(
+      settingsModule.SETTING_CATEGORIES.find((category) => category.id === "channels"), items, config,
+    ).items.filter((candidate) => candidate.id !== "provider:email");
+    const emailRows = items.filter((candidate) => candidate.providerId === "email");
+    const emailIndex = emailRows.findIndex((candidate) => candidate.id === id);
+    assert.ok(emailIndex >= 0, `不可达邮箱配置项: ${id}`);
+    return [2, channelItems.length, emailIndex]; // home → 接收方式 → 邮箱提醒 → field
   }
   const category = settingsModule.SETTING_CATEGORIES.find((candidate) => candidate.group === item.group);
   if (!category) return [homeRow(`item:${id}`)];
-  const categoryIndex = 2 + settingsModule.SETTING_CATEGORIES.findIndex((candidate) => candidate.id === category.id);
-  const collapsed = category.collapsed && category.collapsed.when(config) && category.collapsed.ids.includes(id);
-  if (collapsed) {
-    const subgroupItems = items.filter((candidate) => candidate.id === id);
-    const rowIndex = subgroupItems.length > 0 ? 0 : -1;
-    assert.ok(rowIndex >= 0, `不可达配置项: ${id}`);
-    return [categoryIndex, 0, 0];
-  }
   const groupItems = items.filter((candidate) => candidate.group === item.group && (candidate.visible?.(config) ?? true));
   const rowIndex = groupItems.findIndex((candidate) => candidate.id === id);
   assert.ok(rowIndex >= 0, `当前页不可见配置项: ${id}`);
-  return [categoryIndex, rowIndex];
+  const collapsed = category.collapsed && category.collapsed.when(config) && category.collapsed.ids.includes(id);
+  if (category.id === "content" || category.id === "quietHours" || category.id === "advanced") {
+    const more = settingsModule.SETTING_CATEGORIES.find((candidate) => candidate.id === "more");
+    const sectionIndex = 1 + more.sections.indexOf(category.id); // minLevel occupies row 0
+    if (collapsed) {
+      const collapsedIndex = category.collapsed.ids.indexOf(id);
+      assert.ok(collapsedIndex >= 0, `不可达配置项: ${id}`);
+      return [4, sectionIndex, 1, collapsedIndex]; // section → subgroup row → field
+    }
+    return [4, sectionIndex, rowIndex];
+  }
+  const homeCategoryIndex = category.id === "rules" ? 1 : category.id === "channels" ? 2 : -1;
+  assert.ok(homeCategoryIndex >= 0, `没有主屏入口的分类: ${category.id}`);
+  return [homeCategoryIndex, rowIndex];
 }
 
 /** Down-presses per page, with Enter between pages; `open` adds the Enter that opens the field. */
@@ -1029,17 +1042,25 @@ await step("J3 TUI：/notify 打开设置；Esc 关闭不改磁盘与内存", as
   assert.deepEqual(settings.runtimeErrors, []);
 });
 
-await step("J4 footer 分层提示：字段页显示 Ctrl+S，首页不堆叠高级快捷键", async () => {
-  const delta = await driveSettings([K.down, K.esc]);
-  const frames = settingsDriver.renders;
-  assert.ok(frames.length >= 2, "应有按键后的渲染快照");
-  for (const frame of frames) {
-    const tail = frame.slice(-4).join("\n");
-    assert.match(tail, /Ctrl\+S 设为以后默认/, `footer 丢了 Ctrl+S 提示:\n${tail}`);
-    assert.ok(!/Ctrl\+T 自检|Ctrl\+O 状态与诊断/.test(tail), `首页不应堆叠高级快捷键:\n${tail}`);
-    assert.ok(!/save as default/.test(tail), `footer 不应再是英文:\n${tail}`);
-  }
-  assert.equal(delta.deliveries.length, 0);
+await step("J4 footer 按焦点提示操作：字段可保存，导航/测试行给出对应快捷键", async () => {
+  const field = await driveSettings([K.esc]);
+  let tail = settingsDriver.renders.at(-1).slice(-4).join("\n");
+  assert.match(tail, /Ctrl\+S 设为以后默认/, `字段行 footer 丢了 Ctrl+S 提示:\n${tail}`);
+  assert.ok(!/Ctrl\+O 状态与诊断/.test(tail), `首页字段行不应堆叠诊断快捷键:\n${tail}`);
+  assert.equal(field.deliveries.length, 0);
+
+  await driveSettings([K.down, K.esc]); // focus 提醒时机, then close
+  tail = settingsDriver.renders.at(-1).slice(-4).join("\n");
+  assert.ok(!/Ctrl\+S 设为以后默认/.test(tail), `分类行不应提示保存字段:\n${tail}`);
+  assert.match(tail, /Enter 打开/, `分类行应提示导航操作:\n${tail}`);
+  assert.match(tail, /Ctrl\+T 测试通知/, `测试快捷键仍应可见:\n${tail}`);
+
+  await driveSettings([K.down, K.down, K.down, K.esc]); // focus the direct test action without running it
+  const testFrame = settingsDriver.renders.at(-1).join("\n");
+  tail = settingsDriver.renders.at(-1).slice(-4).join("\n");
+  assert.match(testFrame, /发送测试通知/, `首页测试入口缺失:\n${testFrame}`);
+  assert.match(tail, /Enter 打开 \/ 执行/, `测试行应说明 Enter 的用途:\n${tail}`);
+  assert.ok(!/save as default/.test(tail), `footer 不应再是英文:\n${tail}`);
 });
 
 await step("J5 Enter 只改本对话：立即生效，但用户文件一个字节都不写", async () => {
@@ -1112,7 +1133,7 @@ await step("J9 Ctrl+R 重读配置、Ctrl+O 状态与诊断可用且不产生副
   assert.match(frame, /配置来源/, `状态页应显示状态文本:\n${frame}`);
   assert.match(frame, /投递统计/);
   assert.match(frame, /送达前提/, `状态页应说明送达前提:\n${frame}`);
-  assert.match(frame, /自检/, `状态页应区分“提交自检”与“实际投递”:\n${frame}`);
+  assert.match(frame, /测试通知/, `状态页应区分“已提交”与“实际送达”:\n${frame}`);
   assert.equal(status.deliveries.length, 0, "状态页只读，不得产生投递");
   assert.equal(status.notifies, 0);
   assert.deepEqual(settings.runtimeErrors, []);
@@ -1127,7 +1148,7 @@ await step("J9b 状态与诊断：可见“重新读取配置”动作触发真�
 
 await step("J10 Ctrl+T 真的走一遍投递链路（折叠的旧 /notify test）", async () => {
   const delta = await driveSettings([K.ctrlT, K.esc]);
-  assert.match(settingsDriver.renders[0].join("\n"), /已提交自检通知/);
+  assert.match(settingsDriver.renders[0].join("\n"), /已提交测试通知/);
   assert.equal(delta.deliveries.length, 1, `自检通知未投递: ${JSON.stringify(delta.deliveries)}`);
   assert.equal(delta.deliveries[0].kind, "run_completed");
   assert.equal(delta.notifies, 1, "自检通知应真的写出 OSC");
@@ -1232,7 +1253,7 @@ await step("J13b 渠道保存隔离：Ctrl+S 只改目标渠道，不固化其�
   await driveChannels(route("provider:debug", { open: true, after: [K.down, K.enter] }));
   const toggled = channelsDriver.renders.map((frame) => frame.join("\n"));
   assert.ok(
-    toggled.some((frame) => /渠道 · debug/.test(frame) && /关闭/.test(frame)),
+    toggled.some((frame) => /渠道 · 调试渠道/.test(frame) && /关闭/.test(frame)),
     `debug 的本对话选择未生效:\n${toggled.at(-1)}`,
   );
 
@@ -1241,7 +1262,7 @@ await step("J13b 渠道保存隔离：Ctrl+S 只改目标渠道，不固化其�
   await driveChannels(route("provider:terminal", { open: false, after: [K.ctrlS] }));
   const savedFrame = channelsDriver.renders.at(-1).join("\n");
   assert.match(savedFrame, /已保存为默认/, `缺少保存确认:\n${savedFrame}`);
-  assert.match(savedFrame, /渠道 · terminal/, savedFrame);
+  assert.match(savedFrame, /渠道 · 本机提醒/, savedFrame);
   assert.match(savedFrame, /以后默认/, savedFrame);
 
   const raw = channels.readUserConfigRaw();

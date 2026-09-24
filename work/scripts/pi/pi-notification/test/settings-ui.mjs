@@ -2,8 +2,8 @@
  * Pure component regression for the settings UI: no real host and no writes to the real user directory.
  *
  * Covers the parts that look right but are easy to get wrong:
- *   N  navigation: the home page holds the two global fields, one row per category and two actions;
- *      Enter opens a category/rule/detail, Esc pops one level and restores the parent focus
+ *   N  navigation: the home page holds the global switch, reminder timing/destinations, a direct
+ *      test action and progressive settings; Enter opens a section/rule/detail, Esc restores focus
  *   R  rendering: rows show the current value next to the label inside an 80-column content cap
  *      (no uniform checkmark, no repeated `未保存`), the focused row's three layers are wrapped into
  *      a readable help line, and candidate rows keep their marker columns
@@ -135,9 +135,9 @@ function makeHarness(userConfig, options = {}) {
     },
     test() {
       calls.test += 1;
-      return { ok: true, message: "已提交自检通知" };
+      return { ok: true, message: "已提交测试通知；提交不等于已显示" };
     },
-    testEmail() { return { ok: true, message: "已提交邮箱测试；SMTP 接受不等于送达" }; },
+    testEmail() { return { ok: true, message: "已提交邮箱测试；是否送达请检查收件箱" }; },
     credentialStatus: () => options.vault?.value ? "已保存于 Windows 凭据管理器" : "未设置",
     saveCredential(value) {
       if (options.vault) options.vault.value = value;
@@ -266,6 +266,9 @@ function goHome(harness) {
 
 /** Moves the focus within the current page to `key` (no Enter). */
 function moveToRow(harness, key) {
+  if (harness.state().view.id === "home" && ["item:minLevel", "category:content", "category:quietHours", "category:advanced"].includes(key)) {
+    openRow(harness, "category:more");
+  }
   const state = harness.state();
   const index = state.rows.indexOf(key);
   assert.ok(index >= 0, `当前页缺少行 ${key}：${state.rows.join(",")}`);
@@ -275,6 +278,10 @@ function moveToRow(harness, key) {
 
 /** Moves the focus to `key` and opens it with Enter. */
 function openRow(harness, key) {
+  // Content, quiet-hours and delivery sections are intentionally nested under 更多设置.
+  if (harness.state().view.id === "home" && ["category:content", "category:quietHours", "category:advanced"].includes(key)) {
+    openRow(harness, "category:more");
+  }
   moveToRow(harness, key);
   harness.press(KEY.enter);
 }
@@ -291,6 +298,10 @@ function pageForItem(harness, item) {
   if (item.rule) {
     openRow(harness, "category:rules");
     openRow(harness, `rule:${item.rule.key}`);
+    return;
+  }
+  if (item.id === "minLevel") {
+    openRow(harness, "category:more");
     return;
   }
   const category = settings.SETTING_CATEGORIES.find((candidate) => candidate.group === item.group);
@@ -321,67 +332,78 @@ function openItem(harness, id) {
 // N: home page and navigation
 // ---------------------------------------------------------------------------
 
-await step("N1 首页简洁：两个全局字段 + 五个场景入口，不平铺全部字段", () => {
+await step("N1 首页聚焦日常任务：总开关、提醒时机、接收方式、直接测试与更多设置", () => {
   const harness = makeHarness();
   const rows = harness.state().rows;
   assert.deepEqual(rows, [
     "item:enabled",
-    "item:minLevel",
     "category:rules",
-    "category:content",
-    "category:quietHours",
     "category:channels",
-    "category:advanced",
+    "action:test",
+    "category:more",
   ], `首页行不符: ${JSON.stringify(rows)}`);
   const frame = harness.render(80).join("\n");
   assert.match(frame, /启用通知/);
-  assert.match(frame, /通知门槛/);
-  assert.match(frame, /通知场景/);
-  assert.match(frame, /通知内容/);
-  assert.match(frame, /安静时间/);
-  assert.match(frame, /通知方式/);
+  assert.match(frame, /提醒时机/);
+  assert.match(frame, /接收方式/);
   assert.match(frame, /更多设置/);
-  assert.doesNotMatch(frame, /发送测试通知/);
-  assert.doesNotMatch(frame, /状态与诊断/);
-  // Not a flat dump: a field buried in 高级设置 must not be on the home page.
-  assert.ok(!/单次投递超时/.test(frame), "首页不应平铺高级设置字段");
-  // The two global fields show their current value inline.
+  assert.match(frame, /发送测试通知/);
+  assert.doesNotMatch(frame, /通知门槛|投递超时|状态与诊断|搜索设置/);
+  // Complex choices remain available behind 更多设置, without competing with the common flow.
+  openRow(harness, "category:more");
+  const more = harness.render(80).join("\n");
+  assert.match(more, /提醒级别/);
+  assert.match(more, /提醒内容/);
+  assert.match(more, /免打扰时段/);
+  assert.match(more, /投递与频率/);
+  assert.match(more, /状态与诊断/);
+  assert.match(more, /搜索设置/);
+  assert.ok(!/单次投递超时/.test(more), "更多设置不应平铺高级字段");
+  harness.press(KEY.escape);
   assert.match(rowWith(harness.render(80), "启用通知"), /开启/);
-  assert.match(rowWith(harness.render(80), "通知门槛"), /所有等级/);
 });
 
 await step("N2 分类行带摘要：通知渠道计数、免打扰开关状态、规则列表摘要随配置变化", () => {
   const harness = makeHarness();
   let frame = harness.render(80).join("\n");
-  assert.match(frame, /1 个已启用/, "渠道分类应显示启用数量");
-  assert.match(frame, /未开启/, "安静时间默认应显示未开启");
+  assert.match(frame, /1 个已启用/, "接收方式应显示启用数量");
+  openRow(harness, "category:more");
+  frame = harness.render(80).join("\n");
+  assert.match(frame, /未开启/, "免打扰默认应显示未开启");
 
   const quiet = itemOf(harness, "quietHours.enabled");
   harness.host.setValue(quiet, true);
   harness.redraw();
   frame = harness.render(80).join("\n");
-  assert.match(frame, /23:00–08:00/, "安静时间开启后摘要应显示时段");
+  assert.match(frame, /23:00–08:00/, "免打扰开启后摘要应显示时段");
 
   const debug = { providers: [{ id: "hook", type: "debug", enabled: false }] };
   const two = makeHarness(debug);
   assert.match(two.render(80).join("\n"), /0 个已启用|无启用渠道/, "关闭的渠道不应计入启用数");
 });
 
-await step("N2b 邮箱配置位于通知渠道子页并包含规则开关、地址编辑与专用测试", () => {
+await step("N2b 邮箱配置位于接收方式子页并包含开关、地址编辑与专用测试", () => {
   const harness = makeHarness();
   openRow(harness, "category:channels");
   assert.ok(harness.state().rows.includes("email-config"));
+  assert.match(rowWith(harness.render(80), "邮箱提醒"), /已关闭/, "邮箱行应先说明当前状态");
+  const ruleChannels = itemOf(harness, "rules.runCompleted.channels");
+  assert.deepEqual(ruleChannels.candidates(harness.host.config()).map((candidate) => candidate.label).slice(0, 2), ["本机提醒", "邮箱"]);
+  assert.equal(itemOf(harness, "provider:email").label, "邮箱", "内置渠道开关应显示友好名称");
   openRow(harness, "email-config");
   assert.ok(harness.state().rows.includes("item:provider:email"));
   assert.ok(harness.state().rows.includes("item:provider:email:from"));
   assert.ok(harness.state().rows.includes("item:provider:email:to"));
   assert.ok(harness.state().rows.includes("action:email-test"));
-  assert.ok(harness.state().rows.includes("action:credential-save"));
-  assert.ok(harness.state().rows.includes("action:credential-delete"));
+  assert.equal(harness.state().rows.includes("action:credential-save"), process.platform === "win32", "只有 Windows 提供界面安全保存");
+  assert.equal(harness.state().rows.includes("action:credential-delete"), process.platform === "win32", "只有 Windows 提供界面凭据移除");
   assert.ok(harness.state().rows.includes("qq:settings"));
+  const help = harness.render(80).join("\n");
+  assert.match(help, /QQ 邮箱授权码（不是登录密码）/);
+  assert.match(help, /安全保存仅支持 Windows/);
 });
 
-await step("N2c 邮箱已开启时测试前提准确指出缺失项，而非误报开关关闭", () => {
+await step("N2c 邮箱测试提示下一步缺项，使用普通用户能看懂的文案", () => {
   const harness = makeHarness();
   openRow(harness, "category:channels");
   openRow(harness, "email-config");
@@ -389,19 +411,19 @@ await step("N2c 邮箱已开启时测试前提准确指出缺失项，而非误�
   harness.press(KEY.space);
   let effective = harness.host.config();
   assert.equal(effective.providers.find((provider) => provider.id === "email").enabled, true);
-  assert.match(settings.emailTestBlockReason(effective, false), /已开启.*发件/);
+  assert.match(settings.emailTestBlockReason(effective, false), /发件和收件/);
   harness.host.setValue(itemOf(harness, "provider:email:from"), "sender@qq.com");
   effective = harness.host.config();
-  assert.match(settings.emailTestBlockReason(effective, false), /已开启.*收件/);
+  assert.match(settings.emailTestBlockReason(effective, false), /收件邮箱地址/);
   harness.host.setValue(itemOf(harness, "provider:email:to"), ["reader@example.org"]);
   effective = harness.host.config();
-  assert.match(settings.emailTestBlockReason(effective, false), /已开启.*凭据管理器.*PI_NOTIFY_QQ_SMTP_AUTH_CODE/);
+  assert.match(settings.emailTestBlockReason(effective, false), /QQ 邮箱授权码.*不是 QQ 登录密码/);
   assert.equal(settings.emailTestBlockReason(effective, true), undefined);
   effective.providers.find((provider) => provider.id === "email").enabled = false;
-  assert.match(settings.emailTestBlockReason(effective, true), /邮箱渠道未开启/);
+  assert.match(settings.emailTestBlockReason(effective, true), /接收方式.*开启邮箱提醒/);
 });
 
-await step("N2d 遮蔽输入只进凭据管理器；蓝色官网链接可点击且 Enter 可打开", () => {
+await step("N2d 遮蔽输入只进安全存储；蓝色官网链接可点击且 Enter 可打开", () => {
   const vault = {};
   const harness = makeHarness(undefined, { vault });
   openRow(harness, "category:channels");
@@ -411,6 +433,7 @@ await step("N2d 遮蔽输入只进凭据管理器；蓝色官网链接可点击�
   assert.match(linked, /\x1b\[94m\x1b\]8;;https:\/\/mail\.qq\.com\//);
   harness.press(KEY.enter);
   assert.equal(harness.calls.openQqSettings, 1);
+  if (process.platform !== "win32") return;
   openRow(harness, "action:credential-save");
   assert.equal(harness.state().view.kind, "secret");
   const secret = "qQTOKEN_1234";
@@ -431,6 +454,7 @@ await step("N2d 遮蔽输入只进凭据管理器；蓝色官网链接可点击�
 
 await step("N3 Enter 打开分类/规则，Esc 逐级返回且恢复父级焦点", () => {
   const harness = makeHarness();
+  openRow(harness, "category:more");
   moveToRow(harness, "category:advanced");
   harness.press(KEY.enter);
   let state = harness.state();
@@ -439,8 +463,10 @@ await step("N3 Enter 打开分类/规则，Esc 逐级返回且恢复父级焦点
   assert.ok(state.rows.includes("item:delivery.timeoutMs"));
   harness.press(KEY.escape);
   state = harness.state();
-  assert.equal(state.view.id, "home");
-  assert.equal(state.rows[state.focus], "category:advanced", "Esc 应回到原分类行");
+  assert.equal(state.view.id, "category:more");
+  assert.equal(state.rows[state.focus], "category:advanced", "Esc 应回到更多设置原分类行");
+  harness.press(KEY.escape);
+  assert.equal(harness.state().view.id, "home");
 
   openRow(harness, "category:rules");
   assert.equal(harness.state().view.id, "category:rules");
@@ -481,6 +507,8 @@ await step("N5 状态/输入/帮助返回原入口（不是一律回首页），
   harness.press(KEY.escape);
   assert.equal(harness.state().view.id, "category:advanced");
   assert.equal(harness.state().rows[harness.state().focus], "item:delivery.timeoutMs", "应保留父级焦点");
+  harness.press(KEY.escape);
+  assert.equal(harness.state().view.id, "category:more", "高级页返回后应回到更多设置");
 });
 
 await step("N6 条件展示：免打扰关闭时收起时间/例外，规则关闭仍可进入并解释“启用后生效”，工具失败窗口按模式显隐", () => {
@@ -529,7 +557,7 @@ await step("N7 分类摘要与帮助随配置刷新，不残留旧值", () => {
   harness.host.setValue(minLevel, "error");
   moveToRow(harness, "item:minLevel");
   const frame = harness.render(80).join("\n");
-  assert.match(rowWith(harness.render(80), "通知门槛"), /仅错误/, "阈值摘要应随本对话值刷新");
+  assert.match(rowWith(harness.render(80), "提醒级别"), /仅错误/, "阈值摘要应随本对话值刷新");
   assert.match(frame, /本对话已覆盖/, "来源帮助应随覆盖刷新");
 });
 
@@ -543,8 +571,8 @@ await step("N8 窄屏修复：菜单标签可读、摘要简短让位，footer �
     assert.ok(lines.every((line) => tui.visibleWidth(line) <= width), `${width} 列：行超宽`);
     const frame = squash(lines);
     // Labels must survive: the summary yields, not the category name.
-    assert.ok(frame.includes("通知场景"), `${width} 列：分类标签被摘要挤掉`);
-    assert.ok(frame.includes("通知方式"), `${width} 列：分类标签被摘要挤掉`);
+    assert.ok(frame.includes("提醒时机"), `${width} 列：分类标签被摘要挤掉`);
+    assert.ok(frame.includes("接收方式"), `${width} 列：分类标签被摘要挤掉`);
     // The core save key stays visible (it is the first item on the footer line).
     assert.ok(
       lines.some((line) => line.includes("Ctrl+S 设为以后默认")),
@@ -704,13 +732,13 @@ await step("RA1 全页面渲染扫描：20/24/30/40/80 列无 undefined/[object/
   };
 
   scan("home");
-  // Search is intentionally tucked into 更多设置 rather than competing with the main overview.
+  // Search is intentionally tucked into the 更多设置 root rather than competing with the main overview.
   goHome(harness);
-  openRow(harness, "category:advanced");
+  openRow(harness, "category:more");
   assert.match(harness.render(80).join("\n"), /搜索设置/, "更多设置页应有搜索入口");
   goHome(harness);
 
-  for (const id of ["category:rules", "category:content", "category:quietHours", "category:channels", "category:advanced"]) {
+  for (const id of ["category:rules", "category:channels", "category:more", "category:content", "category:quietHours", "category:advanced"]) {
     goHome(harness);
     openRow(harness, id);
     scan(id);
@@ -760,9 +788,10 @@ await step("RA1 全页面渲染扫描：20/24/30/40/80 列无 undefined/[object/
 
 await step("R1 首页与分类页：每行内联当前值（中文），无统一勾号与重复「未保存」", () => {
   const harness = makeHarness();
+  openRow(harness, "category:more");
   const lines = harness.render(80);
-  const row = rowWith(lines, "通知门槛");
-  assert.ok(row, "缺少「通知门槛」行");
+  const row = rowWith(lines, "提醒级别");
+  assert.ok(row, "缺少「提醒级别」行");
   assert.match(row, /所有等级/, "未内联展示当前值");
   assert.ok(!row.includes("✓"), `行不应有统一勾号: ${JSON.stringify(row)}`);
   const body = lines.slice(2, 14);
@@ -796,16 +825,17 @@ await step("R4 溢出策略：值列紧邻名称；候选项的 ` · 默认` 永
   const harness = makeHarness();
   const item = itemOf(harness, "minLevel");
   assert.equal(harness.host.saveDefault(item, "warning").ok, true);
+  openRow(harness, "category:more");
 
   // Wide terminal: the value sits next to the label, not at the right edge.
-  const wide = rowWith(harness.render(60), "通知门槛");
+  const wide = rowWith(harness.render(60), "提醒级别");
   assert.match(wide, /警告及错误/, `宽终端丢了当前值: ${JSON.stringify(wide)}`);
   assert.ok(columnOf(wide, "警告及错误") < 40, `值应紧邻名称，实际列 ${columnOf(wide, "警告及错误")}`);
 
   // Narrow terminal (20): the label yields so the value stays visible, nothing exceeds the width.
   const narrow = harness.render(20);
   assert.ok(narrow.every((line) => tui.visibleWidth(line) <= 20), "渲染行超过了给定宽度");
-  const narrowRow = narrow[3]; // 第 2 个数据行 = 通知门槛
+  const narrowRow = narrow.find((line) => line.includes("警告及错误"));
   assert.match(narrowRow, /警告及错误/, `窄终端应优先保留值: ${JSON.stringify(narrowRow)}`);
 
   // Candidate rows: width goes to the markers and the suffix first, so ` · 默认` is never truncated.
@@ -820,16 +850,17 @@ await step("R4 溢出策略：值列紧邻名称；候选项的 ` · 默认` 永
 
 await step("R5 内容区封顶 80 列；窄屏靠换行的字段帮助仍能读到完整名称与当前值", () => {
   const harness = makeHarness();
+  openRow(harness, "category:more");
   // 160 columns: every line still stops at 80, so label and value stay together.
   const wide = harness.render(160);
   assert.ok(wide.every((line) => tui.visibleWidth(line) <= 80), "内容区应封顶 80 列");
-  assert.ok(columnOf(rowWith(wide, "通知门槛"), "所有等级") < 40, "宽屏时值不应贴到屏幕边缘");
+  assert.ok(columnOf(rowWith(wide, "提醒级别"), "所有等级") < 40, "宽屏时值不应贴到屏幕边缘");
 
   const item = itemOf(harness, "minLevel");
   assert.equal(harness.host.saveDefault(item, "warning").ok, true);
   moveToRow(harness, "item:minLevel");
 
-  // The home page keeps a short summary; name and current value survive the narrowest width.
+  // 更多设置 keeps a short summary; name and current value survive the narrowest width.
   for (const width of [20, 40]) {
     const lines = harness.render(width);
     const frame = squash(lines);
@@ -861,6 +892,7 @@ await step("R6 极窄宽度契约：0/1/4/7 列都不超宽、不崩溃（首页
   for (const width of [1, 4, 7]) {
     assert.ok(harness.render(width).every((line) => tui.visibleWidth(line) <= width), `首页 ${width} 列超宽`);
   }
+  openRow(harness, "category:more");
   moveToRow(harness, "category:content");
   harness.press(KEY.enter);
   for (const width of [1, 4, 7]) {
@@ -949,7 +981,7 @@ await step("H1 渠道字段详情：区分“渠道定义由用户配置”与�
   assert.ok(customText.includes("内置默认：开启"), "渠道开关内置缺省应为开启");
   assert.ok(!customText.includes("无内置默认"), "不得把渠道开关说成无内置默认（与删除 enabled 后开启相矛盾）");
   assert.ok(customText.includes("渠道定义：由用户配置"), `应说明渠道定义由用户提供: ${customText}`);
-  assert.ok(customText.includes("渠道类型：debug"), "应展示渠道类型");
+  assert.ok(!customText.includes("渠道类型：debug"), "普通设置说明不应暴露开发者渠道类型");
   assert.ok(customText.includes("凭据"), "渠道详情应说明凭据不外显");
 
   // A factory channel keeps the same switch default but its definition is built in.
@@ -966,7 +998,7 @@ await step("H1 渠道字段详情：区分“渠道定义由用户配置”与�
   redefined.press("?");
   const redefinedText = squash(collectHelpRows(redefined, 40));
   assert.ok(redefinedText.includes("渠道定义：由用户配置"), `同名重定义应标为用户配置: ${redefinedText}`);
-  assert.ok(redefinedText.includes("渠道类型：webhook"), redefinedText);
+  assert.ok(!redefinedText.includes("渠道类型：webhook"), redefinedText);
   assert.ok(!redefinedText.includes("渠道定义：出厂默认"), `不得用同名推断定义来源: ${redefinedText}`);
 });
 
@@ -1003,7 +1035,7 @@ await step("K1 ↑↓ 移动焦点；Enter 进入详情；Esc 返回后父级焦
   const harness = makeHarness();
   assert.match(focusRow(harness.render(80)), /启用通知/);
   harness.press(KEY.down);
-  assert.match(focusRow(harness.render(80)), /通知门槛/);
+  assert.match(focusRow(harness.render(80)), /提醒时机/);
   harness.press(KEY.up);
   assert.match(focusRow(harness.render(80)), /启用通知/);
   harness.press(KEY.enter);
@@ -1036,7 +1068,7 @@ await step("K3 长页面滚动：焦点行始终在可视窗口内，位置提�
   assert.ok(lines.every((line) => tui.visibleWidth(line) <= 80), "渲染行超宽");
 });
 
-await step("K4 Space 快速切换布尔（本对话）；复杂字段 Space 打开候选，不触发动作行", () => {
+await step("K4 Space 快速切换布尔与提醒场景；复杂字段 Space 打开候选，动作行需 Enter", () => {
   const harness = makeHarness();
   focusItem(harness, "content.includeAssistantExcerpt");
   assert.equal(harness.host.config().content.includeAssistantExcerpt, false);
@@ -1051,9 +1083,20 @@ await step("K4 Space 快速切换布尔（本对话）；复杂字段 Space 打�
   assert.equal(harness.state().view.kind, "detail", "复杂字段的 Space 应打开候选");
   harness.press(KEY.escape);
 
-  // An action row must not react to Space.
+  // A reminder row supports Space without opening details; Enter still opens its detailed settings.
   goHome(harness);
-  openRow(harness, "category:advanced");
+  openRow(harness, "category:rules");
+  moveToRow(harness, "rule:runAborted");
+  assert.equal(harness.host.config().rules.runAborted.enabled, false);
+  harness.press(KEY.space);
+  assert.equal(harness.state().view.id, "category:rules", "Space 应留在提醒场景列表");
+  assert.equal(harness.host.config().rules.runAborted.enabled, true, "Space 应切换场景开关");
+  assert.deepEqual(harness.calls.set.at(-1), { id: "rules.runAborted.enabled", value: true });
+  harness.press(KEY.enter);
+  assert.equal(harness.state().view.id, "rule:runAborted", "Enter 仍打开场景详情");
+
+  // An action row must not react to Space; Enter runs the direct home test.
+  goHome(harness);
   moveToRow(harness, "action:test");
   harness.press(KEY.space);
   assert.equal(harness.calls.test, 0, "Space 不得触发送测试通知");
@@ -1105,7 +1148,8 @@ await step("D3 保存失败：不迁移标记、当前值仍生效、状态行�
   assert.equal(harness.state().message.tone, "error");
   const lines = harness.render(80);
   assert.ok(lines.every((line) => !line.includes(" · 默认")), "失败时不该出现「默认」标记");
-  assert.match(rowWith(lines, "通知门槛"), /仅错误/, "损坏配置时应显示降级后的生效值");
+  openRow(harness, "category:more");
+  assert.match(rowWith(harness.render(80), "提醒级别"), /仅错误/, "损坏配置时应显示降级后的安全门槛");
   assert.equal(fs.readFileSync(configModule.userConfigPath(agentDir), "utf8"), "{ 坏掉的 JSON", "失败时不得改写原文件");
   fs.rmSync(configModule.userConfigPath(agentDir), { force: true });
 });
@@ -1244,7 +1288,7 @@ await step("V1 footer 常驻：字段/详情页含 `Ctrl+S 设为以后默认`�
   assert.match(tail(), /Ctrl\+S 设为以后默认/, "详情页应常驻保存提示");
   harness.press(KEY.ctrlO);
   assert.match(tail(), /Enter 重读配置/, "状态页应给出自己的可用键");
-  assert.match(tail(), /Ctrl\+T 自检/, "状态页应给出自检快捷键");
+  assert.match(tail(), /Ctrl\+T 测试通知/, "状态页应给出测试通知快捷键");
   harness.press(KEY.escape); // 回详情
   assert.equal(harness.finished, undefined, "Esc 只在首页才结束组件");
 });
@@ -1252,7 +1296,7 @@ await step("V1 footer 常驻：字段/详情页含 `Ctrl+S 设为以后默认`�
 await step("V2 Ctrl+T 发测试、Ctrl+R 重读、Ctrl+O 状态与诊断只读", () => {
   const harness = makeHarness();
   harness.press(KEY.ctrlT);
-  assert.match(harness.state().message.text, /自检/);
+  assert.match(harness.state().message.text, /测试通知/);
   harness.press(KEY.ctrlR);
   assert.match(harness.state().message.text, /重新读取/);
   harness.press(KEY.ctrlO);
@@ -1274,8 +1318,11 @@ await step("V3 Esc 在首页结束组件，并带回摘要", () => {
   harness.press(KEY.down); // error
   harness.press(KEY.enter); // 本对话改为 error
   harness.press(KEY.ctrlS); // 固化为用户默认
-  harness.press(KEY.escape); // 回首页
+  harness.press(KEY.escape); // 回「更多设置」
+  assert.equal(harness.state().view.id, "category:more");
   assert.equal(harness.finished, undefined, "详情页的 Esc 只应返回上一级");
+  harness.press(KEY.escape); // 回首页
+  assert.equal(harness.finished, undefined, "更多设置的 Esc 只应返回首页");
   harness.press(KEY.escape); // 关闭
   assert.deepEqual(harness.finished, { savedDefaults: 1, changed: 1 });
 });
@@ -1287,7 +1334,7 @@ await step("V3 Esc 在首页结束组件，并带回摘要", () => {
 await step("F1 footer 按焦点类型给出可用操作：分类行不宣称 Ctrl+S/Space，输入页只给 Enter/Esc", () => {
   const harness = makeHarness();
   /** Footer hint lines only (they carry a navigation key or the global Ctrl+T hint). */
-  const hints = () => harness.render(80).filter((line) => /↑↓|Enter 应用|Ctrl\+T 自检|Ctrl\+S/.test(line)).join("\n");
+  const hints = () => harness.render(80).filter((line) => /↑↓|Enter 应用|Ctrl\+T 测试通知|Ctrl\+S/.test(line)).join("\n");
 
   // Home, focused on the global switch: save and quick toggle are available.
   assert.match(hints(), /Ctrl\+S 设为以后默认/, "字段行应提供 Ctrl+S");

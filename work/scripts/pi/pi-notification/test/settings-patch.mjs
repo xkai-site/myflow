@@ -192,7 +192,10 @@ await step("S5 中文化只改展示：值/配置键不变，阈值与规则严�
   assert.equal(itemOf("minLevel").format("error"), "仅错误");
   assert.equal(itemOf("rules.runFailed.level").format("error"), "错误");
   assert.equal(itemOf("content.includeCost").format(false), "关闭");
-  assert.equal(itemOf("rules.runCompleted.channels").format(["terminal", "hook"]), "terminal、hook");
+  const channels = itemOf("rules.runCompleted.channels");
+  assert.equal(channels.format(["terminal", "hook"]), "本机提醒、hook", "未知或自定义渠道仍保留原名");
+  assert.deepEqual(channels.candidates(config.defaultConfig()).map((candidate) => candidate.value), ["terminal", "email"], "显示名变化不得改动存储 ID");
+  assert.deepEqual(channels.candidates(config.defaultConfig()).map((candidate) => candidate.label), ["本机提醒", "邮箱"]);
   assert.equal(itemOf("quietHours.exceptLevels").format(["error"]), "错误");
   assert.equal(itemOf("provider:terminal").format(false), "关闭");
   assert.equal(itemOf("content.includeCost").format(undefined), "—");

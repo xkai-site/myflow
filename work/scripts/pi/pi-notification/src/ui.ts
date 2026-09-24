@@ -2,8 +2,8 @@
  * Settings UI.
  *
  * Three levels, entered from a fixed home page (never a flat dump of every field):
- *  - the home page: the global switch and threshold, then one row per category, then the two
- *    actions; a category row carries a summary so its state is readable without opening it;
+ *  - the home page: the global switch, reminder occasions, destinations, a direct test action,
+ *    and one progressive-disclosure entry; summaries keep common choices readable at a glance;
  *  - a category page: either the fields of one group (内容/免打扰/渠道/高级设置) or one row per
  *    notification rule;
  *  - the candidate list of one field, with fixed marker columns (two columns for focus, two for the
@@ -112,21 +112,19 @@ const MAX_CONTENT_WIDTH = 80;
 /** Focus and current-value cells are two display columns each and stay reserved when unset. */
 const FOCUS_CELL = (focused: boolean): string => (focused ? "→ " : "  ");
 const CURRENT_CELL = (current: boolean): string => (current ? "✓ " : "  ");
-/** Above this width the candidate row also shows the channel type in brackets. */
-const DETAIL_MIN_WIDTH = 28;
 /** Below this width the trailing ` · 默认` is dropped so the value label keeps its room. */
 const DEFAULT_SUFFIX_MIN_WIDTH = 24;
 /** Trailing marker of a row that opens another page. */
 const OPEN_MARK = " ›";
 
-const FOOTER_KEY_HINTS = "更多设置中可进行测试、重读与诊断";
-const STATUS_KEY_HINTS = "Ctrl+T 自检   Ctrl+R 重读   Ctrl+O 状态与诊断";
+const FOOTER_KEY_HINTS = "Ctrl+T 测试通知 · 更多设置中查看状态与诊断";
+const STATUS_KEY_HINTS = "Ctrl+T 测试通知   Ctrl+R 重读   Ctrl+O 状态与诊断";
 
 const ACTION_LABELS: Record<"test" | "emailTest" | "credentialSave" | "credentialDelete" | "status" | "reload" | "search" | "preview", string> = {
   test: "发送测试通知",
   emailTest: "发送邮箱测试",
-  credentialSave: "设置 / 更换授权码（遮蔽输入）",
-  credentialDelete: "移除凭据管理器授权码",
+  credentialSave: "设置邮箱授权码（遮蔽输入）",
+  credentialDelete: "移除已保存的邮箱授权码",
   status: "状态与诊断",
   reload: "重新读取配置",
   search: "搜索设置",
@@ -262,21 +260,30 @@ export class NotifySettingsComponent {
 
   private buildHomePage(): MenuPage {
     const rows: MenuRow[] = [];
-    const field = (id: string): MenuRow | undefined => {
-      const item = this.itemById(id);
-      return item ? { key: `item:${item.id}`, kind: "field", item, label: item.label } : undefined;
-    };
-    for (const id of ["enabled", "minLevel"]) {
-      const row = field(id);
-      if (row) rows.push(row);
+    const enabled = this.itemById("enabled");
+    if (enabled) rows.push({ key: `item:${enabled.id}`, kind: "field", item: enabled, label: enabled.label });
+    for (const id of ["rules", "channels"]) {
+      const category = SETTING_CATEGORIES.find((candidate) => candidate.id === id);
+      if (category) rows.push({ key: `category:${category.id}`, kind: "category", category });
     }
-    for (const category of SETTING_CATEGORIES) {
-      rows.push({ key: `category:${category.id}`, kind: "category", category });
-    }
+    rows.push({ key: "action:test", kind: "action", action: "test" });
+    const more = SETTING_CATEGORIES.find((candidate) => candidate.id === "more");
+    if (more) rows.push({ key: `category:${more.id}`, kind: "category", category: more });
     return { kind: "menu", id: "home", title: "通知", rows, focus: 0 };
   }
 
   private buildCategoryPage(category: SettingCategory): MenuPage {
+    if (category.kind === "sections") {
+      const rows: MenuRow[] = [];
+      const threshold = this.itemById("minLevel");
+      if (threshold) rows.push({ key: `item:${threshold.id}`, kind: "field", item: threshold, label: "提醒级别" });
+      for (const id of category.sections ?? []) {
+        const child = SETTING_CATEGORIES.find((candidate) => candidate.id === id);
+        if (child) rows.push({ key: `category:${child.id}`, kind: "category", category: child });
+      }
+      for (const action of category.actions ?? []) rows.push({ key: action.key, kind: "action", action: action.action });
+      return { kind: "menu", id: `category:${category.id}`, title: category.label, rows, focus: 0 };
+    }
     if (category.kind === "rules") {
       const rows: MenuRow[] = RULE_INFOS.map((rule) => ({ key: `rule:${rule.key}`, kind: "rule", rule }));
       return { kind: "menu", id: `category:${category.id}`, title: category.label, rows, focus: 0 };
@@ -286,11 +293,13 @@ export class NotifySettingsComponent {
     const rows: MenuRow[] = channelItems.map((item) => ({ key: `item:${item.id}`, kind: "field", item, label: item.label }));
     if (category.id === "channels" && this.items.some((item) => item.id === "provider:email")) {
       const provider = this.host.config().providers.find((entry) => entry.id === "email");
-      const fieldsReady = typeof provider?.options.from === "string" && provider.options.from !== ""
-        && Array.isArray(provider.options.to) && provider.options.to.length > 0;
-      const summary = !provider?.enabled ? "已关闭" : !fieldsReady ? "不可用 · 地址未齐"
-        : this.host.credentialStatus() !== "未设置" ? "QQ SMTP 已配置" : "授权码未设置";
-      rows.push({ key: "email-config", kind: "emailConfig", label: "邮箱", summary });
+      const hasFrom = typeof provider?.options.from === "string" && provider.options.from !== "";
+      const hasTo = Array.isArray(provider?.options.to) && provider.options.to.length > 0;
+      const credentialReady = this.host.credentialStatus() !== "未设置";
+      const summary = !this.host.config().enabled ? "总开关已关" : !provider?.enabled ? "已关闭"
+        : !hasFrom ? "还需填写发件邮箱" : !hasTo ? "还需填写收件邮箱"
+          : !credentialReady ? "还需设置授权码" : "已准备好";
+      rows.push({ key: "email-config", kind: "emailConfig", label: "邮箱提醒", summary });
     }
     if (category.collapsed && collapsed.length > 0) {
       rows.push({ key: `subgroup:${category.id}`, kind: "subgroup", category });
@@ -312,13 +321,20 @@ export class NotifySettingsComponent {
   private buildEmailPage(): MenuPage {
     const rows: MenuRow[] = this.items.filter((item) => item.providerId === "email")
       .map((item) => ({ key: `item:${item.id}`, kind: "field" as const, item, label: item.label }));
-    rows.push({ key: "text:credential-status", kind: "text", text: `QQ SMTP 授权码：${this.host.credentialStatus()}` });
-    rows.push({ key: "action:credential-save", kind: "action", action: "credentialSave" });
-    rows.push({ key: "action:credential-delete", kind: "action", action: "credentialDelete" });
+    const status = this.host.credentialStatus();
+    const credentialStatus = status === "未设置" ? "尚未设置"
+      : status.startsWith("已保存于") ? "已设置（Windows 凭据管理器）" : "已设置（兼容方式）";
+    rows.push({ key: "text:credential-status", kind: "text", text: `邮箱授权码：${credentialStatus}` });
+    if (process.platform === "win32") {
+      rows.push({ key: "action:credential-save", kind: "action", action: "credentialSave" });
+      rows.push({ key: "action:credential-delete", kind: "action", action: "credentialDelete" });
+    }
     rows.push({ key: "qq:settings", kind: "qqLink", label: "QQ 邮箱网页版设置 ↗" });
     rows.push({ key: "action:email-test", kind: "action", action: "emailTest" });
-    rows.push({ key: "text:email-delivery-note", kind: "text", text: "登录官网后：设置 → 帐户 → 开启 SMTP / 生成授权码。授权码保存在系统凭据管理器；环境变量仅作为回退。" });
-    return { kind: "menu", id: "email-config", title: "邮箱", rows, focus: 0 };
+    rows.push({ key: "text:email-password-note", kind: "text", text: "需要 QQ 邮箱授权码（不是登录密码）。" });
+    rows.push({ key: "text:email-smtp-note", kind: "text", text: "在 QQ 邮箱「设置 → 帐户」开启 SMTP 并生成授权码。" });
+    rows.push({ key: "text:email-platform-note", kind: "text", text: "界面安全保存仅支持 Windows；其它系统请按安装说明配置兼容方式。" });
+    return { kind: "menu", id: "email-config", title: "邮箱提醒", rows, focus: 0 };
   }
 
   /** Read-only status page: one actionable row (reload) plus the host's status lines as text rows. */
@@ -375,7 +391,7 @@ export class NotifySettingsComponent {
       this.finish(this.summary);
       return;
     }
-    this.view = previous;
+    this.view = previous.kind === "menu" ? this.rebuildPage(previous) : previous;
     this.invalidate();
     this.requestRender();
   }
@@ -461,11 +477,21 @@ export class NotifySettingsComponent {
   }
 
   /**
-   * Space: quick toggle. A boolean field flips in place; a collection or other complex field opens
-   * its candidate list so a member can still be toggled there. Category, rule and action rows do
-   * nothing, because Space must never trigger navigation or an external action.
+   * Space: quick toggle. Boolean fields and reminder-rule rows flip in place; a collection or
+   * other complex field opens its candidate list. Other navigation and action rows do nothing.
    */
   private quickToggle(): void {
+    if (this.view.kind === "menu") {
+      const row = this.view.rows[this.view.focus];
+      if (row?.kind === "rule") {
+        const item = this.itemById(`rules.${row.rule.key}.enabled`);
+        if (item) {
+          this.commit(item, this.value(item) !== true, false);
+          this.requestRender();
+        }
+        return;
+      }
+    }
     const item = this.focusedFieldItem();
     if (!item) return;
     if (this.view.kind === "detail") {
@@ -554,8 +580,11 @@ export class NotifySettingsComponent {
     if (view.kind === "preview") return ["↑↓ 滚动   Esc 返回"];
     if (view.kind === "help") return ["a 沿用以后默认   d 恢复内置默认   ↑↓ 滚动   Esc 返回", FOOTER_KEY_HINTS];
     if (view.kind === "menu" && view.id === "status") return ["↑↓ 滚动   Enter 重读配置   Esc 返回", STATUS_KEY_HINTS];
+    if (view.kind === "menu" && view.rows[view.focus]?.kind === "rule") {
+      return ["↑↓ 移动   Space 开关提醒   Enter 详细设置   Esc 返回", FOOTER_KEY_HINTS];
+    }
     if (view.kind === "menu" && view.rows[view.focus]?.kind !== "field") {
-      return ["↑↓ 移动   Enter 打开   Esc 返回", FOOTER_KEY_HINTS];
+      return ["↑↓ 移动   Enter 打开 / 执行   Esc 返回", FOOTER_KEY_HINTS];
     }
     return ["↑↓ 移动   Enter 修改   Space 快速切换   Esc 返回", "Ctrl+S 设为以后默认"];
   }
@@ -576,8 +605,8 @@ export class NotifySettingsComponent {
     if (view.kind === "menu") return view.title;
     if (view.kind === "search") return "搜索设置";
     if (view.kind === "preview") return "通知预览";
-    if (view.kind === "secret") return "设置 QQ SMTP 授权码";
-    if (view.kind === "secretConfirm") return "移除 QQ SMTP 授权码";
+    if (view.kind === "secret") return "设置邮箱授权码";
+    if (view.kind === "secretConfirm") return "移除邮箱授权码";
     const item = this.itemById(view.itemId);
     if (!item) return "通知";
     if (view.kind === "input") return "自定义输入";
@@ -649,8 +678,6 @@ export class NotifySettingsComponent {
     if (item.providerId !== undefined) {
       const fromUser = providerDefinitionSource(item, this.host.userRaw()) === "user";
       lines.push(`渠道定义：${fromUser ? "由用户配置（用户文件中定义，可能与同名内置渠道不同）" : "出厂默认"}`);
-      const detail = item.detail?.(this.host.config());
-      if (detail !== undefined) lines.push(`渠道类型：${detail}`);
       lines.push("说明：渠道凭据（URL、headers、密钥引用）只存在于配置文件，界面不显示也不写入");
     }
     if (item.inputHint) lines.push(`输入：${item.inputHint}`);
@@ -699,6 +726,7 @@ export class NotifySettingsComponent {
     // counter is informational and is pushed last.
     if (this.focusedFieldItem() && (this.view.kind === "menu" || this.view.kind === "detail")) hints.push("? 字段详情");
     if (this.view.kind === "menu" && this.view.rows[this.view.focus]?.kind === "field") hints.push("Space 快速切换");
+    if (this.view.kind === "menu" && this.view.rows[this.view.focus]?.kind === "rule") hints.push("Space 开关提醒");
     if (this.view.kind === "detail") {
       const item = this.itemById(this.view.itemId);
       if (item?.kind === "collection") hints.push("集合字段：Enter/Space 切换成员（可多选）");
@@ -855,7 +883,7 @@ export class NotifySettingsComponent {
   private secretLines(width: number): string[] {
     const view = this.view;
     if (view.kind !== "secret") return [];
-    const lines = ["授权码仅保存在 Windows 凭据管理器，不写入配置、会话或日志。",
+    const lines = ["授权码只保存在 Windows 凭据管理器，不写入配置、会话或日志。",
       `› ${"●".repeat(Math.min(view.buffer.length, Math.max(0, width - 3)))}${CURSOR_MARKER}`];
     if (view.error) lines.push(view.error);
     return lines.flatMap((line) => wrapTextWithAnsi(line, Math.max(1, width))).slice(0, BODY_ROWS);
@@ -964,19 +992,16 @@ export class NotifySettingsComponent {
 
   /**
    * Candidate row: focus and current-value cells (two columns each, always reserved), then the
-   * value with optional detail, then a trailing ` · 默认`. Markers and suffix are given width
+   * readable value label, then a trailing ` · 默认`. Markers and suffix are given width
    * first; the label takes what is left and is truncated with an ellipsis.
    */
   private candidateRow(item: SettingItem, candidate: Candidate, index: number, focusIndex: number, width: number): string {
-    const config = this.host.config();
     const current = this.value(item);
     const isCurrent = !candidate.custom && isCurrentValue(item.kind, current, candidate.value as SettingValue);
     const isDefault = !candidate.custom && this.isDefaultCandidate(item, candidate, current);
-    const detail = item.detail?.(config);
     const suffix = isDefault && width >= DEFAULT_SUFFIX_MIN_WIDTH ? " · 默认" : "";
     const reserved = visibleWidth(suffix);
     let label = candidate.label;
-    if (detail !== undefined && width >= DETAIL_MIN_WIDTH && !candidate.custom) label = `${label} [${detail}]`;
     const room = Math.max(2, width - 4 - reserved - 1);
     if (visibleWidth(label) > room) label = truncateToWidth(label, room, "…");
     const head = `${FOCUS_CELL(index === focusIndex)}${CURRENT_CELL(isCurrent)}${label}`;

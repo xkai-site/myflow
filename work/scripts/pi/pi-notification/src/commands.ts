@@ -112,7 +112,7 @@ function formatStatus(deps: CommandDeps): string {
   // The four diagnostic groups the status page keeps apart: config blocking, current silence, the
   // self-test submission and the real delivery counters. Placed after the session line so the
   // waiting state stays inside the first page.
-  lines.push("  自检: Ctrl+T 或首页“发送测试通知”只提交一条（绕过静默/合并/冷却）；“已提交”不等于“已送达”");
+  lines.push("  测试通知: Ctrl+T 或首页“发送测试通知”只提交一条（绕过静默/合并/冷却）；“已提交”不等于“已送达”");
   for (const problem of load.errors) lines.push(`  ⚠ 配置错误 ${problem.path}: ${problem.message}`);
   for (const problem of load.warnings) lines.push(`  · 提示 ${problem.path}: ${problem.message}`);
   return lines.join("\n");
@@ -209,13 +209,13 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
       if (reason) return { ok: false, message: `邮箱测试未发送：${reason}` };
       const now = Date.now();
       deps.service().submit({
-        level: "error", kind: "run_completed", title: "Pi 邮箱渠道测试",
-        body: "这是固定的邮箱渠道测试内容。SMTP 接受不等于最终送达，请检查收件箱及垃圾邮件。",
+        level: "error", kind: "run_completed", title: "Pi 邮箱测试",
+        body: "这是一封固定内容的测试邮件。请检查收件箱和垃圾邮件；提交成功不代表已经送达。",
         dedupeKey: `manual-email:${now}`, channels: ["email"],
         meta: { sessionId: deps.sessionId() ?? "manual", runId: String(now), level: "error" },
       }, { bypassFilters: true });
       deps.log.record({ event: "notify_email_test_submitted" });
-      return { ok: true, message: "已提交邮箱测试；提交或 SMTP 接受不等于最终送达，请到状态页查看结果并检查收件箱。" };
+      return { ok: true, message: "已提交邮箱测试；是否送达请检查收件箱和垃圾邮件，并在状态与诊断中查看结果。" };
     },
 
     credentialStatus() {
@@ -258,8 +258,8 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
         {
           level: "info",
           kind: "run_completed",
-          title: "Pi 通知自检",
-          body: "如果你看到这条，说明渠道可用",
+          title: "Pi 测试通知",
+          body: "如果你看到这条，说明本机提醒功能正常",
           dedupeKey: `manual:${now}`,
           channels: config.rules.runCompleted.channels,
           meta: { sessionId: deps.sessionId() ?? "manual", runId: String(now), level: "info" },
@@ -271,10 +271,10 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
       const selection = selectTerminalChannel(createDefaultTerminalIo().environment());
       deps.log.record({ event: "notify_test", channel: selection.channel, reason: selection.reason ?? null });
       const base = selection.channel === "none"
-        ? `已提交自检通知，但本地渠道不可用：${selection.reason}`
-        : `已提交自检通知（机制 ${selection.channel}）`;
+        ? `已提交测试通知，但当前无法使用本机提醒：${selection.reason}`
+        : "已提交测试通知，请留意本机提醒；提交不等于已显示。";
       const quiet = deps.service().isQuietHours()
-        ? " 当前处于静默时段，真实通知会被静默；本次自检绕过静默。"
+        ? " 免打扰时段当前开启，普通提醒会暂停；本次测试忽略免打扰。"
         : "";
       return { ok: true, message: base + quiet };
     },
@@ -362,7 +362,7 @@ export async function handleNotifyCommand(args: string, ctx: ExtensionCommandCon
   // silently doing nothing.
   if (trimmed !== "") {
     deps.log.record({ event: "notify_usage", args: sanitize(trimmed, 100) });
-    report(ctx, `通知设置已收敛为单一入口：直接输入 /notify 打开设置。\n状态总览 Ctrl+O、自检 Ctrl+T、重读配置 Ctrl+R 都在设置界面里。`, "warning");
+    report(ctx, `通知设置已收敛为单一入口：直接输入 /notify 打开设置。\n状态与诊断 Ctrl+O、测试通知 Ctrl+T、重读配置 Ctrl+R 都在设置界面里。`, "warning");
     return;
   }
 

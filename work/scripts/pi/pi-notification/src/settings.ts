@@ -41,12 +41,13 @@ export interface SessionOverlay {
 export const QQ_MAIL_URL = "https://mail.qq.com/";
 
 export function emailTestBlockReason(config: NotificationConfig, hasAuthCode: boolean): string | undefined {
-  if (!config.enabled) return "全局通知已关闭，请先开启通知。";
+  if (!config.enabled) return "通知总开关已关闭，请先开启通知。";
   const provider = config.providers.find((candidate) => candidate.id === "email" && candidate.type === "email");
-  if (!provider?.enabled) return "邮箱渠道未开启，请在「通知渠道 → 邮箱」开启邮箱。";
-  if (typeof provider.options.from !== "string" || !provider.options.from) return "邮箱渠道已开启，但发件 QQ 邮箱未配置。";
-  if (!Array.isArray(provider.options.to) || provider.options.to.length === 0) return "邮箱渠道已开启，但收件邮箱未配置。";
-  if (!hasAuthCode) return "邮箱渠道已开启，但 Windows 凭据管理器和 PI_NOTIFY_QQ_SMTP_AUTH_CODE 都没有授权码。可在本页设置授权码。";
+  if (!provider?.enabled) return "请先在「接收方式 → 邮箱」开启邮箱提醒。";
+  if (typeof provider.options.from !== "string" || !provider.options.from || !Array.isArray(provider.options.to) || provider.options.to.length === 0) {
+    return "邮箱提醒还没配完整，请填写发件和收件邮箱地址。";
+  }
+  if (!hasAuthCode) return "还没有设置 QQ 邮箱授权码（不是 QQ 登录密码），请到邮箱设置中添加。";
   return undefined;
 }
 
@@ -183,8 +184,6 @@ export interface SettingItem {
    * window; hidden fields are never offered as if they did something. Defaults to visible.
    */
   visible?(config: NotificationConfig): boolean;
-  /** Extra information such as the provider type. */
-  detail?(config: NotificationConfig): string | undefined;
   /** Input parsing for number and time items, used by the `custom…` row. */
   parseInput?(text: string): { ok: true; value: SettingValue | SettingValue[] } | { ok: false; message: string };
   /** Unit and range shown while editing a `custom…` value; undefined when the item has no free input. */
@@ -215,6 +214,19 @@ const TOOL_FAILURE_MODE_LABELS: Record<ToolFailureMode, string> = {
   aggregate: "并入结果",
   immediate: "立即提醒",
 };
+
+const BUILTIN_CHANNEL_LABELS: Record<string, string> = {
+  terminal: "本机提醒",
+  email: "邮箱",
+  hook: "Webhook",
+  debug: "调试渠道",
+  noop: "不投递",
+};
+
+/** Translate built-in destinations while leaving custom provider names intact. */
+export function channelLabel(id: string): string {
+  return BUILTIN_CHANNEL_LABELS[id] ?? id;
+}
 
 const PROMPT_KIND_LABELS: Record<string, string> = {
   select: "选择",
@@ -287,7 +299,6 @@ interface ItemSpec {
   emptyLabel?: string;
   /** Value to display text; a value missing from the map falls back to its raw form. */
   labels?: Record<string, string>;
-  detail?: (config: NotificationConfig) => string | undefined;
   visible?: (config: NotificationConfig) => boolean;
 }
 
@@ -334,7 +345,6 @@ function makeItem(spec: ItemSpec): SettingItem {
     candidates,
     format,
     userPath: spec.path,
-    ...(spec.detail ? { detail: spec.detail } : {}),
     ...(spec.visible ? { visible: spec.visible } : {}),
   };
 
@@ -439,8 +449,9 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
   }));
 
   const channelCandidates = (): SettingCandidate[] => (
-    config.providers.map((provider) => ({ value: provider.id, label: provider.id }))
+    config.providers.map((provider) => ({ value: provider.id, label: channelLabel(provider.id) }))
   );
+  const channelLabels = Object.fromEntries(config.providers.map((provider) => [provider.id, channelLabel(provider.id)]));
   for (const rule of RULES) {
     const base = `rules.${rule.key}`;
     items.push(makeItem({ group: "通知规则", label: `${rule.label} · 开关`, path: `${base}.enabled`, kind: "boolean" }));
@@ -458,7 +469,8 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
       path: `${base}.channels`,
       kind: "collection",
       candidates: channelCandidates,
-      emptyLabel: "（不发往任何渠道）",
+      labels: channelLabels,
+      emptyLabel: "（不发送提醒）",
     }));
     if (rule.key === "toolFailed") {
       items.push(makeItem({
@@ -618,7 +630,7 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
     items.push({
       id: `provider:${provider.id}`,
       group: "渠道",
-      label: provider.id,
+      label: channelLabel(provider.id),
       kind: "boolean",
       providerId: provider.id,
       read: (current) => current.providers.find((item) => item.id === provider.id)?.enabled,
@@ -626,7 +638,6 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
       candidates: () => BOOLEAN_CANDIDATES.map((candidate) => ({ ...candidate })),
       format: (value) => booleanLabel(value),
       userPath: `providers.${provider.id}.enabled`,
-      detail: () => provider.type,
     });
     if (provider.id === "email" && provider.type === "email") {
       const emailOption = (optionPath: "from" | "to" | "subjectPrefix", label: string, list = false): SettingItem => ({
@@ -697,9 +708,11 @@ export function ruleSummary(config: NotificationConfig, items: readonly SettingI
 export interface SettingCategory {
   id: string;
   label: string;
-  kind: "rules" | "fields";
+  kind: "rules" | "fields" | "sections";
   /** Group whose items this category lists; only for `kind: "fields"`. */
   group?: string;
+  /** Child category ids, only for `kind: "sections"`. */
+  sections?: readonly string[];
   summary(config: NotificationConfig): string;
   /**
    * Rows hidden behind one expandable row while `when` is true (a disabled feature's parameters).
@@ -727,13 +740,13 @@ export function categoryPageItems(
 }
 
 /**
- * Categories shown on the home page, in render order. Order is part of the UI contract; the group
- * names are the same ones `buildSettingItems` assigns, so a category page is a plain group filter.
+ * Category catalog. The UI chooses the small home-page subset explicitly; `more` groups the
+ * advanced sections so they are discoverable without crowding the common setup path.
  */
 export const SETTING_CATEGORIES: readonly SettingCategory[] = [
   {
     id: "rules",
-    label: "通知场景",
+    label: "提醒时机",
     kind: "rules",
     summary: (config) => {
       const enabled = RULE_INFOS.filter((rule) => config.rules[rule.key as keyof NotificationConfig["rules"]].enabled).length;
@@ -742,10 +755,10 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
       return enabled === 0 ? "全部关闭" : `${enabled} 类已开启`;
     },
   },
-  { id: "content", label: "通知内容", kind: "fields", group: "内容", summary: () => "耗时、会话名等", actions: [{ key: "action:preview", action: "preview" }] },
+  { id: "content", label: "提醒内容", kind: "fields", group: "内容", summary: () => "耗时、会话名等", actions: [{ key: "action:preview", action: "preview" }] },
   {
     id: "quietHours",
-    label: "安静时间",
+    label: "免打扰时段",
     kind: "fields",
     group: "免打扰",
     summary: (config) => (config.quietHours.enabled ? `${config.quietHours.start}–${config.quietHours.end}` : "未开启"),
@@ -760,7 +773,7 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
   },
   {
     id: "channels",
-    label: "通知方式",
+    label: "接收方式",
     kind: "fields",
     group: "渠道",
     summary: (config) => {
@@ -770,12 +783,18 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
   },
   {
     id: "advanced",
-    label: "更多设置",
+    label: "投递与频率",
     kind: "fields",
     group: "高级设置",
-    summary: () => "高级选项、测试与诊断",
+    summary: () => "超时、重试与队列",
+  },
+  {
+    id: "more",
+    label: "更多设置",
+    kind: "sections",
+    sections: ["content", "quietHours", "advanced"],
+    summary: () => "内容、免打扰与其它选项",
     actions: [
-      { key: "action:test", action: "test" },
       { key: "action:status", action: "status" },
       { key: "action:reload", action: "reload" },
       { key: "action:search", action: "search" },
