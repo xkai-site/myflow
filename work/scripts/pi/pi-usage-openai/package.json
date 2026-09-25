@@ -1,0 +1,17 @@
+{
+  "name": "pi-usage-openai",
+  "version": "0.1.0",
+  "description": "Pi extension to query current OpenAI/Codex account usage",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test test/*.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "keywords": ["pi-package", "pi", "extension", "openai", "codex", "usage"],
+  "pi": {
+    "extensions": ["./extensions/index.ts"]
+  }
+}

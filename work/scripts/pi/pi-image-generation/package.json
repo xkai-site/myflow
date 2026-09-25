@@ -1,7 +1,7 @@
 {
   "name": "pi-image-generation",
   "version": "0.1.0",
-  "description": "Pi /image extension for OpenAI Codex OAuth and Qwen Token Plan image generation",
+  "description": "Pi /image extension using configured image providers, including OpenAI Codex and Qwen Token Plan",
   "type": "module",
   "license": "MIT",
   "scripts": {

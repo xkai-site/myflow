@@ -1,15 +1,26 @@
 # myflow
-个人ai工作流，希望也能为你所用
 
-## 插件开发文档
+个人 AI 工作流与 Pi 插件集合。
 
-当前用法与限制以各插件 README 为入口：
+## 插件
 
-- [pi-codex-official](work/scripts/pi/pi-codex-official/README.md)
+插件用法见各自 README；开发约定见[扩展开发手册](wiki/tech/pi-extension-development.md)。
+
+- [pi-usage-openai](work/scripts/pi/pi-usage-openai/README.md)
 - [pi-image-generation](work/scripts/pi/pi-image-generation/README.md)
 - [pi-video-generation](work/scripts/pi/pi-video-generation/README.md)
 - [pi-notification](work/scripts/pi/pi-notification/README.md)
 
-原根目录的 Findings、Progress、Task Plan 已迁入[历史归档](plans/archive/plugin-development-notes/README.md)，不再持续更新，也不作为当前任务或测试状态。
+## 安装与卸载
 
-后续维护以插件 README 和可执行测试为主；重要设计取舍按需记录，复杂任务在 `plans/` 单独规划、完成后归档，小修改不强制维护三份过程文件。
+在仓库根目录执行，将 `<插件目录>` 替换为 `work/scripts/pi/` 下的目录名：
+
+```bash
+pi install ./work/scripts/pi/<插件目录>
+pi list
+pi remove ./work/scripts/pi/<插件目录>
+```
+
+卸载不会删除源码。操作后重启 Pi，或执行 `/reload`。npm 插件使用 `npm:<包名>` 作为安装或卸载目标。
+
+维护以插件 README 和测试为准；复杂任务规划记入 `plans/`。

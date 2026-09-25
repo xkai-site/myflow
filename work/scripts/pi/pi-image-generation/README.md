@@ -24,15 +24,11 @@ TUI 会打开向导：确认提示词 → 生成/编辑 → 账户 → 模型 �
 
 ## 认证：任选一种
 
-### OpenAI：复用 Codex ChatGPT OAuth
+### OpenAI：使用已配置的 Pi provider
 
-1. 准备 Codex 的 ChatGPT 登录（尚未登录时运行 `codex login`），启动一次 `codex` 让其加载模型缓存；无需发测试请求。
-2. 在上级 `pi` 目录执行 `pi install ./pi-codex-official`，回到 Pi `/reload`。
-3. Pi `/login` 选择 **OpenAI Codex (Codex 本地凭据)**。已有有效登录标记无需重复操作。
+OpenAI 图片生成需要 Pi 中已有且已认证的 `openai-codex` provider。此图片扩展和 `pi-usage-openai` 都不会注册该对话 provider、执行 OAuth 登录或刷新 token；请由独立 provider/插件负责安装和认证。当前项目已不再提供此前 `pi-codex-official` 的 provider 功能。
 
-Codex 目录须有有效 `auth.json` 和 `models_cache.json`，默认 `~/.codex/`，可用 `CODEX_HOME` 指定。详细前置条件见 [pi-codex-official](../pi-codex-official/README.md)。不要手写缓存，也不要把文件内容发到会话。
-
-本扩展每次通过 Pi 的 `openai-codex` provider 取当前认证，不自行登录或刷新 token。过期时用 Codex / CC Switch 更新登录。
+本扩展每次通过 Pi 的 `openai-codex` provider 读取认证信息，不自行登录或刷新 token。过期时通过提供该 provider 的扩展/Codex 流程更新登录。
 请求发送到 ChatGPT Codex 订阅后端 `https://chatgpt.com/backend-api/codex/images/generations` 或 `https://chatgpt.com/backend-api/codex/images/edits`，**不是 OpenAI Platform API Key 接口**；账号权益、模型支持和额度由服务端决定。
 
 ### 千问：Token Plan CN API Key

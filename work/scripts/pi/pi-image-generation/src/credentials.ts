@@ -49,7 +49,7 @@ export async function resolveImageAuth(provider: ImageProviderConfig, agentDir: 
 	const id = provider.auth.type === "provider" ? provider.auth.providerId : provider.auth.fallbackProviderId;
 	const registered = registry.getProvider(id);
 	if (!registered) throw new Error(provider.auth.type === "provider"
-		? "Install and log in through pi-codex-official first; retry after updating Codex credentials."
+		? `Configure and authenticate the required Pi provider ${id} through its own extension or settings.`
 		: "Configure a Token Plan CN Key in /image --settings or configure qwen-token-plan-cn.");
 	let resolution: Awaited<ReturnType<AuthRegistry["getProviderAuth"]>>;
 	try { resolution = await registry.getProviderAuth(id); }

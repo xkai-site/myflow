@@ -25,7 +25,7 @@ export async function runAccountSettings(ctx: ExtensionContext, config: ImageCon
 	const provider = config.providers[index];
 	if (!provider) return;
 	if (provider.auth.type === "provider") {
-		ctx.ui.notify(`OpenAI uses pi-codex-official.\n${statuses[index].source}\nInstall the extension and use /login → Codex local credentials. Refresh expired credentials through Codex / CC Switch, then retry. Image generation does not log in or refresh tokens independently.`, "info");
+		ctx.ui.notify(`This image account uses the Pi provider ${provider.auth.providerId}.\n${statuses[index].source}\nConfigure and authenticate it through its own extension or settings. The image extension does not provide provider registration, login, or token refresh.`, "info");
 		return;
 	}
 	if (statuses[index].error) ctx.ui.notify(statuses[index].error!, "warning");
