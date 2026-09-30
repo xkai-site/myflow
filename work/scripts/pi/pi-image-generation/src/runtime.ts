@@ -1,7 +1,7 @@
 import {
-	createImagesModels, createImagesProvider,
-	type AssistantImages, type ImageContent, type ImagesApi, type ImagesContext,
-	type ImagesModel, type ImagesOptions, type TextContent,
+	createModels, createProvider,
+	type AssistantImages, type ImageContent, type ImageApi, type ImagesContext,
+	type ImageModel, type ImagesOptions, type TextContent,
 } from "@earendil-works/pi-ai";
 import { generateAliWanImages } from "./ali-wan-images.ts";
 import { generateOpenAICodexImages } from "./openai-codex-images.ts";
@@ -19,17 +19,23 @@ const TRANSPORTS: Record<ImageProviderConfig["adapter"], Transport> = {
 };
 
 export function createRuntimeImagesModels(config: ImageConfig, provider: ImageProviderConfig, baseUrl: string, onDiagnostic?: DiagnosticWriter) {
-	const models = createImagesModels();
-	models.setProvider(createImagesProvider({
+	// Keep this image-only collection local; account settings still resolve auth per request.
+	const models = createModels();
+	models.setProvider(createProvider({
 		id: provider.id,
 		name: provider.name,
 		auth: { apiKey: { name: "Credentials resolved by image account settings", resolve: async () => ({ auth: {} }) } },
-		models: config.models.filter((model) => model.provider === provider.id && model.enabled !== false).map((model): ImagesModel<ImagesApi> => ({
+		models: config.models.filter((model) => model.provider === provider.id && model.enabled !== false).map((model): ImageModel<ImageApi> => ({
+			type: "image",
 			id: model.id, name: model.name, provider: provider.id, api: provider.adapter, baseUrl,
 			input: model.tasks.includes("edit") ? ["text", "image"] : ["text"],
 			output: ["image", "text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		})),
-		api: { generateImages: (model, context, options) => generateWithTransport(TRANSPORTS[provider.adapter], model, context, options, onDiagnostic) },
+		images: {
+			[provider.adapter]: {
+				generateImages: (model, context, options) => generateWithTransport(TRANSPORTS[provider.adapter], model, context, options, onDiagnostic),
+			},
+		},
 	}));
 	return models;
 }
@@ -49,7 +55,7 @@ export async function generateAndSave(
 	signal.throwIfAborted();
 	try {
 		const models = createRuntimeImagesModels(config, command.providerConfig, auth.baseUrl, createDiagnosticWriter(cwd));
-		const model = models.getModel(command.provider, command.model);
+		const model = models.getModelOfType("image", command.provider, command.model);
 		if (!model) throw new Error("Image model is not registered");
 		const result = await models.generateImages(model, {
 			input: [{ type: "text", text: command.prompt }, ...inputImages],
@@ -72,7 +78,7 @@ export async function generateAndSave(
 }
 
 async function generateWithTransport(
-	transport: Transport, model: ImagesModel<ImagesApi>, context: ImagesContext, options?: ImagesOptions, onDiagnostic?: DiagnosticWriter,
+	transport: Transport, model: ImageModel<ImageApi>, context: ImagesContext, options?: ImagesOptions, onDiagnostic?: DiagnosticWriter,
 ): Promise<AssistantImages> {
 	const output: AssistantImages = { api: model.api, provider: model.provider, model: model.id, output: [], stopReason: "stop", timestamp: Date.now() };
 	try {

@@ -120,11 +120,13 @@ upstream main 是研究时读取的版本，可能继续变化；并非用户安
 - 另起 Node 进程使用同一宿主 dispatcher 初始化函数、现有代理环境做两次**无凭据 GET**：ChatGPT 图像路径 440 ms 返回 Cloudflare HTML 403；公开 `/v1/models` 565 ms 返回 JSON 401。
 - 这些 GET 只证明当前网络可以收到 HTTP 响应，不能据此判断已登录 POST 的权限、Cloudflare 处理、生图耗时或账户后端支持。没有在当前运行中的 Pi 进程内抓取真实请求。
 
-## 5. 离线验证
+## 5. 离线验证（历史记录）
+
+旧 SDK 的历史基线测试及其兼容桥接已移除；下列差分结果仅保留为当时的调查证据。当前回归验证使用单元测试和 `test:host`：
 
 ```bash
-node work/scripts/pi/pi-image-generation/test/compare-baseline.mjs file:///D:/Nodejs/node_modules/@earendil-works/pi-coding-agent/dist/index.js
 cd work/scripts/pi/pi-image-generation && npm test
+npm run test:host -- file:///D:/Nodejs/node_modules/@earendil-works/pi-coding-agent/dist/index.js
 ```
 
 - 与固定旧提交 `4df3ccd805ef32616ccbc8ee635649b3be1f1e46` 比较：30/30 场景通过，GPT Image 2 的 URL、method、headers、serialized body、默认 quality 与旧版一致。fetch 全部 mock，合成凭据。

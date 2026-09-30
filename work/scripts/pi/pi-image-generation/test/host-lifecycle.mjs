@@ -31,7 +31,15 @@ try {
   const provider=config.providers.find(p=>p.id===selected.provider);
   const baseUrl=provider.adapter==='openai-codex-images'?'https://chatgpt.com/backend-api/codex':'https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1';
   const runtime=createRuntimeImagesModels(config,provider,baseUrl);
-  assert.equal(runtime.getModel(provider.id,selected.id).id,selected.id);
+  const imageModel=runtime.getModelOfType('image',provider.id,selected.id);
+  assert.equal(imageModel.id,selected.id);
+  assert.equal(imageModel.type,'image');
+  assert.equal(imageModel.api,provider.adapter);
+  assert.equal(imageModel.baseUrl,baseUrl);
+  assert.deepEqual(runtime.getModels(provider.id),[]); // Chat-facing reads must not expose image models.
+  assert.equal(runtime.getModel(provider.id,selected.id),undefined);
+  assert.deepEqual(runtime.getModelsOfType('image',provider.id).map(model=>model.id),
+   enabledModels.filter(model=>model.provider===provider.id).map(model=>model.id));
   for(const edit of [false,true]){
    const images=edit?[{type:'image',mimeType:'image/png',data:bytes.toString('base64')}]:[];
    const command=resolveImageCommand({prompt:'test',help:false},selected,images.length,config);
@@ -58,7 +66,8 @@ try {
  const disabled={...structuredClone(disabledConfig.models.find(m=>m.provider===openaiProvider.id)),key:'disabled-test-model',id:'disabled-test-id',name:'Disabled test model',enabled:false};
  disabledConfig.models.push(disabled);
  const defaultRuntime=createRuntimeImagesModels(disabledConfig,openaiProvider,'https://chatgpt.com/backend-api/codex');
- assert.equal(defaultRuntime.getModel(disabled.provider,disabled.id),undefined);
+ assert.equal(defaultRuntime.getModelOfType('image',disabled.provider,disabled.id),undefined);
+ assert.ok(!defaultRuntime.getAllModels().some(model=>model.id===disabled.id));
  const disabledCommand={prompt:'synthetic',help:false,modelKey:disabled.key,provider:disabled.provider,model:disabled.id,modelConfig:disabled,providerConfig:openaiProvider,size:'auto'};
  await assert.rejects(generateAndSave(disabledConfig,disabledCommand,[],dir,async()=>assert.fail('Disabled model resolved auth'),new AbortController().signal,async()=>assert.fail('Disabled model fetched')),/disabled/);
  // Success timings are logged without changing transport; failures survive SDK flattening.

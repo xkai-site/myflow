@@ -5,7 +5,7 @@ Pi 图片生成与参考图编辑扩展，入口是 **`/image` 斜杠命令**，
 
 ## 安装与首次调用
 
-前提：已安装 Pi，Node.js ≥ 22.19.0。在本插件目录执行：
+前提：已安装 **Pi ≥ 0.99.0**，Node.js ≥ 22.19.0。在本插件目录执行：
 
 ```bash
 npm install --ignore-scripts
@@ -14,6 +14,7 @@ pi install ./pi-image-generation
 ```
 
 本地安装直接引用目录，请勿移动或删除。启动 Pi；已运行的 Pi 执行 `/reload`。
+本扩展使用 Pi 0.99.x 的统一 `createModels()` / `createProvider()` 生图接口，保留 Codex / Token Plan CN 自定义请求协议及原认证优先级；图片模型只注册在插件局部集合，不修改 Pi 的聊天模型目录，也不新增 Agent 工具。
 完成下文任一种认证后，在要保存图片的项目目录启动 Pi，输入：
 
 ```text
