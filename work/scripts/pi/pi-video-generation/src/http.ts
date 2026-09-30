@@ -1,3 +1,5 @@
+import { isIP } from "node:net";
+
 const DEFAULT_ERROR_LIMIT = 800;
 
 export function mergeHeaders(base: Record<string, string | null> | undefined, required: Record<string, string>): Headers {
@@ -76,7 +78,10 @@ export function requireHttpsUrl(value: string, description: string): URL {
 
 function isPrivateHostname(hostname: string): boolean {
 	if (hostname === "localhost" || hostname.endsWith(".localhost") || hostname === "::1") return true;
-	if (hostname.startsWith("fc") || hostname.startsWith("fd") || /^fe[89ab]/u.test(hostname) || hostname.startsWith("::ffff:")) {
+	if (
+		isIP(hostname) === 6 &&
+		(hostname.startsWith("fc") || hostname.startsWith("fd") || /^fe[89ab]/u.test(hostname) || hostname.startsWith("::ffff:"))
+	) {
 		return true;
 	}
 	const parts = hostname.split(".");

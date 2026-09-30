@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { getEventListeners } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
 import { cancelVideoTask, pollVideoTask, submitVideoTask } from "../src/adapters.ts";
+import { VideoTaskTimeoutError } from "../src/dashscope-videos.ts";
 import type { ResolvedVideoRequest, VideoProviderConfig } from "../src/types.ts";
 
 function provider(overrides: Partial<VideoProviderConfig> = {}): VideoProviderConfig {
@@ -86,4 +89,105 @@ test("submit rejects a success response without a task id", async () => {
 		() => submitVideoTask(request, { fetch: async () => json({ output: { task_status: "PENDING" } }) }),
 		/missing task_id/,
 	);
+});
+
+const completedPayload = {
+	output: { task_id: "task-1", task_status: "SUCCEEDED", video_url: "https://cdn.example/v.mp4" },
+};
+
+function isTaskTimeout(error: unknown): boolean {
+	return error instanceof VideoTaskTimeoutError && error.taskId === "task-1";
+}
+
+test("poll timeout aborts an in-flight request even without a caller signal", async () => {
+	let signal: AbortSignal | undefined;
+	let calls = 0;
+	await assert.rejects(() => pollVideoTask(provider({ taskTimeoutMs: 30 }), "task-1", {
+		fetch: async (_url, init) => {
+			calls++;
+			signal = init?.signal ?? undefined;
+			await delay(200, undefined, { signal });
+			return json(completedPayload);
+		},
+	}), isTaskTimeout);
+	assert.equal(calls, 1);
+	assert.equal(signal?.aborted, true);
+});
+
+test("poll timeout also aborts a stalled response body", async () => {
+	let signal: AbortSignal | undefined;
+	let statuses = 0;
+	await assert.rejects(() => pollVideoTask(provider({ taskTimeoutMs: 30 }), "task-1", {
+		fetch: async (_url, init) => {
+			signal = init?.signal ?? undefined;
+			return new Response(new ReadableStream({
+				start(controller) {
+					void delay(200, undefined, { signal }).then(() => {
+						controller.enqueue(new TextEncoder().encode(JSON.stringify(completedPayload)));
+						controller.close();
+					}, (error) => controller.error(error));
+				},
+			}));
+		},
+		onStatus: () => { statuses++; },
+	}), isTaskTimeout);
+	assert.equal(signal?.aborted, true);
+	assert.equal(statuses, 0);
+});
+
+test("poll timeout interrupts the polling interval without aborting the caller", async () => {
+	const caller = new AbortController();
+	let signal: AbortSignal | undefined;
+	let calls = 0;
+	await assert.rejects(() => pollVideoTask(provider({ taskTimeoutMs: 30, pollIntervalMs: 200 }), "task-1", {
+		signal: caller.signal,
+		fetch: async (_url, init) => {
+			calls++;
+			signal = init?.signal ?? undefined;
+			return json({ output: { task_id: "task-1", task_status: "RUNNING" } });
+		},
+	}), isTaskTimeout);
+	assert.equal(calls, 1);
+	assert.equal(signal?.aborted, true);
+	assert.equal(caller.signal.aborted, false);
+	assert.equal(getEventListeners(signal!, "abort").length, 0);
+});
+
+test("a response arriving after the deadline is not accepted as success", async () => {
+	await assert.rejects(() => pollVideoTask(provider({ taskTimeoutMs: 30 }), "task-1", {
+		// Deliberately non-cooperative mock: the post-response check must still reject it.
+		fetch: async () => {
+			await delay(80);
+			return json(completedPayload);
+		},
+	}), isTaskTimeout);
+});
+
+test("caller cancellation remains distinguishable from the poll timeout", async () => {
+	const caller = new AbortController();
+	const reason = new Error("synthetic user cancellation");
+	await assert.rejects(() => pollVideoTask(provider(), "task-1", {
+		signal: caller.signal,
+		fetch: async (_url, init) => new Promise<Response>((_resolve, reject) => {
+			const signal = init!.signal!;
+			signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+			queueMicrotask(() => caller.abort(reason));
+		}),
+	}), (error) => error === reason);
+});
+
+test("completed polling intervals leave no abort listeners", async () => {
+	const caller = new AbortController();
+	let signal: AbortSignal | undefined;
+	let calls = 0;
+	await pollVideoTask(provider(), "task-1", {
+		signal: caller.signal,
+		fetch: async (_url, init) => {
+			signal = init?.signal ?? undefined;
+			return json(++calls === 6 ? completedPayload : { output: { task_id: "task-1", task_status: "RUNNING" } });
+		},
+	});
+	assert.equal(calls, 6);
+	assert.equal(getEventListeners(signal!, "abort").length, 0);
+	assert.equal(getEventListeners(caller.signal, "abort").length, 0);
 });

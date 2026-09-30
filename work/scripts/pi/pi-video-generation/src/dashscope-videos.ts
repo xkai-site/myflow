@@ -85,39 +85,46 @@ export async function pollDashscopeTask(
 	taskId: string,
 	options: AdapterRuntimeOptions = {},
 ): Promise<CompletedTask> {
-	const startedAt = Date.now();
+	const timeoutSignal = AbortSignal.timeout(provider.taskTimeoutMs);
+	const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
 	let first = true;
-	while (true) {
-		options.signal?.throwIfAborted();
-		if (!first) await sleep(provider.pollIntervalMs, options.signal);
-		first = false;
-		if (Date.now() - startedAt > provider.taskTimeoutMs) throw new VideoTaskTimeoutError(taskId);
-		const response = await (options.fetch ?? globalThis.fetch)(
-			`${dashscopeApiRoot(provider.baseUrl)}/tasks/${encodeURIComponent(taskId)}`,
-			{
-				headers: mergeHeaders(undefined, {
-					Authorization: `Bearer ${provider.apiKey}`,
-					Accept: "application/json",
-					"User-Agent": "pi-video-generation/0.1.0",
-				}),
-				signal: options.signal,
-			},
-		);
-		const payload = await readJsonResponse(response, MAX_JSON_BYTES);
-		if (!response.ok) throw providerError(response, payload, [provider.apiKey]);
-		const parsed = parseTaskPayload(payload, provider.apiKey);
-		if (parsed.taskId && parsed.taskId !== taskId) throw new Error("DashScope returned a mismatched task_id");
-		await options.onStatus?.(parsed.status);
-		if (!TERMINAL_STATUSES.has(parsed.status)) continue;
-		if (parsed.status === "SUCCEEDED") {
-			if (!parsed.videoUrl) throw new Error("DashScope succeeded without video_url");
-			return { taskId, videoUrl: parsed.videoUrl, requestId: parsed.requestId };
+	try {
+		while (true) {
+			signal.throwIfAborted();
+			if (!first) await sleep(provider.pollIntervalMs, signal);
+			first = false;
+			const response = await (options.fetch ?? globalThis.fetch)(
+				`${dashscopeApiRoot(provider.baseUrl)}/tasks/${encodeURIComponent(taskId)}`,
+				{
+					headers: mergeHeaders(undefined, {
+						Authorization: `Bearer ${provider.apiKey}`,
+						Accept: "application/json",
+						"User-Agent": "pi-video-generation/0.1.0",
+					}),
+					signal,
+				},
+			);
+			const payload = await readJsonResponse(response, MAX_JSON_BYTES);
+			signal.throwIfAborted();
+			if (!response.ok) throw providerError(response, payload, [provider.apiKey]);
+			const parsed = parseTaskPayload(payload, provider.apiKey);
+			if (parsed.taskId && parsed.taskId !== taskId) throw new Error("DashScope returned a mismatched task_id");
+			await options.onStatus?.(parsed.status);
+			signal.throwIfAborted();
+			if (!TERMINAL_STATUSES.has(parsed.status)) continue;
+			if (parsed.status === "SUCCEEDED") {
+				if (!parsed.videoUrl) throw new Error("DashScope succeeded without video_url");
+				return { taskId, videoUrl: parsed.videoUrl, requestId: parsed.requestId };
+			}
+			if (parsed.status === "FAILED") {
+				throw new Error(`DashScope task failed: ${sanitizeError(parsed.message ?? parsed.code ?? "unknown error", [provider.apiKey])}`);
+			}
+			if (parsed.status === "CANCELED") throw new Error(`DashScope task ${taskId} was canceled`);
+			throw new Error(`DashScope task ${taskId} is unknown or expired`);
 		}
-		if (parsed.status === "FAILED") {
-			throw new Error(`DashScope task failed: ${sanitizeError(parsed.message ?? parsed.code ?? "unknown error", [provider.apiKey])}`);
-		}
-		if (parsed.status === "CANCELED") throw new Error(`DashScope task ${taskId} was canceled`);
-		throw new Error(`DashScope task ${taskId} is unknown or expired`);
+	} catch (error) {
+		if (timeoutSignal.aborted && signal.reason === timeoutSignal.reason) throw new VideoTaskTimeoutError(taskId);
+		throw error;
 	}
 }
 
@@ -219,14 +226,14 @@ async function sleep(milliseconds: number, signal?: AbortSignal): Promise<void> 
 			reject(signal.reason);
 			return;
 		}
-		const timer = setTimeout(resolve, milliseconds);
-		signal.addEventListener(
-			"abort",
-			() => {
-				clearTimeout(timer);
-				reject(signal.reason);
-			},
-			{ once: true },
-		);
+		const onAbort = () => {
+			clearTimeout(timer);
+			reject(signal.reason);
+		};
+		const timer = setTimeout(() => {
+			signal.removeEventListener("abort", onAbort);
+			resolve();
+		}, milliseconds);
+		signal.addEventListener("abort", onAbort, { once: true });
 	});
 }

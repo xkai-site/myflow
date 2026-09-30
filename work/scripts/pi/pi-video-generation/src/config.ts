@@ -37,9 +37,9 @@ export async function readVideoConfig(filePath: string): Promise<VideoGeneration
 	let raw: unknown;
 	try {
 		raw = JSON.parse(text) as unknown;
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		throw new Error(`Video model config is invalid JSON: ${message}`);
+	} catch {
+		// JSON.parse errors can include source fragments containing an API key.
+		throw new Error("Video model config is invalid JSON");
 	}
 	return validateVideoConfig(raw);
 }
@@ -85,9 +85,8 @@ export function mergeEditedConfig(text: string, current: VideoGenerationConfig):
 	let raw: unknown;
 	try {
 		raw = JSON.parse(text) as unknown;
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		throw new Error(`Edited video config is invalid JSON: ${message}`);
+	} catch {
+		throw new Error("Edited video config is invalid JSON");
 	}
 	const root = expectRecord(raw, "config");
 	const providers = expectArray(root.providers, "providers").map((value, index) => {

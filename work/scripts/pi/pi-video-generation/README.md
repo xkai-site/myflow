@@ -99,7 +99,7 @@ pi list
 | Provider `id`、`name`、`adapter` | 模板为 `qwen-token-plan`、`Qwen Token Plan`、`dashscope`；只有此 adapter 可用 |
 | Provider `apiKey`、`baseUrl` | 两者非空才视为已配置；远端必须 HTTPS，URL 不得含用户名/密码；仅本地兼容服务可用 `http://localhost` 或 `http://127.0.0.1` |
 | Provider `pollIntervalMs` | 模板 `15000`；整数 1000–300000 毫秒 |
-| Provider `taskTimeoutMs` | 模板 `900000`（15 分钟）；整数 30000–86400000 毫秒，限制本地轮询等待，不限制远端执行/费用 |
+| Provider `taskTimeoutMs` | 模板 `900000`（15 分钟）；整数 30000–86400000 毫秒，限制整个本地轮询阶段，包括查询请求、响应读取和轮询间隔；不包含提交及下载阶段，也不保证远端任务停止或停止计费 |
 | Provider `maxOutputBytes` | 模板 `536870912`（512 MiB）；整数 1024–4294967296 字节，限制单次下载 |
 | 模型 `id`、`name`、`provider`、`task` | `provider` 引用 Provider ID，`task` 为 t2v/i2v/r2v；多 Provider 同名模型可能导致命令匹配歧义 |
 | 模型 `prompt`、`inputImages`、`parameters` | 必填能力定义，默认值见上表；参数类型为 `select` / `integer` / `boolean`，`hidden` 仅控制向导是否询问 |
@@ -140,8 +140,8 @@ TUI 会话记录显示绝对路径与 **Open original video** 的 `file:///...` 
 ```bash
 cd work/scripts/pi/pi-video-generation
 
-MSYS_NO_PATHCONV=1 npm test                     # 适配器单元测试（4 条）+ 输出渲染回归（1 套）
-MSYS_NO_PATHCONV=1 npm run test:adapters        # 只跑单元测试
+MSYS_NO_PATHCONV=1 npm test                     # 离线单元测试（12 条）+ 输出渲染回归（1 套）
+MSYS_NO_PATHCONV=1 npm run test:adapters        # 只跑适配器单元测试（10 条）
 node test/output-preview.mjs "file:///<pi>/node_modules/@earendil-works/pi-coding-agent/dist/index.js"
 ```
 
