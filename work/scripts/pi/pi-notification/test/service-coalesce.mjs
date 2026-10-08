@@ -33,7 +33,7 @@ async function step(name, run) {
 }
 
 /** Injected clock, so cooldown and coalescing windows can be advanced deterministically. */
-function makeHarness({ mutateConfig, send } = {}) {
+function makeHarness({ mutateConfig, send, skip, validate, isSilenced } = {}) {
   const config = configModule.defaultConfig();
   if (mutateConfig) mutateConfig(config);
   let nowMs = 1_000_000;
@@ -48,7 +48,8 @@ function makeHarness({ mutateConfig, send } = {}) {
     create: (id, type) => ({
       id,
       type,
-      validate: () => undefined,
+      ...(skip?.(id) ? { skipped: skip(id) } : {}),
+      validate: (raw) => validate?.(id, raw),
       async send(req, signal) {
         sends.push({ id, kind: req.kind, dedupeKey: req.dedupeKey, at: nowMs });
         if (send) return send(req, signal, sends.length, id);
@@ -57,7 +58,7 @@ function makeHarness({ mutateConfig, send } = {}) {
       async dispose() {},
     }),
   };
-  const service = serviceModule.createService({ config, registry, log, now: () => nowMs });
+  const service = serviceModule.createService({ config, registry, log, now: () => nowMs, isSilenced });
   return {
     config,
     service,
@@ -381,6 +382,94 @@ await step("F 同消息多渠道有界并发，noop 计为跳过且终端不等�
   assert.equal(snapshot.skipped, 1);
   assert.equal(snapshot.byProvider.terminal.delivered, 1);
   assert.equal(snapshot.byProvider.disabled.skipped, 1);
+});
+
+await step("T1 手动测试绕过等级/免打扰/频率但不绕过去重，逐请求进度完整", async () => {
+  const h = makeHarness({ mutateConfig(c) { c.minLevel = "error"; c.quietHours = { enabled: true, start: "00:00", end: "00:00", exceptLevels: [] }; } });
+  const events = [];
+  const receipt = h.service.submit(request({ dedupeKey: "test:1" }), { manualTest: true, onProgress: (e) => events.push(e) });
+  assert.equal(receipt.accepted, true);
+  await h.settle();
+  assert.deepEqual(events.map((e) => e.stage), ["queued", "sending", "result", "finished"]);
+  assert.ok(events.every((e) => e.id === "test:1"));
+  assert.equal(events[2].result.ok, true);
+  assert.equal(h.service.submit(request({ dedupeKey: "test:1" }), { manualTest: true }).reason, "duplicate");
+  assert.equal(h.service.submit(request({ dedupeKey: "ordinary" }), { bypassFilters: true }).reason, "below_min_level");
+  assert.equal(h.sends.length, 1); await h.service.dispose();
+});
+
+await step("T2 分渠道报告：部分成功、失败、关闭、未知、noop 均不能混淆", async () => {
+  const h = makeHarness({ mutateConfig(c) { c.providers.push(...["bad", "ghost", "closed"].map((id) => ({ id, type: "fake", enabled: id !== "closed", options: {} }))); }, skip: (id) => id === "ghost" ? "此设备无法显示提醒" : undefined,
+    send: async (_req, _signal, _n, id) => { if (id === "bad") throw new Error("fake failed"); } });
+  const events = [];
+  h.service.submit(request({ channels: ["terminal", "bad", "ghost", "closed", "missing"], dedupeKey: "partial" }), { manualTest: true, onProgress: (e) => events.push(e) });
+  await h.settle();
+  const byId = Object.fromEntries(events.filter((e) => e.result).map((e) => [e.result.providerId, e.result]));
+  assert.equal(byId.terminal.ok, true); assert.equal(byId.bad.ok, false); assert.equal(byId.bad.skipped, undefined);
+  for (const id of ["ghost", "closed", "missing"]) assert.equal(byId[id].skipped, true);
+  assert.equal(h.sends.length, 2);
+  assert.equal(events.at(-1).stage, "finished"); await h.service.dispose();
+});
+
+await step("T3 有界队列：替换/拒收/discard 都有测试终态", async () => {
+  const h = makeHarness({ mutateConfig(c) { c.delivery.queueLimit = 1; }, send: (_req, signal) => new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true })) });
+  const active = [], replaced = [], incoming = [];
+  h.service.submit(request({ dedupeKey: "active" }), { manualTest: true, onProgress: (e) => active.push(e) });
+  h.service.submit(request({ dedupeKey: "victim" }), { manualTest: true, onProgress: (e) => replaced.push(e) });
+  h.service.submit(request({ dedupeKey: "higher", level: "error" }), { manualTest: true, onProgress: (e) => incoming.push(e) });
+  assert.equal(replaced.at(-1).reason, "queue_replaced");
+  assert.equal(h.service.submit(request({ dedupeKey: "full" }), { manualTest: true }).reason, "queue_full");
+  h.service.discardPending("new"); assert.equal(active.at(-1).stage, "cancelled"); assert.equal(incoming.at(-1).reason, "new");
+  await h.settle(); assert.equal(h.service.snapshot().queued, 0); await h.service.dispose();
+});
+
+await step("T4 取消订阅及异常观察者不会污染普通通知或留下晚到 UI 回调", async () => {
+  let release;
+  const h = makeHarness({ send: () => new Promise((resolve) => { release = resolve; }) });
+  const events = [];
+  const receipt = h.service.submit(request({ dedupeKey: "unsubscribe" }), { manualTest: true, onProgress: (e) => events.push(e) });
+  receipt.unsubscribe(); const before = events.length; release(); await h.settle(); assert.equal(events.length, before);
+  const receipt2 = h.service.submit(request({ dedupeKey: "throwing" }), { manualTest: true, onProgress: () => { throw new Error("closed UI"); } });
+  assert.equal(receipt2.accepted, true); release(); await h.settle(); assert.equal(h.service.snapshot().delivered, 2); await h.service.dispose();
+});
+
+await step("T5 实际发送前重查强制静默；禁用/空渠道/已释放立即拒收", async () => {
+  let silenced = false, release;
+  const h = makeHarness({ isSilenced: () => silenced, send: () => new Promise((resolve) => { release = resolve; }) });
+  h.service.submit(request({ dedupeKey: "first" }), { manualTest: true });
+  const events = [];
+  h.service.submit(request({ dedupeKey: "pending" }), { manualTest: true, onProgress: (e) => events.push(e) });
+  silenced = true; assert.equal(h.service.submit(request({ dedupeKey: "blocked" }), { manualTest: true }).reason, "silenced");
+  release(); await h.settle(); assert.equal(h.sends.length, 1); assert.equal(events.find((e) => e.result).result.skipped, true);
+  silenced = false;
+  assert.equal(h.service.submit(request({ dedupeKey: "empty", channels: [] }), { manualTest: true }).reason, "no_channels");
+  assert.equal(h.service.submit(request({ dedupeKey: "email-off", channels: ["email"] }), { manualTest: true }).reason, "no_available_channels");
+  await h.service.dispose(); assert.equal(h.service.submit(request({ dedupeKey: "disposed" }), { manualTest: true }).reason, "disposed");
+});
+
+await step("T6 已缓存的接收方式也重新检查可用性；校验异常有逐渠道终态", async () => {
+  let unavailable = false, broken = false;
+  const h = makeHarness({ validate: () => {
+    if (broken) throw new Error("fake validation failed");
+    return unavailable ? "当前窗口无法显示提醒" : undefined;
+  } });
+  h.service.submit(request({ dedupeKey: "cache-prime" }), { manualTest: true });
+  await h.settle();
+  unavailable = true;
+  const events = [];
+  h.service.submit(request({ dedupeKey: "now-unavailable" }), { manualTest: true, onProgress: (e) => events.push(e) });
+  await h.settle();
+  assert.equal(h.sends.length, 1);
+  assert.equal(events.find((e) => e.result).result.skipped, true);
+  assert.equal(events.at(-1).stage, "finished");
+  broken = true;
+  const failed = [];
+  h.service.submit(request({ dedupeKey: "validation-error" }), { manualTest: true, onProgress: (e) => failed.push(e) });
+  await h.settle();
+  assert.equal(failed.find((e) => e.result).result.ok, false);
+  assert.match(failed.find((e) => e.result).result.error, /fake validation failed/);
+  assert.equal(failed.at(-1).stage, "finished");
+  await h.service.dispose();
 });
 
 for (const item of failures) {

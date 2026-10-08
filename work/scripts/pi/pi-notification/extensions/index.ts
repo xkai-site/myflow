@@ -137,7 +137,14 @@ export default function piNotification(pi: ExtensionAPI): void {
     };
   };
   /** Every channel shares one reliability stack, so timeout, retry, breaker and redaction exist once. */
-  const reliable = (notifier: Notifier): Notifier => withReliability(notifier, reliability, log);
+  const reliable = (notifier: Notifier): Notifier => withReliability({ ...notifier,
+    async send(req, signal) {
+      // Recheck before every retry, not just before entering the queue.
+      if (pi.getFlag("no-notify") === true || isDisabledByEnv() || !config.enabled) throw new Error("提醒已关闭或本对话已强制静默");
+      if (!config.providers.find((provider) => provider.id === notifier.id)?.enabled) throw new Error("此接收方式已关闭");
+      await notifier.send(req, signal);
+    },
+  }, reliability, log);
 
   // Default channel: desktop notification through OSC 777, OSC 99 or a Windows toast.
   registry.register("terminal", (id) =>
@@ -154,7 +161,7 @@ export default function piNotification(pi: ExtensionAPI): void {
   registry.register("webhook", (id, options) =>
     reliable(createWebhookNotifier(id, (options ?? {}) as WebhookOptions, { log, maxChars: config.content.maxMessageChars })));
 
-  const service = createService({ config, registry, log, now: () => Date.now() });
+  const service = createService({ config, registry, log, now: () => Date.now(), isSilenced: () => pi.getFlag("no-notify") === true });
   const runtime = createRuntime({
     config, service, log, now: () => Date.now(), instanceToken: INSTANCE_TOKEN,
     isSilenced: () => pi.getFlag("no-notify") === true || isDisabledByEnv(),
@@ -219,6 +226,7 @@ export default function piNotification(pi: ExtensionAPI): void {
     // Replaced field by field: the service and lifecycle hold a reference to this same object.
     config.enabled = effective.enabled;
     config.minLevel = effective.minLevel;
+    config.channels = effective.channels;
     config.rules = effective.rules;
     config.coalesce = effective.coalesce;
     config.quietHours = effective.quietHours;

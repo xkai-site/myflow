@@ -101,17 +101,15 @@ export function defaultConfig(): NotificationConfig {
       timeoutMs: 5000, maxRetries: 1, queueLimit: 100 },
     enabled: true,
     minLevel: "info",
+    channels: ["terminal"],
     rules: {
-      runCompleted: { enabled: true, level: "info", channels: ["terminal"] },
-      runFailed: { enabled: true, level: "error", channels: ["terminal"] },
-      // Pressing Esc means the user is sitting at the machine, so this stays silent by default.
-      runAborted: { enabled: false, level: "info", channels: ["terminal"] },
-      // Tool failures are aggregated into one message and skipped when the run already
-      // produced a result notification.
-      toolFailed: { enabled: true, level: "warning", channels: ["terminal"], mode: "aggregate", threshold: 1 },
-      compactFailed: { enabled: true, level: "error", channels: ["terminal"] },
-      // Overlaps heavily with run_completed, so it is off by default. `custom` can never be white-listed.
-      waitingForUser: { enabled: false, level: "info", channels: ["terminal"], kinds: [...ALLOWED_PROMPT_KINDS] },
+      runCompleted: { enabled: true, level: "info", channels: "inherit" },
+      runFailed: { enabled: true, level: "error", channels: "inherit" },
+      // Esc means the user is already at the machine.
+      runAborted: { enabled: false, level: "info", channels: "inherit" },
+      toolFailed: { enabled: true, level: "warning", channels: "inherit", mode: "aggregate", threshold: 1 },
+      compactFailed: { enabled: true, level: "error", channels: "inherit" },
+      waitingForUser: { enabled: false, level: "info", channels: "inherit", kinds: [...ALLOWED_PROMPT_KINDS] },
     },
     coalesce: {
       // One notification per logical run (sessionId + runId): several events must not flood the user.
@@ -274,7 +272,7 @@ function checkRules(
     checkBoolean(ruleRaw, "enabled", target, `${fieldPath}.enabled`, errors);
     const level = checkLevel(ruleRaw.level, `${fieldPath}.level`, errors);
     if (level) rule.level = level;
-    const channels = checkChannels(ruleRaw.channels, `${fieldPath}.channels`, errors);
+    const channels = ruleRaw.channels === "inherit" ? "inherit" : checkChannels(ruleRaw.channels, `${fieldPath}.channels`, errors);
     if (channels) rule.channels = channels;
 
     if (key === "toolFailed") {
@@ -476,6 +474,8 @@ export function mergeConfig(base: NotificationConfig, raw: unknown, source: stri
   const minLevel = checkLevel(raw.minLevel, "minLevel", errors);
   if (minLevel) config.minLevel = minLevel;
 
+  const channels = checkChannels(raw.channels, "channels", errors);
+  if (channels) config.channels = channels;
   const rules = checkRules(raw.rules, base.rules, errors, warnings);
   if (rules) {
     for (const key of RULE_KEYS) {
@@ -642,17 +642,25 @@ export function readUserConfigRaw(
  * user never touched keep following the factory defaults. A corrupt file is never
  * overwritten, because that would freeze the degraded result into the user defaults.
  */
-export function writeUserDefault(agentDir: string, patch: ConfigPatch): ConfigWriteResult {
+export function writeUserDefault(agentDir: string, patch: ConfigPatch | ((raw: ConfigPatch) => ConfigPatch)): ConfigWriteResult {
+  return updateUserDefaults(agentDir, (raw) => mergePatch(raw, typeof patch === "function" ? patch(raw) : patch));
+}
+
+/** Read once, build against the latest sparse file, validate everything, then rename once. */
+function updateUserDefaults(agentDir: string, transform: (raw: ConfigPatch) => ConfigPatch, skipUnchanged = false): ConfigWriteResult {
   const file = userConfigPath(agentDir);
   const current = readUserConfigRaw(agentDir);
   if (!current.ok) return { ok: false, problems: current.problems };
-  const sparse = mergePatch(current.raw ?? {}, patch);
-  // Validate with the same strict rules before writing: a single setting still goes through
-  // the full field validation, so an illegal value is always refused.
+  const base = current.raw ?? {};
+  let sparse: ConfigPatch;
+  try { sparse = transform(structuredClone(base)); }
+  catch { return { ok: false, problems: [{ path: file, message: "无法构建配置事务" }] }; }
   const merged = mergeConfig(defaultConfig(), sparse, file);
   if (merged.errors.length > 0) return { ok: false, problems: merged.errors };
-  const written = atomicWriteConfig(agentDir, `${JSON.stringify(sparse, null, 2)}\n`);
-  if (!written.ok) return written;
+  if (!skipUnchanged || JSON.stringify(base) !== JSON.stringify(sparse)) {
+    const written = atomicWriteConfig(agentDir, `${JSON.stringify(sparse, null, 2)}\n`);
+    if (!written.ok) return written;
+  }
   return { ok: true, config: merged.config, problems: [], warnings: merged.warnings };
 }
 
@@ -664,28 +672,14 @@ export function writeUserDefault(agentDir: string, patch: ConfigPatch): ConfigWr
  * without a write, so repeating a restore is idempotent and never creates a config file. A corrupt
  * file is refused, because overwriting it would freeze the degraded result into the user defaults.
  */
-export function deleteUserDefault(
-  agentDir: string,
-  removal: { kind: "path"; path: string } | { kind: "provider"; id: string } | { kind: "providerOption"; id: string; optionPath: string },
-): ConfigWriteResult {
-  const file = userConfigPath(agentDir);
-  const current = readUserConfigRaw(agentDir);
-  if (!current.ok) return { ok: false, problems: current.problems };
-  const base = current.raw ?? {};
-  const sparse = removal.kind === "path"
-    ? removePath(base, removal.path)
-    : removal.kind === "provider"
-      ? removeArrayEntryField(base, "providers", removal.id, "enabled")
-      : removeProviderOption(base, removal.id, removal.optionPath);
-  const merged = mergeConfig(defaultConfig(), sparse, file);
-  if (merged.errors.length > 0) return { ok: false, problems: merged.errors };
-  if (JSON.stringify(sparse) === JSON.stringify(base)) {
-    // Nothing to delete (missing file or already restored): do not create or rewrite the file.
-    return { ok: true, config: merged.config, problems: [], warnings: merged.warnings };
-  }
-  const written = atomicWriteConfig(agentDir, `${JSON.stringify(sparse, null, 2)}\n`);
-  if (!written.ok) return written;
-  return { ok: true, config: merged.config, problems: [], warnings: merged.warnings };
+export type ConfigRemoval = { kind: "path"; path: string } | { kind: "provider"; id: string } | { kind: "providerOption"; id: string; optionPath: string };
+
+export function deleteUserDefault(agentDir: string, removal: ConfigRemoval | readonly ConfigRemoval[]): ConfigWriteResult {
+  const removals = Array.isArray(removal) ? removal : [removal as ConfigRemoval];
+  return updateUserDefaults(agentDir, (raw) => removals.reduce((sparse, entry) => entry.kind === "path"
+    ? removePath(sparse, entry.path)
+    : entry.kind === "provider" ? removeArrayEntryField(sparse, "providers", entry.id, "enabled")
+      : removeProviderOption(sparse, entry.id, entry.optionPath), raw), true);
 }
 
 /**
@@ -744,6 +738,7 @@ export function describeConfig(config: NotificationConfig): string {
   return [
     `enabled=${config.enabled}`,
     `minLevel=${config.minLevel}`,
+    `channels=${config.channels.join(",") || "none"}`,
     `rules=${enabledRules.join(",") || "none"}`,
     `providers=${providers.join(",") || "none"}`,
     `timeoutMs=${config.delivery.timeoutMs}`,

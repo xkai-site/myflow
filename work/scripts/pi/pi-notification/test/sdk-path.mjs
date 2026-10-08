@@ -9,6 +9,7 @@
  * global npm root.
  */
 
+import "./fixtures/isolate-keyring.cjs";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";

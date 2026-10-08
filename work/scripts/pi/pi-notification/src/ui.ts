@@ -40,13 +40,20 @@ import {
   isCurrentValue,
   providerDefinitionSource,
   ruleSummary,
+  patchOperations,
+  emailReadiness,
+  channelLabel,
+  testBlockMessage,
+  routingExceptions,
   userDefaultValue,
   type SettingCategory,
   type SettingItem,
   type SettingValue,
   QQ_MAIL_URL,
 } from "./settings.ts";
-import type { NotificationConfig } from "./types.ts";
+import type { NotificationConfig, TestProgress, DeliveryResult } from "./types.ts";
+import { resolveChannels } from "./rules.ts";
+import { sanitizeError } from "./log.ts";
 
 /** Only the theme capabilities used here, as method signatures, to stay SDK-palette agnostic. */
 export interface SettingsTheme {
@@ -71,6 +78,8 @@ export interface SettingsRestriction {
   reason: string;
 }
 
+export interface SettingsTestResult { ok: boolean; message: string; unsubscribe?: () => void }
+
 export interface SettingsHost {
   /** Effective config, including this conversation's overlay. */
   config(): NotificationConfig;
@@ -89,8 +98,8 @@ export interface SettingsHost {
   /** Ctrl+S: freezes the value as a user default with a single sparse write. */
   saveDefault(item: SettingItem, value: ItemValue): { ok: boolean; message: string };
   /** Ctrl+T: sends a test notification. */
-  test(): { ok: boolean; message: string };
-  testEmail(): { ok: boolean; message: string };
+  test(channels?: string[], onProgress?: (progress: TestProgress) => void): SettingsTestResult;
+  testEmail(onProgress?: (progress: TestProgress) => void): SettingsTestResult;
   credentialStatus(): string;
   saveCredential(value: string): { ok: boolean; message: string };
   deleteCredential(): { ok: boolean; message: string };
@@ -99,6 +108,10 @@ export interface SettingsHost {
   reload(): { ok: boolean; message: string };
   /** Ctrl+O: read-only, paged status text. */
   statusLines(): string[];
+  followUserDefault(item: SettingItem): { ok: boolean; message: string };
+  restoreBuiltinDefault(item: SettingItem): { ok: boolean; message: string };
+  itemScope?(item: SettingItem): string[];
+  preview(): { ok: boolean; message: string; lines: string[] };
 }
 
 /** Visible list rows; the component sizes itself instead of reading the terminal height. */
@@ -120,9 +133,10 @@ const OPEN_MARK = " ›";
 const FOOTER_KEY_HINTS = "Ctrl+T 测试通知 · 更多设置中查看状态与诊断";
 const STATUS_KEY_HINTS = "Ctrl+T 测试通知   Ctrl+R 重读   Ctrl+O 状态与诊断";
 
-const ACTION_LABELS: Record<"test" | "emailTest" | "credentialSave" | "credentialDelete" | "status" | "reload" | "search" | "preview", string> = {
+const ACTION_LABELS: Record<"test" | "emailTest" | "emailEnable" | "credentialSave" | "credentialDelete" | "status" | "reload" | "search" | "preview", string> = {
   test: "发送测试通知",
   emailTest: "发送邮箱测试",
+  emailEnable: "确认启用邮箱并加入统一接收方式",
   credentialSave: "设置邮箱授权码（遮蔽输入）",
   credentialDelete: "移除已保存的邮箱授权码",
   status: "状态与诊断",
@@ -142,7 +156,7 @@ type MenuRow =
   | { key: string; kind: "qqLink"; label: string }
   /** Read-only information row on the status page. */
   | { key: string; kind: "text"; text: string }
-  | { key: string; kind: "action"; action: "test" | "emailTest" | "credentialSave" | "credentialDelete" | "status" | "reload" | "search" | "preview" };
+  | { key: string; kind: "action"; action: "test" | "emailTest" | "emailEnable" | "credentialSave" | "credentialDelete" | "status" | "reload" | "search" | "preview" };
 
 /** Pages that are a list of rows; `id` is stable so a refresh can rebuild the same page. */
 interface MenuPage {
@@ -164,7 +178,7 @@ type View =
   /** Search over the complete field table; Enter opens a result even when it is otherwise hidden. */
   | { kind: "search"; query: string; focus: number }
   /** Confirmation page for the destructive restore; default focus is cancel. */
-  | { kind: "confirm"; itemId: string; focus: number }
+  | { kind: "confirm"; itemId: string; focus: number; applyValue?: ItemValue; enableEmail?: boolean }
   /** Read-only example notification body. */
   | { kind: "preview"; lines: string[]; offset: number };
 
@@ -174,6 +188,7 @@ interface Candidate {
   value: ItemValue;
   label: string;
   custom?: boolean;
+  inherit?: boolean;
 }
 
 export interface NotifySettingsComponentOptions {
@@ -208,6 +223,65 @@ export class NotifySettingsComponent {
   private cachedLines?: string[];
   /** Content column of the last render; input handling clamps paging against it. */
   private contentWidth = MAX_CONTENT_WIDTH;
+  private closed = false;
+  private testGeneration = 0;
+  private unsubscribeTest?: () => void;
+  private emailTestLabel?: string;
+  private emailTestKey?: string;
+  private credentialRevision = 0;
+
+  private emailStateKey(): string {
+    const provider = this.host.config().providers.find((entry) => entry.id === "email");
+    return JSON.stringify([provider?.enabled, provider?.options.from, provider?.options.to, provider?.options.subjectPrefix, this.credentialRevision]);
+  }
+
+  /** Pi calls dispose when closing custom UI; late deliveries can only update service diagnostics. */
+  dispose(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.testGeneration++;
+    this.unsubscribeTest?.();
+    this.unsubscribeTest = undefined;
+  }
+
+  private startTest(emailOnly = false): void {
+    this.unsubscribeTest?.();
+    this.unsubscribeTest = undefined;
+    const generation = ++this.testGeneration;
+    const config = this.host.config();
+    const field = this.focusedFieldItem();
+    const ruleKey = field?.rule?.key ?? (this.view.kind === "menu" && this.view.id.startsWith("rule:") ? this.view.id.slice(5) : undefined);
+    const channels = emailOnly ? ["email"] : ruleKey ? resolveChannels(config, config.rules[ruleKey as keyof NotificationConfig["rules"]]) : [...config.channels];
+    const emailKey = this.emailStateKey();
+    const results = new Map<string, DeliveryResult>();
+    let latest: { text: string; tone: Tone } | undefined;
+    let finished = false;
+    const onProgress = (event: TestProgress): void => {
+      if (this.closed || generation !== this.testGeneration) return;
+      if (event.result) {
+        results.set(event.result.providerId, event.result);
+        if (event.result.providerId === "email" && emailKey === this.emailStateKey()) {
+          this.emailTestKey = emailKey;
+          this.emailTestLabel = event.result.ok ? "已提交给邮箱服务，请确认收件" : "邮箱测试未成功，请查看测试结果";
+        }
+      }
+      if (event.stage === "queued") latest = { text: "测试已排队，等待发送。", tone: "info" };
+      else if (event.stage === "sending") latest = { text: "测试发送中，请稍候；你可以继续配置其他项。", tone: "info" };
+      else if (event.stage === "cancelled") latest = { text: testBlockMessage(event.reason ?? "disposed"), tone: "error" };
+      else if (event.stage === "result" || event.stage === "finished") {
+        const text = [...results.values()].map((result) => `${channelLabel(result.providerId)}：${result.skipped ? "未发送" : result.ok ? "已提交给接收服务" : "发送失败"}${result.error ? `（${sanitizeError(result.error, 160)}）` : ""}`).join("；");
+        latest = { text: text ? `${text}。请确认是否看到；已提交不代表实际收到。` : "测试已结束，尚无发送结果；请查看状态与诊断。", tone: [...results.values()].some((result) => !result.ok) || !results.size ? "error" : "success" };
+      }
+      if (event.stage === "finished" || event.stage === "cancelled") { finished = true; this.unsubscribeTest = undefined; }
+      if (latest) this.message = latest;
+      if (this.view.kind === "menu" && this.view.id === "email-config") this.refresh(); else this.invalidate();
+      this.requestRender();
+    };
+    const result = emailOnly ? this.host.testEmail(onProgress) : this.host.test(channels, onProgress);
+    if (!finished) this.unsubscribeTest = result.unsubscribe;
+    if (latest && result.ok) { this.message = latest; this.invalidate(); this.requestRender(); }
+    else this.report(result);
+  }
 
   constructor(options: NotifySettingsComponentOptions) {
     this.theme = options.theme;
@@ -269,14 +343,14 @@ export class NotifySettingsComponent {
     rows.push({ key: "action:test", kind: "action", action: "test" });
     const more = SETTING_CATEGORIES.find((candidate) => candidate.id === "more");
     if (more) rows.push({ key: `category:${more.id}`, kind: "category", category: more });
-    return { kind: "menu", id: "home", title: "通知", rows, focus: 0 };
+    return { kind: "menu", id: "home", title: "通知（修改仅本对话生效）", rows, focus: 0 };
   }
 
   private buildCategoryPage(category: SettingCategory): MenuPage {
     if (category.kind === "sections") {
       const rows: MenuRow[] = [];
       const threshold = this.itemById("minLevel");
-      if (threshold) rows.push({ key: `item:${threshold.id}`, kind: "field", item: threshold, label: "提醒级别" });
+      if (threshold && category.id === "professional") rows.push({ key: `item:${threshold.id}`, kind: "field", item: threshold, label: "提醒级别" });
       for (const id of category.sections ?? []) {
         const child = SETTING_CATEGORIES.find((candidate) => candidate.id === id);
         if (child) rows.push({ key: `category:${child.id}`, kind: "category", category: child });
@@ -289,16 +363,11 @@ export class NotifySettingsComponent {
       return { kind: "menu", id: `category:${category.id}`, title: category.label, rows, focus: 0 };
     }
     const { items, collapsed } = categoryPageItems(category, this.items, this.host.config());
-    const channelItems = category.id === "channels" ? items.filter((item) => item.id !== "provider:email") : items;
+    const channelItems = items;
     const rows: MenuRow[] = channelItems.map((item) => ({ key: `item:${item.id}`, kind: "field", item, label: item.label }));
     if (category.id === "channels" && this.items.some((item) => item.id === "provider:email")) {
-      const provider = this.host.config().providers.find((entry) => entry.id === "email");
-      const hasFrom = typeof provider?.options.from === "string" && provider.options.from !== "";
-      const hasTo = Array.isArray(provider?.options.to) && provider.options.to.length > 0;
-      const credentialReady = this.host.credentialStatus() !== "未设置";
-      const summary = !this.host.config().enabled ? "总开关已关" : !provider?.enabled ? "已关闭"
-        : !hasFrom ? "还需填写发件邮箱" : !hasTo ? "还需填写收件邮箱"
-          : !credentialReady ? "还需设置授权码" : "已准备好";
+      const state = emailReadiness(this.host.config(), this.host.credentialStatus() !== "未设置");
+      const summary = `${state.label} · ${state.usedBy} 类提醒使用`;
       rows.push({ key: "email-config", kind: "emailConfig", label: "邮箱提醒", summary });
     }
     if (category.collapsed && collapsed.length > 0) {
@@ -319,7 +388,7 @@ export class NotifySettingsComponent {
   }
 
   private buildEmailPage(): MenuPage {
-    const rows: MenuRow[] = this.items.filter((item) => item.providerId === "email")
+    const rows: MenuRow[] = this.items.filter((item) => item.providerId === "email" && item.group === "邮箱")
       .map((item) => ({ key: `item:${item.id}`, kind: "field" as const, item, label: item.label }));
     const status = this.host.credentialStatus();
     const credentialStatus = status === "未设置" ? "尚未设置"
@@ -329,6 +398,12 @@ export class NotifySettingsComponent {
       rows.push({ key: "action:credential-save", kind: "action", action: "credentialSave" });
       rows.push({ key: "action:credential-delete", kind: "action", action: "credentialDelete" });
     }
+    rows.push({ key: "action:email-enable", kind: "action", action: "emailEnable" });
+    const destinations = this.itemById("channels");
+    if (destinations) rows.push({ key: "item:channels", kind: "field", item: destinations, label: "接收方式（Ctrl+S 保存此项）" });
+    const readiness = emailReadiness(this.host.config(), this.host.credentialStatus() !== "未设置");
+    rows.push({ key: "text:email-readiness", kind: "text", text: `${this.emailTestKey === this.emailStateKey() ? this.emailTestLabel ?? readiness.label : readiness.label}；${readiness.usedBy} 类提醒使用邮箱` });
+    if (routingExceptions(this.host.config()).length) rows.push({ key: "item:routes.unify", kind: "field", item: this.itemById("routes.unify")!, label: "自定义例外：可确认归一" });
     rows.push({ key: "qq:settings", kind: "qqLink", label: "QQ 邮箱网页版设置 ↗" });
     rows.push({ key: "action:email-test", kind: "action", action: "emailTest" });
     rows.push({ key: "text:email-password-note", kind: "text", text: "需要 QQ 邮箱授权码（不是登录密码）。" });
@@ -349,6 +424,7 @@ export class NotifySettingsComponent {
       .filter((item) => item.rule?.key === rule.key)
       // The page title already names the rule, so the row label drops the repeated prefix.
       .map((item) => ({ key: `item:${item.id}`, kind: "field" as const, item, label: item.label.replace(`${rule.label} · `, "") }));
+    rows.push({ key: "action:test", kind: "action", action: "test" });
     return { kind: "menu", id: `rule:${rule.key}`, title: rule.label, rows, focus: 0 };
   }
 
@@ -388,6 +464,7 @@ export class NotifySettingsComponent {
   private pop(): void {
     const previous = this.history.pop();
     if (!previous) {
+      this.dispose();
       this.finish(this.summary);
       return;
     }
@@ -446,8 +523,18 @@ export class NotifySettingsComponent {
       this.push({ kind: "secretConfirm", focus: 0 });
       return;
     }
+    if (row.action === "emailEnable") {
+      const config = this.host.config();
+      const provider = config.providers.find((entry) => entry.id === "email");
+      if (!provider?.options.from || !Array.isArray(provider.options.to) || !provider.options.to.length || this.host.credentialStatus() === "未设置") {
+        this.report({ ok: false, message: "请先填写发件/收件地址并设置授权码；这些操作本身不会开启外发。" });
+        return;
+      }
+      this.push({ kind: "confirm", itemId: "channels", focus: 0, applyValue: [...new Set([...config.channels, "email"])], enableEmail: true });
+      return;
+    }
     if (row.action === "emailTest") {
-      this.report(this.host.testEmail());
+      this.startTest(true);
       return;
     }
     if (row.action === "status") {
@@ -469,7 +556,7 @@ export class NotifySettingsComponent {
       this.push({ kind: "preview", lines: result.lines, offset: 0 });
       return;
     }
-    this.report(this.host.test());
+    this.startTest();
   }
 
   private openSearch(): void {
@@ -611,7 +698,7 @@ export class NotifySettingsComponent {
     if (!item) return "通知";
     if (view.kind === "input") return "自定义输入";
     if (view.kind === "help") return `字段说明 · ${item.label}`;
-    if (view.kind === "confirm") return `恢复默认 · ${item.label}`;
+    if (view.kind === "confirm") return `${view.applyValue === undefined ? "恢复默认" : "确认应用（仅本对话）"} · ${item.label}`;
     return item.label;
   }
 
@@ -634,8 +721,8 @@ export class NotifySettingsComponent {
     const item = this.focusedFieldItem();
     if (item) {
       const current = item.format(this.value(item));
-      const source = this.sessionValue(item) === undefined ? "跟随用户默认/内置默认" : "本对话已覆盖";
-      lines.push(`字段 ${item.group} · ${item.label} · 当前 ${current} · ${source} · ? 查看完整来源`);
+      const source = this.sessionValue(item) === undefined ? "使用以后默认" : this.sessionValue(item) === "partial" ? "部分仅本对话修改" : "仅本对话修改";
+      lines.push(`${item.label} · 当前 ${current} · ${source} · ? 查看详情`);
     }
     if (lines.length === 0) return [];
     return this.dim(this.boundedWrap(lines.join("  "), width, 3), width);
@@ -654,19 +741,15 @@ export class NotifySettingsComponent {
     const current = item.format(this.value(item));
     const override = this.sessionValue(item);
     const lines = [
-      `字段：${item.group} · ${item.label}`,
+      `设置项：${item.group} · ${item.label}`,
       `当前值：${current}`,
       override === undefined
-        ? "本对话：未覆盖（跟随用户默认或内置默认）"
-        : `本对话：已覆盖（${item.format(override)}），仅本会话生效`,
+        ? "本对话：使用以后默认"
+        : `本对话：${override === "partial" ? "部分已修改" : "已修改"}（${item.format(override)}），只影响这次对话`,
       this.hasDefault(item)
         ? `用户默认：${item.format(this.defaultValue(item))}（已写入用户文件，Enter 改本对话、Ctrl+S 更新用户默认）`
         : "用户默认：未设置（跟随内置默认；Ctrl+S 把当前值写为以后默认）",
-      item.providerId !== undefined
-        // Distinguish “the switch's built-in default” from “the channel definition is user-provided”:
-        // a missing `enabled` is treated as true, so deleting the field returns the channel to on.
-        ? "内置默认：开启（渠道开关未显式写入 enabled 时的内置缺省）"
-        : `内置默认：${item.format(builtinDefaultValue(item))}`,
+      `内置默认：${item.format(builtinDefaultValue(item))}`,
     ];
     if (item.id === "enabled") {
       // Forced silence is a session-level limit over the switch, not a user default of "off"; the
@@ -680,6 +763,10 @@ export class NotifySettingsComponent {
       lines.push(`渠道定义：${fromUser ? "由用户配置（用户文件中定义，可能与同名内置渠道不同）" : "出厂默认"}`);
       lines.push("说明：渠道凭据（URL、headers、密钥引用）只存在于配置文件，界面不显示也不写入");
     }
+    if (item.paths || item.destinations) lines.push(`影响范围：${(this.host.itemScope?.(item) ?? item.paths ?? [item.userPath]).join("、")}`);
+    if (item.destinations) lines.push(`自定义例外：${routingExceptions(this.host.config()).join("、") || "无"}；取消统一选择不会关闭例外使用的渠道。`);
+    if (item.id === "reminders.completed") lines.push("执行完成只表示 Pi 停止自动执行，不保证业务目标成功。");
+    if (item.id === "reminders.failed") lines.push("包含运行失败和上下文压缩失败，不包括每次可恢复工具失败。");
     if (item.inputHint) lines.push(`输入：${item.inputHint}`);
     // “Not effective right now” is spelled out instead of hiding the field: search and the restored
     // pages must be able to reach a parameter a disabled feature currently ignores.
@@ -826,13 +913,20 @@ export class NotifySettingsComponent {
     if (view.kind !== "confirm") return [];
     const item = this.itemById(view.itemId);
     if (!item) return [];
+    if (view.applyValue !== undefined) {
+      const scope = item.id === "routes.unify" ? ["六类提醒的接收方式"] : ["统一接收方式", "新选中的接收方式开关"];
+      const text = item.id === "routes.unify" ? `将统一设置：${routingExceptions(this.host.config()).join("、") || "全部提醒"}；不改变提醒时机和重要程度。`
+        : "提醒将发送到你选中的接收方式；单独设置了接收方式的提醒保持不变。";
+      return [...this.boundedWrap(text, width, 5), ...this.boundedWrap(`影响范围：${scope.join("、")}；仅本对话，Ctrl+S 才保存长期默认。`, width, 4),
+        `${FOCUS_CELL(view.focus === 0)}取消`, `${FOCUS_CELL(view.focus === 1)}确认应用`].slice(0, BODY_ROWS);
+    }
     const lines = [
       `字段：${item.group} · ${item.label}`,
       `当前值：${item.format(this.value(item))}`,
       item.providerId !== undefined
-        ? "恢复后：内置默认（开启），并清除用户文件里这一项的 enabled 与本对话覆盖"
+        ? `恢复后：内置默认（${item.format(builtinDefaultValue(item))}），并清除用户文件里此项与本对话覆盖`
         : `恢复后：${item.format(builtinDefaultValue(item))}，并清除用户默认与本对话覆盖`,
-      "影响范围：仅此字段；用户文件的其他字段与渠道定义不动",
+      `影响范围：${(this.host.itemScope?.(item) ?? item.paths ?? [item.userPath]).join("、")}；其他字段与渠道定义不动`,
       "",
       `${FOCUS_CELL(view.focus === 0)}取消`,
       `${FOCUS_CELL(view.focus === 1)}确认恢复`,
@@ -997,7 +1091,7 @@ export class NotifySettingsComponent {
    */
   private candidateRow(item: SettingItem, candidate: Candidate, index: number, focusIndex: number, width: number): string {
     const current = this.value(item);
-    const isCurrent = !candidate.custom && isCurrentValue(item.kind, current, candidate.value as SettingValue);
+    const isCurrent = !candidate.custom && (candidate.inherit ? current === "inherit" : isCurrentValue(item.kind, current, candidate.value as SettingValue));
     const isDefault = !candidate.custom && this.isDefaultCandidate(item, candidate, current);
     const suffix = isDefault && width >= DEFAULT_SUFFIX_MIN_WIDTH ? " · 默认" : "";
     const reserved = visibleWidth(suffix);
@@ -1013,6 +1107,7 @@ export class NotifySettingsComponent {
   private isDefaultCandidate(item: SettingItem, candidate: Candidate, current: unknown): boolean {
     if (!this.hasDefault(item)) return false;
     const fallback = this.defaultValue(item);
+    if (candidate.inherit) return fallback === "inherit";
     if (item.kind === "collection") {
       return Array.isArray(fallback) && fallback.includes(candidate.value as SettingValue);
     }
@@ -1025,7 +1120,8 @@ export class NotifySettingsComponent {
   private candidates(item: SettingItem): Candidate[] {
     const config = this.host.config();
     const rows: Candidate[] = item.candidates(config).map((candidate) => ({ value: candidate.value, label: candidate.label }));
-    if (item.kind !== "collection") {
+    if (item.id.startsWith("rules.") && item.id.endsWith(".channels")) rows.unshift({ value: "inherit", label: "跟随统一设置", inherit: true });
+    if (item.kind !== "collection" && !item.paths) {
       // The current value or the saved default may be outside the preset list: add a row so the
       // marker column always has somewhere to land.
       const known = new Set(rows.map((row) => String(row.value)));
@@ -1053,6 +1149,7 @@ export class NotifySettingsComponent {
   // -------------------------------------------------------------------------
 
   handleInput(data: string): void {
+    if (this.closed) return;
     if (this.view.kind === "secret") {
       this.handleSecretInput(data);
       return;
@@ -1093,7 +1190,7 @@ export class NotifySettingsComponent {
       return;
     }
     if (matchesKey(data, Key.ctrl("t"))) {
-      this.report(this.host.test());
+      this.startTest();
       return;
     }
     if (matchesKey(data, Key.ctrl("r"))) {
@@ -1189,7 +1286,13 @@ export class NotifySettingsComponent {
       const item = this.itemById(view.itemId);
       this.pop();
       if (item) {
-        this.report(this.host.restoreBuiltinDefault(item));
+        if (view.applyValue !== undefined) {
+          // The explicit email enable action can also re-enable a previously selected disabled channel.
+          const target: SettingItem = view.enableEmail ? { ...item, patch: (value) => ({ kind: "compound", operations: [
+            ...patchOperations(item.patch(value)), { kind: "providers", id: "email", value: true },
+          ] }) } : item;
+          this.commit(target, view.applyValue, false);
+        } else this.report(this.host.restoreBuiltinDefault(item));
         this.requestRender();
       }
     }
@@ -1269,9 +1372,27 @@ export class NotifySettingsComponent {
 
   private selectCandidate(item: SettingItem, candidate: Candidate): void {
     const current = this.value(item);
-    const value = item.kind === "collection"
+    const value = candidate.inherit ? "inherit" : item.kind === "collection"
       ? collectionValue(current, candidate.value as SettingValue)
       : candidate.value;
+    if (item.id === "routes.unify") {
+      this.push({ kind: "confirm", itemId: item.id, focus: 0, applyValue: value });
+      return;
+    }
+    if (item.destinations && Array.isArray(value)) {
+      const added = value.filter((id) => !this.host.config().channels.includes(String(id)));
+      if (added.includes("email")) {
+        const email = this.host.config().providers.find((entry) => entry.id === "email");
+        if (!email?.options.from || !Array.isArray(email.options.to) || !email.options.to.length || this.host.credentialStatus() === "未设置") {
+          this.push(this.buildEmailPage());
+          return;
+        }
+      }
+      if (added.some((id) => this.host.config().providers.find((entry) => entry.id === id)?.type !== "terminal")) {
+        this.push({ kind: "confirm", itemId: item.id, focus: 0, applyValue: value });
+        return;
+      }
+    }
     this.commit(item, value, false);
     this.requestRender();
   }
@@ -1329,6 +1450,7 @@ export class NotifySettingsComponent {
         return;
       }
       const result = this.host.saveCredential(view.buffer);
+      if (result.ok) this.credentialRevision++;
       this.pop(); // Drop the only UI reference to the secret, including on failure.
       if (this.view.kind === "menu") this.view = this.rebuildPage(this.view);
       this.report(result);
@@ -1356,6 +1478,7 @@ export class NotifySettingsComponent {
       this.pop();
       if (confirmed) {
         const result = this.host.deleteCredential();
+        if (result.ok) this.credentialRevision++;
         if (this.view.kind === "menu") this.view = this.rebuildPage(this.view);
         this.report(result);
       }

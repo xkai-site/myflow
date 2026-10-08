@@ -208,6 +208,20 @@ export interface DeliveryResult {
   durationMs: number;
 }
 
+export interface TestProgress {
+  id: string;
+  stage: "queued" | "sending" | "result" | "finished" | "cancelled";
+  result?: DeliveryResult;
+  reason?: string;
+}
+export type SubmissionResult = { accepted: true; unsubscribe?: () => void } | { accepted: false; reason: string };
+export interface SubmitOptions {
+  bypassFilters?: boolean;
+  /** Explicit channel test only; normal bypassFilters still honours the business threshold. */
+  manualTest?: boolean;
+  onProgress?: (progress: TestProgress) => void;
+}
+
 export interface NotificationService {
   /**
    * Enqueues and returns immediately; never awaits the network.
@@ -215,7 +229,7 @@ export interface NotificationService {
    * coalescing and cooldown but still honours dedupe and thresholds, so a missing
    * self-test notification cannot be mistaken for a broken channel.
    */
-  submit(req: NotificationRequest, options?: { bypassFilters?: boolean }): void;
+  submit(req: NotificationRequest, options?: SubmitOptions): SubmissionResult;
   /** For shutdown paths only; bounded by `timeoutMs`. */
   flush(timeoutMs: number): Promise<void>;
   /** Drops queued and in-flight deliveries (reload/new/resume/fork). */
@@ -250,7 +264,7 @@ export interface ServiceSnapshot {
 export interface RuleConfig {
   enabled: boolean;
   level: NotifyLevel;
-  channels: string[];
+  channels: "inherit" | string[];
 }
 
 export interface ToolFailureRuleConfig extends RuleConfig {
@@ -276,6 +290,8 @@ export interface NotificationConfig {
   /** Independent read-only machine output; absent in legacy files means disabled. */
   api: MessageApiConfig;
   enabled: boolean;
+  /** Unified human-notification destinations; rules may explicitly override them. */
+  channels: string[];
   /** Global threshold: notifications below this level are never delivered. */
   minLevel: NotifyLevel;
   rules: {

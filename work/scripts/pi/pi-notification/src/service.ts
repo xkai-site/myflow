@@ -11,6 +11,7 @@
  */
 
 import { sanitizeError } from "./log.ts";
+import { isDisabledByEnv } from "./config.ts";
 import { createNoopNotifier } from "./providers/noop.ts";
 import type {
   DeliveryResult,
@@ -22,6 +23,9 @@ import type {
   NotifierRegistry,
   NotifyLevel,
   ServiceSnapshot,
+  SubmitOptions,
+  SubmissionResult,
+  TestProgress,
 } from "./types.ts";
 
 export interface ServiceOptions {
@@ -29,6 +33,7 @@ export interface ServiceOptions {
   registry: NotifierRegistry;
   log: Logger;
   now(): number;
+  isSilenced?(): boolean;
 }
 
 const LEVEL_RANK: Record<NotifyLevel, number> = { info: 0, warning: 1, error: 2 };
@@ -56,6 +61,16 @@ export function createService(options: ServiceOptions): NotificationService {
   }
 
   const queue: NotificationRequest[] = [];
+  // Only explicit tests have observers; bounded by active + queued work and removed on every completion path.
+  const observers = new Map<NotificationRequest, (progress: TestProgress) => void>();
+  const testRequests = new WeakSet<NotificationRequest>();
+  function progress(req: NotificationRequest, stage: TestProgress["stage"], result?: DeliveryResult, reason?: string): void {
+    const observer = observers.get(req);
+    if (stage === "finished" || stage === "cancelled") observers.delete(req);
+    try { observer?.({ id: req.dedupeKey, stage, ...(result ? { result } : {}), ...(reason ? { reason } : {}) }); }
+    catch { /* A closed or faulty UI must never affect delivery or escape a hook. */ }
+  }
+  const blocked = (): string | undefined => options.isSilenced?.() || isDisabledByEnv() ? "silenced" : !config.enabled ? "disabled" : undefined;
   const seen = new Map<string, true>();
   /**
    * Threshold filtering:
@@ -158,6 +173,8 @@ export function createService(options: ServiceOptions): NotificationService {
     // Refresh the provider table before consulting the cache: `/notify reload` may keep the
     // same id while changing its type or enabled flag.
     const provider = providersById().get(providerId);
+    if (!provider) return createNoopNotifier(providerId, "unknown", "未在配置中定义的接收方式");
+    if (!provider.enabled) return createNoopNotifier(providerId, provider.type, "此接收方式已关闭");
     const cached = notifiers.get(providerId);
     if (cached) return cached;
     let notifier: Notifier;
@@ -188,10 +205,13 @@ export function createService(options: ServiceOptions): NotificationService {
       for (let offset = 0; offset < req.channels.length; offset += maxParallel) {
         const batch = req.channels.slice(offset, offset + maxParallel);
         const results = await Promise.all(batch.map(async (providerId): Promise<DeliveryResult> => {
-          const notifier = notifierFor(providerId);
+          const limit = blocked();
+          if (limit || signal.aborted) return { providerId, ok: false, skipped: true, attempts: 0, error: limit === "silenced" ? "本对话已强制静默" : limit === "disabled" ? "提醒总开关已关闭" : "发送已取消", durationMs: 0 };
           const channelStarted = now();
-          if (notifier.skipped) return { providerId, ok: false, skipped: true, attempts: 0, error: notifier.skipped, durationMs: 0 };
           try {
+            const notifier = notifierFor(providerId);
+            const unavailable = notifier.skipped ?? (testRequests.has(req) ? notifier.validate(providersById().get(providerId)?.options ?? {}) : undefined);
+            if (unavailable) return { providerId, ok: false, skipped: true, attempts: 0, error: sanitizeError(unavailable), durationMs: 0 };
             await notifier.send(req, signal);
             return { providerId, ok: true, attempts: 1, durationMs: now() - channelStarted };
           } catch (error) {
@@ -225,11 +245,13 @@ export function createService(options: ServiceOptions): NotificationService {
             ok: result.ok, skipped: result.skipped ?? false, attempts: result.attempts,
             durationMs: result.durationMs, ...(result.error ? { error: result.error } : {}),
           });
+          progress(req, "result", result);
           if (!result.ok && !result.skipped) log.log("warning", `通知投递失败: id=${result.providerId} kind=${req.kind} ${result.error ?? ""}`);
         }
       }
     } finally {
       inFlight.delete(controller);
+      progress(req, "finished");
     }
   }
 
@@ -241,9 +263,18 @@ export function createService(options: ServiceOptions): NotificationService {
       const req = queue.shift();
       if (!req) break;
       active += 1;
+      progress(req, "sending");
       void deliver(req)
-        .catch(() => {
-          // deliver() already catches per channel; this is the last guard so no promise escapes.
+        .catch((error: unknown) => {
+          progress(req, "cancelled", undefined, "internal_error");
+          // Last guard: no promise may escape a Pi hook, but the cause still has to be diagnosable.
+          log.record({
+            event: "delivery_internal_error",
+            kind: req.kind,
+            dedupeKey: req.dedupeKey,
+            error: sanitizeError(error instanceof Error ? error.message : String(error)),
+          });
+          log.log("error", `投递过程发生异常（已忽略）: kind=${req.kind}`);
         })
         .finally(() => {
           active -= 1;
@@ -258,13 +289,13 @@ export function createService(options: ServiceOptions): NotificationService {
     notifyDrained();
   }
 
-  function enqueue(req: NotificationRequest): void {
+  function enqueue(req: NotificationRequest): boolean {
     const limit = Number.isFinite(config.delivery.queueLimit) && config.delivery.queueLimit > 0
       ? Math.floor(config.delivery.queueLimit)
       : 50;
     if (queue.length < limit) {
       queue.push(req);
-      return;
+      return true;
     }
     // Queue full: drop the newest lowest-level entry instead of growing without bound.
     let victimIndex = -1;
@@ -281,17 +312,20 @@ export function createService(options: ServiceOptions): NotificationService {
       stats.dropped += 1;
       log.record({ event: "queue_drop", dropped: "incoming", kind: req.kind, dedupeKey: req.dedupeKey });
       log.log("warning", `队列已满，丢弃新通知: kind=${req.kind} limit=${limit}`);
-      return;
+      return false;
     }
     const [dropped] = queue.splice(victimIndex, 1);
+    progress(dropped, "cancelled", undefined, "queue_replaced");
     queue.push(req);
     stats.dropped += 1;
     log.record({ event: "queue_drop", dropped: "existing", kind: dropped.kind, dedupeKey: dropped.dedupeKey });
     log.log("warning", `队列已满，丢弃低等级通知: kind=${dropped.kind} limit=${limit}`);
+    return true;
   }
 
   function discardPending(reason: string): void {
     const dropped = queue.length;
+    for (const req of observers.keys()) progress(req, "cancelled", undefined, reason);
     queue.length = 0;
     for (const controller of inFlight) controller.abort();
     inFlight.clear();
@@ -303,16 +337,18 @@ export function createService(options: ServiceOptions): NotificationService {
   }
 
   return {
-    submit(req: NotificationRequest, options?: { bypassFilters?: boolean }): void {
+    submit(req: NotificationRequest, submitOptions?: SubmitOptions): SubmissionResult {
       try {
-        if (disposed) return;
-        if (!config.enabled) return;
-        if (LEVEL_RANK[req.level] < LEVEL_RANK[config.minLevel]) return;
-        if (req.channels.length === 0) return;
+        if (disposed) return { accepted: false, reason: "disposed" };
+        const limit = blocked();
+        if (limit) return { accepted: false, reason: limit };
+        if (!submitOptions?.manualTest && LEVEL_RANK[req.level] < LEVEL_RANK[config.minLevel]) return { accepted: false, reason: "below_min_level" };
+        if (req.channels.length === 0) return { accepted: false, reason: "no_channels" };
+        if (submitOptions?.manualTest && !req.channels.some((id) => providersById().get(id)?.enabled)) return { accepted: false, reason: "no_available_channels" };
         if (seen.has(req.dedupeKey)) {
           stats.deduped += 1;
           log.record({ event: "dedupe_drop", kind: req.kind, dedupeKey: req.dedupeKey });
-          return;
+          return { accepted: false, reason: "duplicate" };
         }
         seen.set(req.dedupeKey, true);
         if (seen.size > DEDUPE_LIMIT) {
@@ -321,8 +357,14 @@ export function createService(options: ServiceOptions): NotificationService {
         }
         // Self-tests such as `/notify test` bypass quiet hours, coalescing and cooldown;
         // otherwise a missing test notification would be read as a broken channel.
-        if (options?.bypassFilters !== true && filtered(req)) return;
-        enqueue(req);
+        if (!submitOptions?.manualTest && submitOptions?.bypassFilters !== true && filtered(req)) return { accepted: false, reason: "filtered" };
+        if (submitOptions?.manualTest) testRequests.add(req);
+        if (submitOptions?.manualTest && submitOptions.onProgress) observers.set(req, submitOptions.onProgress);
+        if (!enqueue(req)) {
+          progress(req, "cancelled", undefined, "queue_full");
+          return { accepted: false, reason: "queue_full" };
+        }
+        progress(req, "queued");
         log.record({
           event: "submit",
           kind: req.kind,
@@ -331,11 +373,14 @@ export function createService(options: ServiceOptions): NotificationService {
           channels: req.channels,
         });
         pump();
+        return { accepted: true, ...(submitOptions?.onProgress ? { unsubscribe: () => { observers.delete(req); } } : {}) };
       } catch (error) {
+        progress(req, "cancelled", undefined, "internal_error");
         // No exception from the notification path may escape into a Pi hook.
         log.log("error", "提交通知时发生异常（已忽略）", {
           error: sanitizeError(error instanceof Error ? error.message : String(error)),
         });
+        return { accepted: false, reason: "internal_error" };
       }
     },
 

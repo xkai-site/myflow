@@ -182,8 +182,8 @@ await step("S5 中文化只改展示：值/配置键不变，阈值与规则严�
   // Values stay the enum ids; only the labels are translated.
   assert.deepEqual(labels("minLevel"), ["所有等级", "警告及错误", "仅错误"], "通知门槛应表达“及以上”");
   assert.deepEqual(labels("rules.runFailed.level"), ["提示", "警告", "错误"], "规则严重程度用常见日志等级名");
-  assert.deepEqual(labels("rules.toolFailed.mode"), ["并入结果", "立即提醒"], "策略不应再是 aggregate/immediate");
-  assert.deepEqual(labels("rules.waitingForUser.kinds"), ["选择", "确认", "输入", "编辑器"]);
+  assert.ok(!defaultItems.some((item) => item.id === "rules.toolFailed.mode"));
+  assert.ok(!defaultItems.some((item) => item.id === "rules.waitingForUser.kinds"));
   assert.deepEqual(labels("quietHours.exceptLevels"), ["提示", "警告", "错误"]);
   assert.deepEqual(labels("content.includeCost"), ["开启", "关闭"], "布尔候选项不应再露出 true/false");
   assert.deepEqual(labels("provider:terminal"), ["开启", "关闭"]);
@@ -201,35 +201,15 @@ await step("S5 中文化只改展示：值/配置键不变，阈值与规则严�
   assert.equal(itemOf("content.includeCost").format(undefined), "—");
 });
 
-await step("S6 时长展示用易读单位，输入写明单位与范围（底层仍为毫秒整数）", () => {
-  const windowItem = itemOf("coalesce.windowMs");
-  assert.equal(windowItem.format(1500), "1.5 秒");
-  assert.equal(windowItem.format(3000), "3 秒");
-  assert.equal(windowItem.format(60000), "60 秒");
-  assert.equal(windowItem.format(200), "200 毫秒");
-  assert.equal(windowItem.format(0), "0 毫秒");
-  // Non-round values keep their precision instead of being rounded away.
-  assert.equal(windowItem.format(4321), "4.321 秒");
-  assert.equal(itemOf("delivery.timeoutMs").format(10500), "10.5 秒");
-  // Presets go through the same formatter, so the list is not a mix of units.
-  assert.deepEqual(
-    settings.candidatesOf(windowItem, config.defaultConfig()).map((candidate) => candidate.label),
-    ["0 毫秒", "1.5 秒", "3 秒", "10 秒", "60 秒"],
-  );
-  // A unitless number stays a bare integer.
-  assert.equal(itemOf("delivery.maxRetries").format(2), "2");
-
-  assert.equal(windowItem.inputHint, "整数 0..600000（毫秒）");
-  assert.equal(itemOf("delivery.timeoutMs").inputHint, "整数 1..120000（毫秒）");
-  assert.equal(itemOf("delivery.maxRetries").inputHint, "整数 0..10");
+await step("S6 JSON-only 参数不出现在 TUI 表；保留内容长度/时间校验", () => {
+  for (const id of ["coalesce.windowMs", "delivery.timeoutMs", "delivery.maxRetries", "shutdownFlushMs", "rules.toolFailed.threshold"]) {
+    assert.ok(!defaultItems.some((item) => item.id === id));
+  }
+  const length = itemOf("content.maxMessageChars");
+  assert.deepEqual(length.parseInput("432"), { ok: true, value: 432 });
+  assert.equal(length.parseInput("999999").ok, false);
   assert.equal(itemOf("quietHours.start").inputHint, "HH:MM（00:00–23:59）");
-
-  // Parsing still produces plain milliseconds and still rejects out-of-range input with the unit.
-  assert.deepEqual(windowItem.parseInput("4321"), { ok: true, value: 4321 });
-  const outOfRange = windowItem.parseInput("999999");
-  assert.equal(outOfRange.ok, false);
-  assert.match(outOfRange.message, /0\.\.600000/);
-  assert.match(outOfRange.message, /毫秒/);
+  assert.equal(itemOf("quietHours.start").parseInput("25:00").ok, false);
 });
 
 await step("S7 来源按 overlay 存在性判定：false / 空集合 / 与默认同值都算“已覆盖”", () => {
@@ -406,6 +386,53 @@ await step("S13 clearItemOverride：只清目标项的本对话覆盖（普通�
     settings.clearItemOverride({ patch: {}, providers: { terminal: false, debug: true }, providerOptions: {} }, terminal),
     { patch: {}, providers: { debug: true }, providerOptions: {} },
   );
+});
+
+await step("S14 复合项保存有效混合状态，不统一、不泄漏其他会话字段", () => {
+  const current = config.defaultConfig();
+  current.rules.compactFailed.enabled = false;
+  current.content.includeAssistantExcerpt = true;
+  const item = itemOf("reminders.failed");
+  assert.equal(item.read(current), "mixed");
+  const saved = settings.settingUserFilePatch({}, current, settings.settingSnapshot(item, current));
+  assert.deepEqual(saved, { rules: { runFailed: { enabled: true }, compactFailed: { enabled: false } } });
+  const next = settings.applySettingPatch(settings.emptyOverlay(), item, item.patch(false));
+  assert.equal(settings.applyOverlay(current, next).config.rules.runFailed.enabled, false);
+  assert.equal(settings.clearItemOverride(next, item).patch.rules, undefined);
+});
+
+await step("S15 接收多选与启用原子应用，provider 归属转移后不误还原", () => {
+  const current = config.defaultConfig();
+  const item = itemOf("channels");
+  let overlay = settings.applySettingPatch(settings.emptyOverlay(), item, item.patch(["terminal", "email"]));
+  let effective = settings.applyOverlay(current, overlay).config;
+  assert.equal(effective.providers.find((p) => p.id === "email").enabled, true);
+  assert.deepEqual(effective.channels, ["terminal", "email"]);
+  assert.equal(effective.rules.runFailed.channels, "inherit");
+  overlay = settings.applySettingPatch(overlay, itemOf("provider:email"), itemOf("provider:email").patch(false));
+  const restored = settings.clearItemOverride(overlay, item);
+  assert.equal(restored.providers.email, false, "专业页显式禁用归属于自身");
+  assert.equal(restored.patch.channels, undefined);
+  effective = settings.applyOverlay(current, overlay).config;
+  const raw = { providers: [{ id: "email", type: "email", options: { from: "saved@qq.com" }, future: 7 }] };
+  const saved = settings.settingUserFilePatch(raw, effective, settings.settingSnapshot(item, effective));
+  assert.equal(saved.providers.find((p) => p.id === "email").enabled, false, "Ctrl+S 不重新开启");
+  assert.equal(saved.providers.find((p) => p.id === "email").options.from, "saved@qq.com");
+  assert.equal(saved.providers.find((p) => p.id === "email").future, 7);
+  const roundTrip = settings.overlayFromEntry(settings.overlayEntryData("s", overlay, 1));
+  assert.deepEqual(roundTrip, overlay);
+});
+
+await step("S16 显式归一只修改六个 channels；旧元数据不猜测归属", () => {
+  const item = itemOf("routes.unify");
+  const overlay = settings.applySettingPatch({ ...settings.emptyOverlay(), patch: { rules: { runFailed: { enabled: false, level: "warning", channels: [] } } } }, item, item.patch("inherit"));
+  assert.equal(overlay.patch.rules.runFailed.enabled, false);
+  assert.equal(overlay.patch.rules.runFailed.level, "warning");
+  assert.equal(Object.keys(overlay.patch.rules).length, 6);
+  assert.equal(overlay.patch.rules.runFailed.channels, "inherit");
+  assert.deepEqual(settings.clearItemOverride(overlay, item).patch, { rules: { runFailed: { enabled: false, level: "warning" } } });
+  const legacy = { ...settings.emptyOverlay(), providers: { email: true } };
+  assert.equal(settings.clearItemOverride(legacy, itemOf("channels")).providers.email, true);
 });
 
 for (const item of failures) {

@@ -30,6 +30,11 @@ import type {
   ToolFailure,
 } from "./types.ts";
 
+/** Configuration inheritance is resolved here, never in the delivery or wire protocols. */
+export function resolveChannels(config: NotificationConfig, rule: { channels: "inherit" | string[] }): string[] {
+  return [...(rule.channels === "inherit" ? config.channels : rule.channels)];
+}
+
 const LEVEL_RANK: Record<NotifyLevel, number> = { info: 0, warning: 1, error: 2 };
 
 /**
@@ -222,7 +227,7 @@ export function evaluateRunOutcome(
     title,
     body: joinBody(parts, config),
     dedupeKey: `${outcome.sessionId}:${outcome.runId}:${kind}`,
-    channels: rule.channels,
+    channels: resolveChannels(config, rule),
     sessionId: outcome.sessionId,
     runId: outcome.runId,
     durationMs: outcome.durationMs,
@@ -280,7 +285,7 @@ export function evaluateToolFailure(
       : `${input.sessionId}:${input.runId}:tool_failed`,
     // `immediate` mode: a wider window collapses parallel tool failures of the same run.
     ...(immediate ? { coalesceWindowMs: config.coalesce.toolFailureWindowMs } : {}),
-    channels: rule.channels,
+    channels: resolveChannels(config, rule),
     sessionId: input.sessionId,
     runId: input.runId,
     durationMs: input.durationMs,
@@ -355,7 +360,7 @@ export function evaluateCompactFailure(
     title: "上下文压缩未完成",
     body: joinBody(parts, config),
     dedupeKey: `${input.sessionId}:compact_failed:${input.seq}`,
-    channels: rule.channels,
+    channels: resolveChannels(config, rule),
     sessionId: input.sessionId,
     runId: input.runId,
     maxChars: config.content.maxMessageChars,
@@ -389,7 +394,7 @@ export function evaluateWaitingForUser(
     title: "需要你回复",
     body,
     dedupeKey: `${input.sessionId}:waiting_for_user:${input.seq}`,
-    channels: rule.channels,
+    channels: resolveChannels(config, rule),
     sessionId: input.sessionId,
     runId: input.runId,
     maxChars: config.content.maxMessageChars,

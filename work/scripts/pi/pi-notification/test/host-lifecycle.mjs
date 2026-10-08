@@ -875,47 +875,25 @@ const CLOSE = [K.esc, K.esc, K.esc, K.esc, K.esc, K.esc];
 function routeToItem(settingsModule, items, id, config) {
   const item = items.find((candidate) => candidate.id === id);
   assert.ok(item, `未知配置项: ${id}`);
-  const homeRow = (key) => {
-    const index = key === "item:enabled" ? 0 : -1;
-    assert.ok(index >= 0, `未知首页行: ${key}`);
-    return index;
-  };
+  if (id === "enabled") return [0];
   if (item.rule) {
     const ruleIndex = settingsModule.RULE_INFOS.findIndex((rule) => rule.key === item.rule.key);
-    assert.ok(ruleIndex >= 0, `未知规则: ${item.rule.key}`);
-    const ruleItems = items.filter((candidate) => candidate.rule?.key === item.rule.key);
-    const rowIndex = ruleItems.findIndex((candidate) => candidate.id === id);
-    return [1, ruleIndex, rowIndex]; // home → 提醒时机 → rule field
+    const rowIndex = items.filter((candidate) => candidate.rule?.key === item.rule.key).findIndex((candidate) => candidate.id === id);
+    return [4, 2, 1, ruleIndex, rowIndex]; // more → professional → individual rules
   }
-  if (id === "minLevel") return [4, 0]; // home → 更多设置 → 提醒级别
-  if (id === "provider:email" || item.providerOptionPath) {
-    const channelItems = settingsModule.categoryPageItems(
-      settingsModule.SETTING_CATEGORIES.find((category) => category.id === "channels"), items, config,
-    ).items.filter((candidate) => candidate.id !== "provider:email");
-    const emailRows = items.filter((candidate) => candidate.providerId === "email");
-    const emailIndex = emailRows.findIndex((candidate) => candidate.id === id);
-    assert.ok(emailIndex >= 0, `不可达邮箱配置项: ${id}`);
-    return [2, channelItems.length, emailIndex]; // home → 接收方式 → 邮箱提醒 → field
-  }
+  if (id === "minLevel") return [4, 2, 0];
+  if (item.group === "邮箱") return [2, 2, items.filter((candidate) => candidate.group === "邮箱").findIndex((candidate) => candidate.id === id)];
   const category = settingsModule.SETTING_CATEGORIES.find((candidate) => candidate.group === item.group);
-  if (!category) return [homeRow(`item:${id}`)];
-  const groupItems = items.filter((candidate) => candidate.group === item.group && (candidate.visible?.(config) ?? true));
-  const rowIndex = groupItems.findIndex((candidate) => candidate.id === id);
-  assert.ok(rowIndex >= 0, `当前页不可见配置项: ${id}`);
-  const collapsed = category.collapsed && category.collapsed.when(config) && category.collapsed.ids.includes(id);
-  if (category.id === "content" || category.id === "quietHours" || category.id === "advanced") {
-    const more = settingsModule.SETTING_CATEGORIES.find((candidate) => candidate.id === "more");
-    const sectionIndex = 1 + more.sections.indexOf(category.id); // minLevel occupies row 0
-    if (collapsed) {
-      const collapsedIndex = category.collapsed.ids.indexOf(id);
-      assert.ok(collapsedIndex >= 0, `不可达配置项: ${id}`);
-      return [4, sectionIndex, 1, collapsedIndex]; // section → subgroup row → field
-    }
-    return [4, sectionIndex, rowIndex];
-  }
-  const homeCategoryIndex = category.id === "rules" ? 1 : category.id === "channels" ? 2 : -1;
-  assert.ok(homeCategoryIndex >= 0, `没有主屏入口的分类: ${category.id}`);
-  return [homeCategoryIndex, rowIndex];
+  assert.ok(category, `不可达设置项: ${id}`);
+  const rowIndex = items.filter((candidate) => candidate.group === item.group).findIndex((candidate) => candidate.id === id);
+  if (category.id === "providers") return [4, 2, 2, rowIndex];
+  if (category.id === "emailAdvanced") return [4, 2, 3, rowIndex];
+  if (category.id === "rules") return [1, rowIndex];
+  if (category.id === "channels") return [2, rowIndex];
+  const more = settingsModule.SETTING_CATEGORIES.find((candidate) => candidate.id === "more");
+  const sectionIndex = more.sections.indexOf(category.id);
+  if (category.collapsed?.when(config) && category.collapsed.ids.includes(id)) return [4, sectionIndex, 1, category.collapsed.ids.indexOf(id)];
+  return [4, sectionIndex, rowIndex];
 }
 
 /** Down-presses per page, with Enter between pages; `open` adds the Enter that opens the field. */
@@ -973,9 +951,9 @@ async function reloadViaUi(host) {
 }
 
 async function statusViaUi(host) {
-  host.driver.setKeys([K.ctrlO, K.esc]);
+  host.driver.setKeys([K.ctrlO, ...Array(20).fill(K.down), K.esc, K.esc]);
   await host.during(() => host.session.prompt("/notify"));
-  return (host.driver.renders[0] ?? []).join("\n");
+  return host.driver.renders.map((frame) => frame.join("\n")).join("\n");
 }
 
 const commandDriver = createUiDriver();
@@ -1132,12 +1110,12 @@ await step("J9 Ctrl+R 重读配置、Ctrl+O 状态与诊断可用且不产生副
   assert.match(settingsDriver.renders[0].join("\n"), /已重新读取配置/);
   assert.equal(reload.deliveries.length, 0);
 
-  const status = await driveSettings([K.ctrlO, K.down, K.esc]);
-  const frame = settingsDriver.renders[1].join("\n");
+  const status = await driveSettings([K.ctrlO, ...Array(20).fill(K.down), K.esc, K.esc]);
+  const frame = settingsDriver.renders.map((frame) => frame.join("\n")).join("\n");
   assert.match(frame, /配置来源/, `状态页应显示状态文本:\n${frame}`);
   assert.match(frame, /投递统计/);
   assert.match(frame, /送达前提/, `状态页应说明送达前提:\n${frame}`);
-  assert.match(frame, /测试通知/, `状态页应区分“已提交”与“实际送达”:\n${frame}`);
+  assert.match(frame, /请确认是否看到/, `状态页应区分“已提交”与“实际送达”:\n${frame}`);
   assert.equal(status.deliveries.length, 0, "状态页只读，不得产生投递");
   assert.equal(status.notifies, 0);
   assert.deepEqual(settings.runtimeErrors, []);
@@ -1152,7 +1130,7 @@ await step("J9b 状态与诊断：可见“重新读取配置”动作触发真�
 
 await step("J10 Ctrl+T 真的走一遍投递链路（折叠的旧 /notify test）", async () => {
   const delta = await driveSettings([K.ctrlT, K.esc]);
-  assert.match(settingsDriver.renders[0].join("\n"), /已提交测试通知/);
+  assert.match(settingsDriver.renders[0].join("\n"), /测试发送中|已排队/);
   assert.equal(delta.deliveries.length, 1, `自检通知未投递: ${JSON.stringify(delta.deliveries)}`);
   assert.equal(delta.deliveries[0].kind, "run_completed");
   assert.equal(delta.notifies, 1, "自检通知应真的写出 OSC");
@@ -1182,7 +1160,7 @@ await step("J12 写盘失败：状态行报错、标记不迁移、内存里当�
   const delta = await driveSettings([K.ctrlS, K.esc]);
   const frame = settingsDriver.renders.at(-1).join("\n");
   assert.match(frame, /保存失败/, `状态行应报错:\n${frame}`);
-  assert.match(frame, /基础 · 启用通知/, `保存失败应写明配置项名称:\n${frame}`);
+  assert.match(frame, /基础 · 启用提醒/, `保存失败应写明配置项名称:\n${frame}`);
   assert.match(frame, /用户文件未改动/, `保存失败应说明用户文件没有被改动:\n${frame}`);
   assert.ok(!frame.includes("· 默认") || !frame.includes("已保存为默认"));
   assert.deepEqual(settings.runtimeErrors, []);
@@ -1297,7 +1275,7 @@ await step("J13c 无启用渠道：首页与状态页都直说是送达前提问
   });
   noChannelDriver.setKeys([K.esc]);
   await noChannel.command("/notify");
-  assert.match(noChannelDriver.renders[0].join("\n"), /无启用渠道/, "首页应直说没有启用渠道");
+  assert.match(noChannelDriver.renders[0].join("\n"), /已关闭/, "首页应显示选中的接收方式已关闭");
 
   noChannelDriver.setKeys([K.ctrlO, K.esc, K.esc]);
   await noChannel.command("/notify");

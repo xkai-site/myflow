@@ -18,6 +18,7 @@
 import { defaultConfig, mergeConfig, type ConfigProblem } from "./config.ts";
 import { getPathValue, hasPath, isPlainObject, mergePatch, removePath, setPatchPath, type ConfigPatch } from "./patch.ts";
 import type { NotificationConfig, NotifyLevel, ToolFailureMode } from "./types.ts";
+import { resolveChannels } from "./rules.ts";
 
 // ---------------------------------------------------------------------------
 // Session overlay
@@ -35,10 +36,41 @@ export interface SessionOverlay {
   patch: ConfigPatch;
   providers: Record<string, boolean>;
   providerOptions: Record<string, Record<string, unknown>>;
+  /** Provider switches last changed by the unified-destination item, never arbitrary paths. */
+  channelOwners?: string[];
 }
 
 /** Explain the first unmet prerequisite without conflating a missing credential with a closed switch. */
 export const QQ_MAIL_URL = "https://mail.qq.com/";
+
+export function testBlockMessage(reason: string): string {
+  const messages: Record<string, string> = {
+    silenced: "未发送：本对话已强制静默，无法从这里开启提醒。",
+    disabled: "未发送：请先开启提醒总开关。",
+    below_min_level: "未发送：此提醒的重要程度低于接收范围。",
+    no_channels: "未发送：请先选择在哪里接收。",
+    no_available_channels: "未发送：选中的接收方式已关闭或不存在；请检查接收方式开关。",
+    duplicate: "未发送：这条测试已经提交过。",
+    filtered: "未发送：当前提醒设置暂时不接收这条提醒。",
+    queue_full: "未发送：等待发送的提醒已满，请稍后重试。",
+    queue_replaced: "未发送：等待期间被更重要的提醒替换，请重试。",
+    disposed: "未发送：设置已重载或对话已结束，请重新打开设置测试。",
+    internal_error: "测试未完成：请在状态与诊断中查看原因。",
+  };
+  return messages[reason] ?? "测试已取消：设置已重载或对话已切换，请重新测试。";
+}
+
+export function emailReadiness(config: NotificationConfig, hasAuthCode: boolean): { label: string; usedBy: number } {
+  const provider = config.providers.find((entry) => entry.id === "email" && entry.type === "email");
+  const usedBy = Object.values(config.rules).filter((rule) => rule.enabled && resolveChannels(config, rule).includes("email")).length;
+  const label = !provider ? "未配置" : !provider.options.from ? "缺发件地址" : !Array.isArray(provider.options.to) || !provider.options.to.length ? "缺收件地址"
+    : !hasAuthCode ? "缺授权码" : !provider.enabled ? "渠道未启用" : !config.enabled ? "总开关已关" : !usedBy ? "尚无提醒使用" : "配置就绪未测试";
+  return { label, usedBy };
+}
+
+export function routingExceptions(config: NotificationConfig): string[] {
+  return RULES.filter((rule) => config.rules[rule.key].channels !== "inherit").map((rule) => rule.label);
+}
 
 export function emailTestBlockReason(config: NotificationConfig, hasAuthCode: boolean): string | undefined {
   if (!config.enabled) return "通知总开关已关闭，请先开启通知。";
@@ -85,14 +117,17 @@ export function overlayFromEntry(value: unknown): SessionOverlay | undefined {
       if (isPlainObject(options)) providerOptions[id] = options;
     }
   }
-  return { patch, providers, providerOptions };
+  const channelOwners = Array.isArray(value.channelOwners)
+    ? [...new Set(value.channelOwners.filter((id): id is string => typeof id === "string" && Object.hasOwn(providers, id)))] : [];
+  return { patch, providers, providerOptions, ...(channelOwners.length ? { channelOwners } : {}) };
 }
 
 export const SESSION_OVERLAY_ENTRY = "notify-session-overlay";
 
 /** Session snapshot: only non-sensitive options are exposed by the settings items. */
 export function overlayEntryData(sessionId: string | undefined, overlay: SessionOverlay, at: number) {
-  return { sessionId, patch: notificationPatch(overlay.patch), providers: overlay.providers, providerOptions: overlay.providerOptions, at };
+  return { sessionId, patch: notificationPatch(overlay.patch), providers: overlay.providers, providerOptions: overlay.providerOptions,
+    ...(overlay.channelOwners?.length ? { channelOwners: [...overlay.channelOwners] } : {}), at };
 }
 
 /**
@@ -152,7 +187,8 @@ export type SettingKind = "boolean" | "enum" | "number" | "time" | "collection";
 
 export type SettingValue = string | number | boolean;
 
-export type SettingPatch =
+export type SettingPatch = SimpleSettingPatch | { kind: "compound"; operations: SimpleSettingPatch[] };
+export type SimpleSettingPatch =
   /** Plain field: one path serves both the session overlay and the sparse user file. */
   | { kind: "path"; path: string; value: unknown }
   /** Provider switch: the overlay uses the provider map, the user file gets the whole array. */
@@ -180,6 +216,10 @@ export interface SettingItem {
   format(value: unknown): string;
   /** Path of this item inside the raw user JSON; provider items use `providerId` instead. */
   userPath: string;
+  /** Composite logical items own a small explicit field set. */
+  paths?: string[];
+  destinations?: boolean;
+  snapshot?(config: NotificationConfig): SettingPatch;
   providerId?: string;
   providerOptionPath?: string;
   /** Rule this item belongs to; the UI groups a rule's fields onto one page. */
@@ -242,6 +282,8 @@ const PROMPT_KIND_LABELS: Record<string, string> = {
 
 /** Boolean text used everywhere a boolean is displayed; the stored value stays `true`/`false`. */
 export function booleanLabel(value: unknown): string {
+  if (value === "mixed") return "部分开启 / 自定义";
+  if (value === "partial") return "部分已修改";
   return value === true ? "开启" : "关闭";
 }
 
@@ -319,6 +361,7 @@ function formatValue(
 ): string {
   if (value === undefined) return "—";
   if (kind === "collection") {
+    if (value === "inherit") return "跟随统一接收方式";
     const members = Array.isArray(value) ? value.map((item) => displayValue(item, options.labels)) : [];
     return members.length === 0 ? options.emptyLabel : members.join("、");
   }
@@ -390,6 +433,11 @@ const TIME_PRESETS = ["00:00", "07:00", "08:00", "12:00", "18:00", "22:00", "23:
  * and comparing values would misreport "this conversation changed it" as "inherited".
  */
 export function sessionOverrideValue(overlay: SessionOverlay, item: SettingItem): unknown {
+  if (item.paths) {
+    const values = item.paths.map((path) => getPathValue(overlay.patch, path));
+    if (values.every((value) => value === undefined)) return undefined;
+    return values.some((value) => value === undefined) ? "partial" : compositeValue(item, values);
+  }
   if (item.providerId !== undefined) {
     if (item.providerOptionPath) {
       const options = overlay.providerOptions?.[item.providerId];
@@ -435,6 +483,64 @@ export function providerDefinitionSource(item: SettingItem, rawUser: unknown): "
   return definedByUser ? "user" : "default";
 }
 
+function compositeValue(item: SettingItem, values: unknown[]): unknown {
+  if (item.id === "reminders.failed") return values.every((value) => value === true) ? true
+    : values.every((value) => value === false) ? false : "mixed";
+  return values.every((value) => value === "inherit") ? "inherit" : "custom";
+}
+
+export function settingSnapshot(item: SettingItem, config: NotificationConfig): SettingPatch {
+  return item.snapshot?.(config) ?? item.patch(item.read(config) as SettingValue | SettingValue[]);
+}
+export function patchOperations(patch: SettingPatch): SimpleSettingPatch[] {
+  return patch.kind === "compound" ? patch.operations : [patch];
+}
+
+/** Pure transaction candidate. The caller validates it before committing one session snapshot. */
+export function applySettingPatch(overlay: SessionOverlay, item: SettingItem, patch: SettingPatch): SessionOverlay {
+  const next: SessionOverlay = structuredClone({ ...overlay, providerOptions: overlay.providerOptions ?? {} });
+  const owners = new Set(next.channelOwners ?? []);
+  for (const operation of patchOperations(patch)) {
+    if (operation.kind === "path") next.patch = setPatchPath(next.patch, operation.path, operation.value);
+    else if (operation.kind === "providerOption") next.providerOptions[operation.id] = setPatchPath(next.providerOptions[operation.id] ?? {}, operation.optionPath, operation.value);
+    else {
+      next.providers[operation.id] = operation.value;
+      if (item.destinations) owners.add(operation.id); else owners.delete(operation.id);
+    }
+  }
+  if (owners.size) next.channelOwners = [...owners]; else delete next.channelOwners;
+  return next;
+}
+
+/** Rebuild the provider array from raw JSON inside writeUserDefault's transaction, not the effective config. */
+export function settingUserFilePatch(raw: unknown, config: NotificationConfig, patch: SettingPatch): ConfigPatch {
+  let sparse: ConfigPatch = isPlainObject(raw) ? structuredClone(raw) : {};
+  let result: ConfigPatch = {};
+  for (const operation of patchOperations(patch)) {
+    const provider = operation.kind !== "path" ? config.providers.find((entry) => entry.id === operation.id) : undefined;
+    const single = operation.kind === "path" ? setPatchPath({}, operation.path, operation.value)
+      : operation.kind === "providers" ? channelUserFilePatch(sparse, operation.id, provider?.type ?? "terminal", operation.value)
+        : providerOptionUserFilePatch(sparse, operation.id, provider?.type ?? "email", operation.optionPath, operation.value);
+    sparse = mergePatch(sparse, single);
+    result = mergePatch(result, single);
+  }
+  return result;
+}
+
+export function itemRemovals(item: SettingItem, config: NotificationConfig, overlay: SessionOverlay) {
+  if (item.paths) return item.paths.map((path) => ({ kind: "path" as const, path }));
+  if (item.destinations) {
+    const owned = new Set(overlay.channelOwners ?? []);
+    for (const id of config.channels) {
+      if (!Object.hasOwn(overlay.providers, id) || owned.has(id)) owned.add(id);
+    }
+    return [{ kind: "path" as const, path: item.userPath }, ...[...owned].map((id) => ({ kind: "provider" as const, id }))];
+  }
+  return [item.providerId ? (item.providerOptionPath
+    ? { kind: "providerOption" as const, id: item.providerId, optionPath: item.providerOptionPath }
+    : { kind: "provider" as const, id: item.providerId }) : { kind: "path" as const, path: item.userPath }];
+}
+
 /**
  * Builds the setting list for the current config, providers included.
  * Array order is render order and the group is the section shown in the UI; `config` is only
@@ -443,26 +549,58 @@ export function providerDefinitionSource(item: SettingItem, rawUser: unknown): "
 export function buildSettingItems(config: NotificationConfig): SettingItem[] {
   const items: SettingItem[] = [];
 
-  items.push(makeItem({ group: "基础", label: "启用通知", path: "enabled", kind: "boolean" }));
+  items.push(makeItem({ group: "基础", label: "启用提醒", path: "enabled", kind: "boolean" }));
+  items.push(makeItem({ id: "reminders.completed", group: "提醒时机", label: "执行完成", path: "rules.runCompleted.enabled", kind: "boolean" }));
+  items.push(makeItem({ id: "reminders.waiting", group: "提醒时机", label: "需要我回复", path: "rules.waitingForUser.enabled", kind: "boolean" }));
   items.push(makeItem({
     group: "基础",
-    label: "通知门槛",
+    label: "接收哪些重要程度的提醒",
     path: "minLevel",
     kind: "enum",
     labels: THRESHOLD_LABELS,
     candidates: () => LEVELS.map((level) => ({ value: level, label: THRESHOLD_LABELS[level] })),
   }));
 
-  const channelCandidates = (): SettingCandidate[] => (
-    config.providers.map((provider) => ({ value: provider.id, label: channelLabel(provider.id) }))
-  );
+  const channelCandidates = (): SettingCandidate[] => {
+    const ids = [...new Set([...config.providers.map((provider) => provider.id), ...config.channels,
+      ...Object.values(config.rules).flatMap((rule) => rule.channels === "inherit" ? [] : rule.channels)])];
+    return ids.map((id) => ({ value: id, label: `${channelLabel(id)}${config.providers.some((provider) => provider.id === id) ? "" : "（未找到，可取消选择）"}` }));
+  };
   const channelLabels = Object.fromEntries(config.providers.map((provider) => [provider.id, channelLabel(provider.id)]));
+  const failurePaths = ["rules.runFailed.enabled", "rules.compactFailed.enabled"];
+  items.push({ ...makeItem({ id: "reminders.failed", group: "提醒时机", label: "执行失败", path: failurePaths[0], kind: "boolean" }),
+    paths: failurePaths,
+    read: (current) => compositeValue({ id: "reminders.failed" } as SettingItem, failurePaths.map((path) => getPathValue(current, path))),
+    patch: (value) => ({ kind: "compound", operations: failurePaths.map((path) => ({ kind: "path", path, value })) }),
+    snapshot: (current) => ({ kind: "compound", operations: failurePaths.map((path) => ({ kind: "path", path, value: getPathValue(current, path) })) }),
+  });
+  items.push({ ...makeItem({ group: "接收", label: "在哪里接收", path: "channels", kind: "collection", candidates: channelCandidates, labels: channelLabels, emptyLabel: "不投递" }),
+    destinations: true,
+    patch: (value) => ({ kind: "compound", operations: [
+      { kind: "path", path: "channels", value },
+      ...(Array.isArray(value) ? value.filter((id) => !config.channels.includes(String(id)) && config.providers.some((provider) => provider.id === id)) : [])
+        .map((id) => ({ kind: "providers" as const, id: String(id), value: true })),
+    ] }),
+    snapshot: (current) => ({ kind: "compound", operations: [
+      { kind: "path", path: "channels", value: [...current.channels] },
+      ...current.providers.filter((provider) => current.channels.includes(provider.id)).map((provider) => ({ kind: "providers" as const, id: provider.id, value: provider.enabled })),
+    ] }),
+  });
+  const routePaths = RULES.map((rule) => `rules.${rule.key}.channels`);
+  items.push({ ...makeItem({ id: "routes.unify", group: "接收", label: "让所有提醒跟随统一接收方式", path: routePaths[0], kind: "enum" }),
+    paths: routePaths,
+    candidates: () => [{ value: "inherit", label: "所有提醒使用统一接收方式（不改变提醒时机）" }],
+    read: (current) => compositeValue({ id: "routes.unify" } as SettingItem, routePaths.map((path) => getPathValue(current, path))),
+    format: (value) => value === "inherit" ? "全部使用统一接收方式" : value === "partial" ? "部分已修改" : "有提醒单独设置了接收方式",
+    patch: () => ({ kind: "compound", operations: routePaths.map((path) => ({ kind: "path", path, value: "inherit" })) }),
+    snapshot: (current) => ({ kind: "compound", operations: routePaths.map((path) => ({ kind: "path", path, value: getPathValue(current, path) })) }),
+  });
   for (const rule of RULES) {
     const base = `rules.${rule.key}`;
     items.push(makeItem({ group: "通知规则", label: `${rule.label} · 开关`, path: `${base}.enabled`, kind: "boolean" }));
     items.push(makeItem({
       group: "通知规则",
-      label: `${rule.label} · 严重程度`,
+      label: `${rule.label} · 重要程度`,
       path: `${base}.level`,
       kind: "enum",
       labels: LEVEL_LABELS,
@@ -470,7 +608,7 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
     }));
     items.push(makeItem({
       group: "通知规则",
-      label: `${rule.label} · 渠道`,
+      label: `${rule.label} · 接收方式`,
       path: `${base}.channels`,
       kind: "collection",
       candidates: channelCandidates,
@@ -529,24 +667,24 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
     max: 2000,
   }));
 
-  items.push(makeItem({ group: "免打扰", label: "静默时段 · 开关", path: "quietHours.enabled", kind: "boolean" }));
+  items.push(makeItem({ group: "免打扰", label: "启用免打扰", path: "quietHours.enabled", kind: "boolean" }));
   items.push(makeItem({
     group: "免打扰",
-    label: "静默时段 · 开始",
+    label: "开始时间",
     path: "quietHours.start",
     kind: "time",
     candidates: () => valuesToCandidates(TIME_PRESETS),
   }));
   items.push(makeItem({
     group: "免打扰",
-    label: "静默时段 · 结束",
+    label: "结束时间",
     path: "quietHours.end",
     kind: "time",
     candidates: () => valuesToCandidates(TIME_PRESETS),
   }));
   items.push(makeItem({
     group: "免打扰",
-    label: "静默时段 · 等级例外",
+    label: "免打扰期间仍要接收",
     path: "quietHours.exceptLevels",
     kind: "collection",
     labels: LEVEL_LABELS,
@@ -647,7 +785,7 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
     if (provider.id === "email" && provider.type === "email") {
       const emailOption = (optionPath: "from" | "to" | "subjectPrefix", label: string, list = false): SettingItem => ({
         id: `provider:email:${optionPath}`,
-        group: "邮箱",
+        group: optionPath === "subjectPrefix" ? "邮箱专业" : "邮箱",
         label,
         kind: list ? "collection" : "enum",
         providerId: "email",
@@ -687,7 +825,10 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
     if (rule) item.rule = { key: rule.key, label: rule.label };
   }
 
-  return items;
+  // JSON-only reliability/policy parameters must not reappear through search.
+  return items.filter((item) => item.group !== "高级设置" && ![
+    "rules.toolFailed.mode", "rules.toolFailed.threshold", "rules.waitingForUser.kinds",
+  ].includes(item.id));
 }
 
 /** Rule rows of the home page's 通知规则 category, in the stable `RULES` order. */
@@ -702,7 +843,9 @@ export function ruleSummary(config: NotificationConfig, items: readonly SettingI
   return ["enabled", "level", "channels"]
     .map((suffix) => of(suffix))
     .filter((item): item is SettingItem => item !== undefined)
-    .map((item) => item.format(item.read(config)))
+    .map((item) => item.id.endsWith(".channels")
+      ? `${item.read(config) === "inherit" ? "跟随统一：" : "自定义："}${resolveChannels(config, config.rules[ruleKey as keyof NotificationConfig["rules"]]).map(channelLabel).join("、") || "不投递"}`
+      : item.format(item.read(config)))
     .join(" · ");
 }
 
@@ -749,18 +892,18 @@ export function categoryPageItems(
  * advanced sections so they are discoverable without crowding the common setup path.
  */
 export const SETTING_CATEGORIES: readonly SettingCategory[] = [
+  { id: "expertRules", label: "逐规则设置", kind: "rules", summary: (config) => `${routingExceptions(config).length} 类单独设置接收方式` },
+  { id: "providers", label: "接收方式开关", kind: "fields", group: "渠道", summary: (config) => config.providers.filter((entry) => entry.enabled).map((entry) => channelLabel(entry.id)).join("、") || "无启用渠道" },
+  { id: "emailAdvanced", label: "邮箱主题", kind: "fields", group: "邮箱专业", summary: () => "主题前缀" },
+
   {
     id: "rules",
     label: "提醒时机",
-    kind: "rules",
-    summary: (config) => {
-      const enabled = RULE_INFOS.filter((rule) => config.rules[rule.key as keyof NotificationConfig["rules"]].enabled).length;
-      // Short on purpose: a comma-joined list of every event name would crowd out the label on a
-      // narrow terminal, and the rule rows below already spell each event out.
-      return enabled === 0 ? "全部关闭" : `${enabled} 类已开启`;
-    },
+    kind: "fields",
+    group: "提醒时机",
+    summary: (config) => [config.rules.runCompleted.enabled ? "完成" : "", config.rules.runFailed.enabled || config.rules.compactFailed.enabled ? "失败" : "", config.rules.waitingForUser.enabled ? "等我回复" : ""].filter(Boolean).join("、") || "全部关闭",
   },
-  { id: "content", label: "提醒内容", kind: "fields", group: "内容", summary: () => "耗时、会话名等", actions: [{ key: "action:preview", action: "preview" }] },
+  { id: "content", label: "内容与隐私", kind: "fields", group: "内容", summary: () => "耗时、会话名等", actions: [{ key: "action:preview", action: "preview" }] },
   {
     id: "quietHours",
     label: "免打扰时段",
@@ -780,24 +923,24 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
     id: "channels",
     label: "接收方式",
     kind: "fields",
-    group: "渠道",
-    summary: (config) => {
-      const enabled = config.providers.filter((provider) => provider.enabled).length;
-      return enabled === 0 ? "无启用渠道" : `${enabled} 个已启用`;
-    },
+    group: "接收",
+    summary: (config) => `${config.channels.map((id) => {
+      const provider = config.providers.find((entry) => entry.id === id);
+      return `${channelLabel(id)}${!provider ? "（未找到）" : !provider.enabled ? "（已关闭）" : ""}`;
+    }).join("、") || "未选择"}${routingExceptions(config).length ? "（有提醒单独设置）" : ""}`,
   },
   {
-    id: "advanced",
-    label: "投递与频率",
-    kind: "fields",
-    group: "高级设置",
-    summary: () => "超时、重试与队列",
+    id: "professional",
+    label: "专业设置",
+    kind: "sections",
+    sections: ["expertRules", "providers", "emailAdvanced"],
+    summary: () => "分别设置每类提醒",
   },
   {
     id: "more",
     label: "更多设置",
     kind: "sections",
-    sections: ["content", "quietHours", "advanced"],
+    sections: ["content", "quietHours", "professional"],
     summary: () => "内容、免打扰与其它选项",
     actions: [
       { key: "action:status", action: "status" },
@@ -812,6 +955,7 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
  * Providers live in an array, so their entry is located by id and `enabled` is checked there.
  */
 export function hasUserDefault(rawUser: unknown, item: SettingItem): boolean {
+  if (item.paths) return item.paths.some((path) => hasPath(rawUser, path));
   if (item.providerId !== undefined) {
     const providers = getPathValue(rawUser, "providers");
     if (!Array.isArray(providers)) return false;
@@ -826,6 +970,10 @@ export function hasUserDefault(rawUser: unknown, item: SettingItem): boolean {
 /** Reads the value saved in the user file for this item, or undefined when it was never saved. */
 export function userDefaultValue(rawUser: unknown, item: SettingItem): unknown {
   if (!hasUserDefault(rawUser, item)) return undefined;
+  if (item.paths) {
+    const values = item.paths.map((path) => getPathValue(rawUser, path));
+    return values.some((value) => value === undefined) ? "partial" : compositeValue(item, values);
+  }
   if (item.providerId !== undefined) {
     const providers = getPathValue(rawUser, "providers");
     const entry = Array.isArray(providers)
@@ -887,19 +1035,29 @@ export function channelUserFilePatch(
  * provider map is keyed by id; a plain field is removed by path with its empty ancestors pruned.
  */
 export function clearItemOverride(overlay: SessionOverlay, item: SettingItem): SessionOverlay {
+  if (item.paths || item.destinations) {
+    let next = { ...overlay, providers: { ...overlay.providers }, providerOptions: { ...(overlay.providerOptions ?? {}) } };
+    for (const path of item.paths ?? [item.userPath]) next.patch = removePath(next.patch, path);
+    if (item.destinations) {
+      for (const id of next.channelOwners ?? []) delete next.providers[id];
+      delete next.channelOwners;
+    }
+    return next;
+  }
   if (item.providerId !== undefined) {
     if (item.providerOptionPath) {
       const providerOptions = { ...(overlay.providerOptions ?? {}) };
       const nextOptions = removePath(providerOptions[item.providerId] ?? {}, item.providerOptionPath);
       if (Object.keys(nextOptions).length === 0) delete providerOptions[item.providerId];
       else providerOptions[item.providerId] = nextOptions;
-      return { patch: overlay.patch, providers: { ...overlay.providers }, providerOptions };
+      return { ...overlay, patch: overlay.patch, providers: { ...overlay.providers }, providerOptions };
     }
     const providers = { ...overlay.providers };
     delete providers[item.providerId];
-    return { patch: overlay.patch, providers, providerOptions: { ...overlay.providerOptions } };
+    return { ...overlay, patch: overlay.patch, providers, providerOptions: { ...overlay.providerOptions },
+      ...(overlay.channelOwners ? { channelOwners: overlay.channelOwners.filter((id) => id !== item.providerId) } : {}) };
   }
-  return { patch: removePath(overlay.patch, item.userPath), providers: { ...overlay.providers }, providerOptions: { ...overlay.providerOptions } };
+  return { ...overlay, patch: removePath(overlay.patch, item.userPath), providers: { ...overlay.providers }, providerOptions: { ...overlay.providerOptions } };
 }
 
 /** Compares a candidate against the current value; collection kinds match by membership. */

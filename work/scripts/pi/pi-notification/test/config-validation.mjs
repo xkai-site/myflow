@@ -188,7 +188,8 @@ await step("C6d 逐项保存邮箱参数不丢本机渠道，显式关闭与自�
     const loaded = config.loadConfig({ agentDir }).config;
     assert.equal(loaded.providers.find((p) => p.id === "terminal")?.enabled, true);
     assert.equal(loaded.providers.find((p) => p.id === "email")?.enabled, false, "保存地址不应自动启用邮箱");
-    assert.deepEqual(loaded.rules.runCompleted.channels, ["terminal"], "不自动改变用户事件路由");
+    assert.equal(loaded.rules.runCompleted.channels, "inherit", "保存邮箱参数不改变规则继承");
+    assert.deepEqual(loaded.channels, ["terminal"], "不自动启用远程路由");
   }
   let raw = config.readUserConfigRaw(agentDir).raw;
   assert.equal(raw.providers.length, 1, "写盘保持稀疏，不固化本机默认");
@@ -318,6 +319,23 @@ await step("C11 writeUserDefault：稀疏写盘只动这一项，保留其它原
   const invalid = config.writeUserDefault(invalidDir, { minLevel: "loud" });
   assert.equal(invalid.ok, false);
   assert.equal(fs.existsSync(config.userConfigPath(invalidDir)), false, "非法值不应留下任何文件");
+});
+
+await step("C11b 复合事务用最新 raw 构建，批量删除一次完成，非法部分不写入", () => {
+  const agentDir = cleanAgentDir("compound");
+  const prior = { future: 8, rules: { runFailed: { enabled: false, level: "warning" }, compactFailed: { enabled: true } }, providers: [{ id: "terminal", type: "terminal", future: 3 }] };
+  writeRawFile(agentDir, JSON.stringify(prior));
+  const saved = config.writeUserDefault(agentDir, (raw) => {
+    assert.equal(raw.future, 8);
+    return { rules: { runFailed: { enabled: true }, compactFailed: { enabled: "bad" } } };
+  });
+  assert.equal(saved.ok, false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(config.userConfigPath(agentDir), "utf8")), prior);
+  const deleted = config.deleteUserDefault(agentDir, [
+    { kind: "path", path: "rules.runFailed.enabled" }, { kind: "path", path: "rules.compactFailed.enabled" },
+  ]);
+  assert.equal(deleted.ok, true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(config.userConfigPath(agentDir), "utf8")), { future: 8, rules: { runFailed: { level: "warning" } }, providers: prior.providers });
 });
 
 await step("C12 writeUserConfig：写全量快照，失败时不留临时文件也不改动原文件", () => {

@@ -21,6 +21,7 @@
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 import {
   describeConfig,
@@ -34,10 +35,10 @@ import {
 import { sanitize, sanitizeError } from "./log.ts";
 import { resolveQqCredential, saveQqCredential, deleteQqCredential } from "./mail/credentials.ts";
 import { createDefaultTerminalIo, selectTerminalChannel } from "./providers/terminal.ts";
-import { evaluateRunOutcome } from "./rules.ts";
-import { builtinDefaultValue, clearItemOverride, emailTestBlockReason, QQ_MAIL_URL, sessionOverrideValue, setPatchPath, channelUserFilePatch, providerOptionUserFilePatch, type SessionOverlay } from "./settings.ts";
+import { evaluateRunOutcome, resolveChannels } from "./rules.ts";
+import { testBlockMessage, emailReadiness, buildSettingItems, channelLabel, patchOperations, applyOverlay, applySettingPatch, settingSnapshot, settingUserFilePatch, itemRemovals, builtinDefaultValue, clearItemOverride, emailTestBlockReason, QQ_MAIL_URL, sessionOverrideValue, type SessionOverlay } from "./settings.ts";
 import { NotifySettingsComponent, type ItemValue, type NotifySettingsSummary, type SettingsHost, type SettingsRestriction } from "./ui.ts";
-import type { ApiSnapshot, Logger, NotificationConfig, NotificationService, RunOutcome, RunSummary } from "./types.ts";
+import type { ApiSnapshot, Logger, NotificationConfig, NotificationService, RunOutcome, RunSummary, TestProgress } from "./types.ts";
 
 export interface CommandDeps {
   log: Logger;
@@ -74,6 +75,15 @@ function formatStatus(deps: CommandDeps): string {
     && Array.isArray(email.options.to) && email.options.to.length > 0;
   const lines: string[] = [];
   lines.push(`pi-notification: ${config.enabled && !deps.isSilenced() ? "开启" : "关闭"}${deps.isSilenced() ? "（--no-notify）" : ""}`);
+  const activeChannels = [...new Set(Object.values(config.rules).filter((rule) => rule.enabled).flatMap((rule) => resolveChannels(config, rule)))];
+  const issue = forcedOff(deps) ? "本对话已强制静默，请检查启动参数或环境变量。" : !config.enabled ? "提醒已暂停，请开启首页的提醒总开关。"
+    : !activeChannels.length ? "没有提醒使用任何接收方式，请选择在哪里接收。"
+      : !activeChannels.some((id) => config.providers.some((provider) => provider.id === id && provider.enabled)) ? "提醒使用的接收方式已关闭或不存在，请检查接收方式开关。"
+        : deps.service().isQuietHours() ? "当前为免打扰时段，部分提醒暂停；显式测试不受影响。" : "提醒已启用。没有收到时，请先发送测试查看具体结果。";
+  lines.push(`  当前情况：${issue}`);
+  const readiness = emailReadiness(config, resolveQqCredential().source !== "missing");
+  lines.push(`  邮箱：${readiness.label}；${readiness.usedBy} 类提醒使用邮箱。`);
+  lines.push("  技术详情（供进一步排查）：");
   lines.push(`  规则/渠道: ${describeConfig(config)}`);
   if (deps.sessionId()) lines.push(`  会话: ${deps.sessionId()}${deps.isWaitingForUser?.() ? "（正在等你输入）" : ""}`);
   // “Rule enabled” only means “passes the filter”; it is never a promise that a notification was
@@ -119,7 +129,9 @@ function formatStatus(deps: CommandDeps): string {
   // The four diagnostic groups the status page keeps apart: config blocking, current silence, the
   // self-test submission and the real delivery counters. Placed after the session line so the
   // waiting state stays inside the first page.
-  lines.push("  测试通知: Ctrl+T 或首页“发送测试通知”只提交一条（绕过静默/合并/冷却）；“已提交”不等于“已送达”");
+  lines.push("  测试提醒：Ctrl+T 测试当前接收方式。");
+  lines.push("  测试忽略重要程度和免打扰，不绕过强制静默或关闭的接收方式。");
+  lines.push("  接收服务接受不等于实际送达，请确认是否看到或收到。");
   for (const problem of load.errors) lines.push(`  ⚠ 配置错误 ${problem.path}: ${problem.message}`);
   for (const problem of load.warnings) lines.push(`  · 提示 ${problem.path}: ${problem.message}`);
   return lines.join("\n");
@@ -165,16 +177,27 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
 
   const applyPatch = (item: Parameters<SettingsHost["setValue"]>[0], value: ItemValue): { ok: true; message: string } | { ok: false; message: string } => {
     const patch = item.patch(value);
-    const prior = deps.overlay();
-    const next: SessionOverlay = {
-      patch: patch.kind === "path" ? setPatchPath(prior.patch, patch.path, patch.value) : prior.patch,
-      providers: patch.kind === "providers" ? { ...prior.providers, [patch.id]: patch.value } : { ...prior.providers },
-      providerOptions: patch.kind === "providerOption"
-        ? { ...prior.providerOptions, [patch.id]: setPatchPath(prior.providerOptions[patch.id] ?? {}, patch.optionPath, patch.value) }
-        : { ...prior.providerOptions },
-    };
+    if (forcedOff(deps) && patchOperations(patch).some((operation) => operation.kind === "providers" && operation.value)) {
+      return { ok: false, message: "本对话已强制静默，不能开启接收方式。" };
+    }
+    const next = applySettingPatch(deps.overlay(), item, patch);
+    const checked = applyOverlay(deps.config(), next);
+    if (checked.problems.length) return { ok: false, message: `未应用「${name(item)}」：${checked.problems.map((problem) => sanitizeError(`${problem.path}: ${problem.message}`)).join(";")}` };
     deps.setOverlay(next);
     return { ok: true, message: `已应用（仅本对话）「${name(item)}」= ${item.format(item.read(deps.config()))}；Ctrl+S 可设为以后默认` };
+  };
+
+  const sendTest = (channels: string[], onProgress?: (progress: TestProgress) => void) => {
+    if (forcedOff(deps)) return { ok: false, message: testBlockMessage("silenced") };
+    const id = `manual:${randomUUID()}`;
+    const sessionId = deps.sessionId();
+    const result = deps.service().submit({
+      level: "info", kind: "run_completed", title: "Pi 测试提醒", body: "这是一条固定内容测试。请确认是否看到；发送接口接受不代表实际显示或进入收件箱。",
+      dedupeKey: id, channels: [...channels], meta: { sessionId: sessionId ?? "manual", runId: id, level: "info" },
+    }, { manualTest: true, onProgress: (event) => { if (deps.sessionId() === sessionId) onProgress?.(event); } });
+    deps.log.record({ event: "notify_test", id, accepted: result.accepted, channels, ...(result.accepted ? {} : { reason: result.reason }) });
+    return result.accepted ? { ok: true, message: "已排队；尚不代表已经收到。", unsubscribe: result.unsubscribe }
+      : { ok: false, message: testBlockMessage(result.reason) };
   };
 
   return {
@@ -191,39 +214,27 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
     },
 
     saveDefault(item, value) {
-      if (item.id === "enabled" && forcedOff(deps) && value === true) {
-        return { ok: false, message: `已拒绝保存「${name(item)}」= 开启：本会话被强制静默（额外限制）；强制关闭不会被写成用户默认` };
+      if (item.id === "enabled" && forcedOff(deps)) {
+        return { ok: false, message: `不能保存「${name(item)}」：本对话已强制静默；这项临时限制不会保存成以后默认。` };
       }
-      const patch = item.patch(value);
-      const filePatch = patch.kind === "providers"
-        ? channelUserFilePatch(deps.userRaw(), patch.id, deps.config().providers.find((provider) => provider.id === patch.id)?.type ?? "terminal", patch.value)
-        : patch.kind === "providerOption"
-          ? providerOptionUserFilePatch(deps.userRaw(), patch.id, deps.config().providers.find((provider) => provider.id === patch.id)?.type ?? "email", patch.optionPath, patch.value)
-          : setPatchPath({}, patch.path, patch.value);
-      const result = writeUserDefault(deps.agentDir(), filePatch);
+      const current = deps.config();
+      const patch = settingSnapshot(item, current);
+      const result = writeUserDefault(deps.agentDir(), (raw) => settingUserFilePatch(raw, current, patch));
       if (!result.ok) {
         const problems = result.problems.map((problem) => sanitizeError(`${problem.path}: ${problem.message}`));
         deps.log.record({ event: "notify_default_write_failed", item: item.id, problems });
         return { ok: false, message: `保存失败「${name(item)}」：用户文件未改动（${problems.join("; ")}）` };
       }
       deps.reload(ctx); // Re-read only after a successful write, so both layers refresh together.
-      deps.log.record({ event: "notify_default_saved", item: item.id, path: patch.kind === "providers" ? `providers.${patch.id}.enabled` : patch.kind === "providerOption" ? `providers.${patch.id}.options.${patch.optionPath}` : patch.path });
-      return { ok: true, message: `已保存为默认「${name(item)}」= ${item.format(item.read(deps.config()))}（作用范围：以后默认；${sanitize(userConfigPath(deps.agentDir()), 2000)}）` };
+      deps.log.record({ event: "notify_default_saved", item: item.id, path: item.paths ?? item.userPath });
+      return { ok: true, message: `已保存为默认「${name(item)}」= ${item.format(item.read(deps.config()))}（作用范围：以后默认；其他本对话修改未保存；${sanitize(userConfigPath(deps.agentDir()), 2000)}）` };
     },
 
-    testEmail() {
-      const config = deps.config();
-      const reason = emailTestBlockReason(config, resolveQqCredential().source !== "missing");
+    testEmail(onProgress) {
+      if (forcedOff(deps)) return { ok: false, message: testBlockMessage("silenced") };
+      const reason = emailTestBlockReason(deps.config(), resolveQqCredential().source !== "missing");
       if (reason) return { ok: false, message: `邮箱测试未发送：${reason}` };
-      const now = Date.now();
-      deps.service().submit({
-        level: "error", kind: "run_completed", title: "Pi 邮箱测试",
-        body: "这是一封固定内容的测试邮件。请检查收件箱和垃圾邮件；提交成功不代表已经送达。",
-        dedupeKey: `manual-email:${now}`, channels: ["email"],
-        meta: { sessionId: deps.sessionId() ?? "manual", runId: String(now), level: "error" },
-      }, { bypassFilters: true });
-      deps.log.record({ event: "notify_email_test_submitted" });
-      return { ok: true, message: "已提交邮箱测试；是否送达请检查收件箱和垃圾邮件，并在状态与诊断中查看结果。" };
+      return sendTest(["email"], onProgress);
     },
 
     credentialStatus() {
@@ -259,32 +270,8 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
       }
     },
 
-    test() {
-      const config = deps.config();
-      const now = Date.now();
-      deps.service().submit(
-        {
-          level: "info",
-          kind: "run_completed",
-          title: "Pi 测试通知",
-          body: "如果你看到这条，说明本机提醒功能正常",
-          dedupeKey: `manual:${now}`,
-          channels: config.rules.runCompleted.channels,
-          meta: { sessionId: deps.sessionId() ?? "manual", runId: String(now), level: "info" },
-        },
-        // Self-tests bypass quiet hours, coalescing and cooldown: otherwise a self-test right
-        // after a run would be swallowed by the cooldown and read as a broken channel.
-        { bypassFilters: true },
-      );
-      const selection = selectTerminalChannel(createDefaultTerminalIo().environment());
-      deps.log.record({ event: "notify_test", channel: selection.channel, reason: selection.reason ?? null });
-      const base = selection.channel === "none"
-        ? `已提交测试通知，但当前无法使用本机提醒：${selection.reason}`
-        : "已提交测试通知，请留意本机提醒；提交不等于已显示。";
-      const quiet = deps.service().isQuietHours()
-        ? " 免打扰时段当前开启，普通提醒会暂停；本次测试忽略免打扰。"
-        : "";
-      return { ok: true, message: base + quiet };
+    test(channels, onProgress) {
+      return sendTest(channels ?? deps.config().channels, onProgress);
     },
 
     reload() {
@@ -305,12 +292,7 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
 
     /** “恢复此项内置默认”: clear the user default and the conversation override for one item. */
     restoreBuiltinDefault(item) {
-      const removal = item.providerId !== undefined
-        ? item.providerOptionPath
-          ? { kind: "providerOption" as const, id: item.providerId, optionPath: item.providerOptionPath }
-          : { kind: "provider" as const, id: item.providerId }
-        : { kind: "path" as const, path: item.userPath };
-      const result = deleteUserDefault(deps.agentDir(), removal);
+      const result = deleteUserDefault(deps.agentDir(), itemRemovals(item, deps.config(), deps.overlay()));
       if (!result.ok) {
         const problems = result.problems.map((problem) => sanitizeError(`${problem.path}: ${problem.message}`));
         deps.log.record({ event: "notify_default_delete_failed", item: item.id, problems });
@@ -359,6 +341,9 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
       return { ok: true, message: "通知预览（内容示意，不会发送）", lines };
     },
 
+    itemScope: (item) => itemRemovals(item, deps.config(), deps.overlay()).map((entry) => entry.kind === "path"
+      ? buildSettingItems(deps.config()).find((candidate) => candidate.userPath === entry.path)?.label ?? "此设置项"
+      : `${channelLabel(entry.id)} · ${entry.kind === "provider" ? "开关" : "邮箱设置"}`),
     statusLines: () => formatStatus(deps).split("\n"),
   };
 }
@@ -395,6 +380,7 @@ export async function handleNotifyCommand(args: string, ctx: ExtensionCommandCon
       render: (width: number) => component.render(width),
       handleInput: (data: string) => component.handleInput(data),
       invalidate: () => component.invalidate(),
+      dispose: () => component.dispose(),
     };
   });
   deps.log.record({

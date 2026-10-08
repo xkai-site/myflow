@@ -7,4 +7,6 @@
 - [里程碑 2 记录](pi-notification-plugin-m2.md)
 - [渐进式设置界面改造计划](pi-notification-progressive-ui.md)
 - [设置 UX 计划](pi-notification-ux.md)
+- [设置 UX 调研/计划/进度台账](pi-notification-ux/)
+- [配置体验 JTBD/KISS 方案](pi-notification-kiss-ux.md)
 - [测试与注释收尾计划](polish-tests-and-comments.md)
