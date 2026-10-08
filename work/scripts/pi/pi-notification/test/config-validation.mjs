@@ -339,6 +339,24 @@ await step("C12 writeUserConfig：写全量快照，失败时不留临时文件�
   assert.deepEqual(fs.readdirSync(blockedRoot), ["not-a-dir"], "失败后不得留下临时文件");
 });
 
+await step("C13 API 独立校验/降级、敏感值不进入错误说明", () => {
+  const defaults = config.defaultConfig().api;
+  assert.deepEqual(defaults, { enabled: false, url: "", secretEnv: "", headers: {}, includeLabels: false, timeoutMs: 5000, maxRetries: 1, queueLimit: 100 });
+  for (const [key, value] of [["timeoutMs", 0], ["maxRetries", 11], ["queueLimit", 0], ["includeLabels", "true"]]) {
+    assert.ok(errorPaths({ api: { [key]: value } }).includes(`api.${key}`));
+  }
+  assert.deepEqual(errorPaths({ api: { enabled: false, headers: { "X-Private": "private-value" } } }), []);
+  const sensitive = merge({ api: { url: "https://user:private-password@example.invalid/?arbitrary=private-query", headers: { "X-Pi-Message-Id": "private-header" } } });
+  assert.doesNotMatch(JSON.stringify(sensitive.errors), /private-password|private-query|private-header/);
+  const dir = cleanAgentDir("api-isolation");
+  writeRawFile(dir, JSON.stringify({ minLevel: "loud", api: { enabled: true, url: "http://127.0.0.1:1/hook" } }));
+  const badNotification = config.loadConfig({ agentDir: dir });
+  assert.equal(badNotification.degraded, true);
+  assert.equal(badNotification.config.api.enabled, true, "显式合法 API 不被通知规则降级关闭");
+  writeRawFile(dir, JSON.stringify({ version: 2, api: { enabled: true, url: "http://127.0.0.1:1/hook" } }));
+  assert.equal(config.loadConfig({ agentDir: dir }).config.api.enabled, false, "未知配置版本不得外发 API");
+});
+
 fs.rmSync(TMP, { recursive: true, force: true });
 
 for (const item of failures) {

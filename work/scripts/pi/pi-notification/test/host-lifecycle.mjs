@@ -291,7 +291,7 @@ function createUiDriver() {
   return driver;
 }
 
-async function makeHost({ label, extensions, projectTrusted = true, userConfig, mode = "print", ui = {}, driver }) {
+async function makeHost({ label, extensions, projectTrusted = true, userConfig, mode = "print", ui = {}, driver, retry, persisted = false }) {
   const root = path.join(TMP, label);
   const agentDir = path.join(root, "agent");
   const probeFile = path.join(root, "probe.jsonl");
@@ -318,7 +318,7 @@ async function makeHost({ label, extensions, projectTrusted = true, userConfig, 
   process.env.PI_NOTIFY_LOG_FILE = pluginFile;
 
   const settingsManager = sdk.SettingsManager.inMemory(
-    { retry: { enabled: false, maxRetries: 0 } },
+    { retry: retry ?? { enabled: false, maxRetries: 0 } },
     { projectTrusted },
   );
   const loader = new sdk.DefaultResourceLoader({
@@ -342,23 +342,26 @@ async function makeHost({ label, extensions, projectTrusted = true, userConfig, 
     allowModelNetwork: false,
   });
 
-  const { session } = await sdk.createAgentSession({
-    cwd: root,
-    agentDir,
-    resourceLoader: loader,
-    settingsManager,
-    modelRuntime,
-    noTools: "all",
-    sessionManager: sdk.SessionManager.inMemory(root),
+  const common = { cwd: root, agentDir, resourceLoader: loader, settingsManager, modelRuntime, noTools: "all" };
+  const initial = await sdk.createAgentSession({ ...common,
+    sessionManager: persisted ? sdk.SessionManager.create(root, path.join(root, "sessions")) : sdk.SessionManager.inMemory(root) });
+  let session = initial.session;
+  const services = { cwd: root, agentDir, resourceLoader: loader, settingsManager, modelRuntime };
+  const sessionRuntime = new sdk.AgentSessionRuntime(session, services, async (options) => {
+    // Replacement must create fresh ExtensionAPI closures, not reuse the invalidated loader cache.
+    await loader.reload();
+    return { ...await sdk.createAgentSession({ ...common, ...options }),
+      services: { ...services, cwd: options.cwd }, diagnostics: [] };
   });
-
   const runtimeErrors = [];
   const notices = [];
-  await session.bindExtensions({
+  const bindings = {
     mode,
     uiContext: { ...stubUiContext(notices), ...(driver ? { custom: (factory) => driver.custom(factory) } : {}), ...ui },
     onError: (error) => runtimeErrors.push(error),
-  });
+  };
+  sessionRuntime.setRebindSession(async (next) => { session = next; await next.bindExtensions(bindings); });
+  await session.bindExtensions(bindings);
 
   const probe = cursor(() => readJsonl(probeFile));
   const plugin = cursor(() => readJsonl(pluginFile));
@@ -369,7 +372,8 @@ async function makeHost({ label, extensions, projectTrusted = true, userConfig, 
     agentDir,
     probeFile,
     pluginFile,
-    session,
+    get session() { return session; },
+    sessionRuntime,
     modelRuntime,
     loadErrors,
     runtimeErrors,
@@ -496,7 +500,7 @@ async function makeHost({ label, extensions, projectTrusted = true, userConfig, 
 
     async dispose() {
       await host.drain();
-      await session.dispose();
+      await sessionRuntime.dispose();
     },
   };
 
@@ -1730,6 +1734,7 @@ const hookServer = http.createServer((req, res) => {
   });
   req.on("end", () => {
     hookRequests.push({ url: req.url, method: req.method, headers: req.headers, body });
+    if (req.url === "/machine-hang") return; // Deliberate backpressure, released by publisher disposal.
     res.writeHead(202, { "content-type": "text/plain" });
     res.end("accepted");
   });
@@ -1842,6 +1847,147 @@ await step("M3 反回退：lifecycle/rules 不碰渠道名，service 不认识 w
 });
 
 await webhookHost.dispose();
+
+// Machine API: real public hooks and real HTTP, independent of notification filtering.
+const machineConfig = {
+  version: 1, enabled: false,
+  api: { enabled: true, url: `http://127.0.0.1:${hookPort}/machine`, secretEnv: "PI_NOTIFY_TEST_WEBHOOK_SECRET", maxRetries: 0 },
+};
+const machineRows = () => hookRequests.filter((row) => row.url === "/machine").map((row) => ({ ...row, message: JSON.parse(row.body) }));
+const machineHost = await makeHost({ label: "machine", extensions: [PROBE_ENTRY, PLUGIN_ENTRY], userConfig: machineConfig, mode: "tui", driver: createUiDriver(), persisted: true });
+await machineHost.useModel("probe-fake", "fake-model");
+
+await step("N1 通知关闭仍发送完整事实；HMAC/隐私/工具失败快照", async () => {
+  machineHost.setModelDelay(250);
+  process.env.PROBE_ASSISTANT_TEXT = "PRIVATE_ASSISTANT_CONTENT";
+  const delta = await machineHost.promptWithToolFailures(["bash"], "PRIVATE_USER_CONTENT");
+  delete process.env.PROBE_ASSISTANT_TEXT; machineHost.setModelDelay(undefined);
+  assert.equal(delta.deliveries.length, 0);
+  const rows = machineRows();
+  const settled = rows.filter((row) => row.message.type === "run.settled");
+  assert.equal(settled.length, 1);
+  assert.equal(settled[0].message.data.status, "completed");
+  assert.deepEqual(settled[0].message.data.toolFailures, [{ toolName: "bash", count: 1 }]);
+  assert.ok(rows.some((row) => row.message.type === "session.started"));
+  assert.ok(rows.some((row) => row.message.type === "run.started"));
+  assert.ok(rows.some((row) => row.message.type === "tool.failed"));
+  assert.doesNotMatch(JSON.stringify(rows.map((row) => row.message)), /PRIVATE_USER_CONTENT|PRIVATE_ASSISTANT_CONTENT|labels|cwd/);
+  for (const row of rows) assert.equal(row.headers["x-pi-message-signature"], `sha256=${createHmac("sha256", WEBHOOK_SECRET).update(row.body).digest("hex")}`);
+});
+
+await step("N2 真实对话与压缩公开 hooks：独立 ID、before 只观察", async () => {
+  const before = machineRows().length;
+  await machineHost.command("/probe-prompt");
+  await machineHost.emit({ type: "session_before_compact", reason: "manual", willRetry: false, preparation: {}, branchEntries: [], signal: new AbortController().signal });
+  await machineHost.during(() => machineHost.emit({ type: "session_compact_failed", reason: "manual", aborted: true, willRetry: false, fromExtension: false }));
+  const messages = machineRows().slice(before).map((row) => row.message);
+  const opened = messages.find((row) => row.type === "prompt.opened");
+  const closed = messages.find((row) => row.type === "prompt.closed");
+  assert.ok(opened.promptId); assert.equal(opened.promptId, closed.promptId);
+  assert.equal(opened.snapshot.state, "blocked");
+  assert.equal(opened.runId, undefined);
+  const start = messages.find((row) => row.type === "compaction.started");
+  const end = messages.find((row) => row.type === "compaction.settled");
+  assert.equal(start.operationId, end.operationId);
+  assert.equal(end.data.status, "aborted"); assert.equal(end.runId, undefined);
+});
+
+await step("N3 reload/new/resume/fork 新 stream，旧实例不再发送结论", async () => {
+  const first = machineRows().find((row) => row.message.type === "session.started").message;
+  await machineHost.during(() => machineHost.session.reload());
+  await machineHost.prompt();
+  const starts = machineRows().filter((row) => row.message.type === "session.started").map((row) => row.message);
+  assert.equal(starts.length, 2); assert.equal(starts[0].sessionId, starts[1].sessionId);
+  assert.notEqual(starts[0].streamId, starts[1].streamId);
+  assert.equal(starts[1].seq, 1);
+  const latest = starts[1];
+  assert.equal(machineRows().filter((row) => row.message.type === "run.settled" && row.message.streamId === latest.streamId).length, 1);
+  const saved = machineHost.session.sessionFile;
+  const forkEntry = machineHost.session.getUserMessagesForForking()[0].entryId;
+  await machineHost.during(() => machineHost.sessionRuntime.fork(forkEntry));
+  const forked = machineRows().filter((row) => row.message.type === "session.started").at(-1).message;
+  assert.equal(forked.data.reason, "fork"); assert.notEqual(forked.streamId, latest.streamId);
+  await machineHost.during(() => machineHost.sessionRuntime.switchSession(saved));
+  const resumed = machineRows().filter((row) => row.message.type === "session.started").at(-1).message;
+  assert.equal(resumed.data.reason, "resume"); assert.equal(resumed.sessionId, first.sessionId);
+  assert.notEqual(resumed.streamId, forked.streamId);
+  await machineHost.during(() => machineHost.sessionRuntime.newSession());
+  const next = machineRows().filter((row) => row.message.type === "session.started").at(-1).message;
+  assert.notEqual(next.sessionId, first.sessionId); assert.notEqual(next.streamId, resumed.streamId);
+});
+await machineHost.dispose();
+
+const retryHost = await makeHost({ label: "machine-retry", extensions: [PROBE_ENTRY, PLUGIN_ENTRY], userConfig: machineConfig,
+  retry: { enabled: true, maxRetries: 1, baseDelayMs: 10 } });
+await retryHost.useModel("probe-retry", "retry-model");
+await step("N4 宿主真实重试：多个 agent_start、只一次 run.started/settled、完整成本", async () => {
+  const before = machineRows().length;
+  process.env.PROBE_COST_USD = "0.25";
+  const delta = await retryHost.prompt(); delete process.env.PROBE_COST_USD;
+  assert.ok(delta.probe.filter((row) => row.ev === "agent_start").length >= 2);
+  const messages = machineRows().slice(before).map((row) => row.message);
+  assert.equal(messages.filter((row) => row.type === "run.started").length, 1);
+  const final = messages.filter((row) => row.type === "run.settled");
+  assert.equal(final.length, 1); assert.equal(final[0].data.status, "completed");
+  assert.equal(final[0].data.costUsd, 0.5);
+});
+await retryHost.dispose();
+
+const cancelHost = await makeHost({ label: "machine-cancel", extensions: [PROBE_ENTRY, PLUGIN_ENTRY], userConfig: machineConfig });
+await cancelHost.useModel("probe-fake", "fake-model");
+await step("N5 宿主实际取消：run.settled aborted，保留最近取消结果", async () => {
+  const before = machineRows().length;
+  cancelHost.setModelDelay(250);
+  await cancelHost.during(async () => {
+    const prompt = cancelHost.session.prompt("cancel me");
+    await waitForProbeEvent(cancelHost, "agent_start");
+    await cancelHost.session.abort(); await prompt;
+  });
+  cancelHost.setModelDelay(undefined);
+  const final = machineRows().slice(before).map((row) => row.message).find((row) => row.type === "run.settled");
+  assert.equal(final.data.status, "aborted"); assert.equal(final.snapshot.lastRun.status, "aborted");
+});
+await cancelHost.dispose();
+
+process.env.PI_NOTIFY_DISABLE = "1";
+const silentMachineHost = await makeHost({ label: "machine-silent", extensions: [PROBE_ENTRY, PLUGIN_ENTRY], userConfig: machineConfig, mode: "tui", driver: createUiDriver() });
+await step("N6 强制静默零外发，但观察 waiting 仍更新", async () => {
+  const before = machineRows().length;
+  await silentMachineHost.emit({ type: "ui_prompt_start", reason: "ui_prompt", kind: "input", title: "PRIVATE_PROMPT_TITLE" });
+  const status = await statusViaUi(silentMachineHost);
+  assert.match(status, /正在等你输入/);
+  assert.match(status, /机器 API/);
+  assert.equal(machineRows().length, before);
+});
+await silentMachineHost.dispose(); delete process.env.PI_NOTIFY_DISABLE;
+
+const slowMachineHost = await makeHost({ label: "machine-slow", extensions: [PROBE_ENTRY, PLUGIN_ENTRY],
+  userConfig: { ...machineConfig, api: { ...machineConfig.api, url: `http://127.0.0.1:${hookPort}/machine-hang`, timeoutMs: 5000 } } });
+await slowMachineHost.useModel("probe-fake", "fake-model");
+await step("N7 慢 HTTP 不阻塞后续运行或非 quit 切换", async () => {
+  const started = performance.now();
+  await slowMachineHost.session.prompt("one"); await slowMachineHost.session.prompt("two");
+  assert.ok(performance.now() - started < 1500, "若 hook 等待 HTTP 将耗尽 5s 预算");
+  const reloadStart = performance.now(); await slowMachineHost.session.reload();
+  assert.ok(performance.now() - reloadStart < 1500);
+});
+await slowMachineHost.dispose();
+await step("N8 print/json/rpc 宿主模式：HTTP 可用，不写额外 stdout", async () => {
+  setStdoutTTY(false);
+  try {
+    for (const mode of ["print", "json", "rpc"]) {
+      const modeHost = await makeHost({ label: `machine-mode-${mode}`, extensions: [PROBE_ENTRY, PLUGIN_ENTRY], userConfig: machineConfig, mode });
+      await modeHost.useModel("probe-fake", "fake-model");
+      const before = machineRows().length;
+      const outputCursor = stdoutChunks.length;
+      await modeHost.prompt();
+      assert.equal(machineRows().slice(before).filter((row) => row.message.type === "run.settled").length, 1);
+      assert.equal(stdoutChunks.slice(outputCursor).join(""), "", `${mode} API 不可写 stdout`);
+      await modeHost.dispose();
+    }
+  } finally { setStdoutTTY(true); }
+});
+hookServer.closeAllConnections();
 await new Promise((resolve) => hookServer.close(resolve));
 delete process.env.PI_NOTIFY_TEST_WEBHOOK_SECRET;
 
@@ -1854,7 +2000,7 @@ globalThis.fetch = realFetch;
 if (failures === 0) {
   console.log(
     "\n通过：判定/去重/阻塞/reload（A–F,H）+ 配置读盘（I1–I9）+ 单一入口与三层值（J1–J14）"
-    + " + 合并/冷却（L0–L2）+ 工具失败/压缩失败/等待输入（K1–K6）+ Webhook（M1–M3）全部成立。",
+    + " + 合并/冷却（L0–L2）+ 工具失败/压缩失败/等待输入（K1–K6）+ Webhook（M1–M3）+ 机器 API（N1–N8）全部成立。",
   );
   fs.rmSync(TMP, { recursive: true, force: true });
   process.exit(0);

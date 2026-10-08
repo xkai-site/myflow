@@ -84,7 +84,13 @@ function globalNpmRoot(env) {
  * @param {{ argv?: string[], env?: NodeJS.ProcessEnv }} [options]
  */
 export function resolveSdkEntry({ argv = process.argv, env = process.env } = {}) {
-  const candidates = [argv[2], env.PI_SDK];
+  const explicit = argv[2] || env.PI_SDK;
+  if (explicit) {
+    const resolved = resolveCandidate(explicit);
+    if (!resolved) throw new Error(`显式指定的 PI_SDK 不存在: ${explicit}`);
+    return resolved;
+  }
+  const candidates = [];
   const piBin = resolvePiBin(env);
   if (piBin) candidates.push(path.join(path.dirname(piBin), SDK_RELATIVE_ENTRY));
   const npmRoot = globalNpmRoot(env);
@@ -116,6 +122,14 @@ export function resolveSdkEntry({ argv = process.argv, env = process.env } = {})
  * The shim is only a fallback for when the bundle entry does not exist.
  */
 export function resolvePiLaunch({ env = process.env } = {}) {
+  if (env.PI_SDK) {
+    const sdkEntry = resolveCandidate(env.PI_SDK);
+    if (!sdkEntry) throw new Error(`显式指定的 PI_SDK 不存在: ${env.PI_SDK}`);
+    const cliEntry = path.join(path.dirname(sdkEntry), "bundle", "cli.js");
+    if (!isFile(cliEntry)) throw new Error(`指定 SDK 缺少同版本 CLI: ${cliEntry}`);
+    return { launcher: "node+bundle", piBin: resolvePiBin(env) ?? cliEntry,
+      command: process.execPath, args: [cliEntry], shell: false };
+  }
   const piBin = resolvePiBin(env);
   if (!piBin) return undefined;
   const cliEntry = path.join(path.dirname(piBin), CLI_RELATIVE_ENTRY);
@@ -150,6 +164,8 @@ export function resolvePiPackageEntry(pkg, { sdkEntry = resolveSdkEntry() } = {}
   const candidates = [
     path.join(path.dirname(sdkEntry), "..", "node_modules", ...packageDir, "dist", "index.js"),
     path.join(path.dirname(sdkEntry), "..", "..", ...packageDir, "dist", "index.js"),
+    // Scoped install: dist -> package -> @scope -> node_modules.
+    path.join(path.dirname(sdkEntry), "..", "..", "..", ...packageDir, "dist", "index.js"),
   ];
   for (const candidate of candidates) {
     if (isFile(candidate)) return candidate;

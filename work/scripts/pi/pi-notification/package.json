@@ -1,12 +1,12 @@
 {
   "name": "pi-notification",
   "version": "0.2.0",
-  "description": "Pi extension: native desktop notification when an agent run really settles",
+  "description": "Pi extension: settled-run notifications and read-only HTTP message API",
   "type": "module",
   "license": "MIT",
   "private": true,
   "scripts": {
-    "test": "node test/config-validation.mjs && node test/settings-patch.mjs && node test/registry-log.mjs && node test/lifecycle-state.mjs && node test/terminal-channel.mjs && node test/service-coalesce.mjs && node test/webhook-channel.mjs && node test/email-channel.mjs && node test/settings-ui.mjs && node test/host-lifecycle.mjs && node test/cli-smoke.mjs",
+    "test": "node test/config-validation.mjs && node test/settings-patch.mjs && node test/registry-log.mjs && node test/lifecycle-state.mjs && node test/terminal-channel.mjs && node test/service-coalesce.mjs && node test/webhook-channel.mjs && node test/message-api.mjs && node test/email-channel.mjs && node test/settings-ui.mjs && node test/host-lifecycle.mjs && node test/cli-smoke.mjs",
     "test:config": "node test/config-validation.mjs",
     "test:patch": "node test/settings-patch.mjs",
     "test:registry": "node test/registry-log.mjs",
@@ -14,13 +14,14 @@
     "test:terminal": "node test/terminal-channel.mjs",
     "test:service": "node test/service-coalesce.mjs",
     "test:webhook": "node test/webhook-channel.mjs",
+    "test:api": "node test/message-api.mjs",
     "test:email": "node test/email-channel.mjs",
     "test:ui": "node test/settings-ui.mjs",
     "test:host": "node test/host-lifecycle.mjs",
     "test:cli": "node test/cli-smoke.mjs"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": ">=1.1.0"
   },
   "keywords": [
     "pi-package",

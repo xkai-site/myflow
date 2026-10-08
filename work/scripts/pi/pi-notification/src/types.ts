@@ -42,6 +42,11 @@ export type UIPromptKind = "select" | "confirm" | "input" | "editor" | "custom";
 export type ToolFailureMode = "aggregate" | "immediate";
 
 export type SignalKind =
+  | "session_started"
+  | "session_updated"
+  | "state_snapshot"
+  | "compact_started"
+  | "compact_completed"
   | "run_started"
   | "assistant_message"
   | "tool_finished"
@@ -56,9 +61,14 @@ export interface SignalEvent {
   sessionId: string;
   /** epoch ms, from the injected clock */
   at: number;
+  reason?: string;
+  labels?: { sessionName?: string; projectName?: string };
+  contextPercent?: number;
   assistant?: {
     stopReason: AssistantStopReason | undefined;
     errorMessage?: string;
+    usageCostUsd?: number;
+    text?: string;
   };
   tool?: {
     toolCallId: string;
@@ -77,6 +87,7 @@ export interface SignalEvent {
   settled?: {
     /** Pi semantics: idle unless another extension has started a new run. */
     isIdle: boolean;
+    aborted?: boolean;
   };
   shutdown?: {
     reason: ShutdownReason;
@@ -94,6 +105,8 @@ export interface RunOutcome {
   runId: string;
   status: RunStatus;
   startedAt: number;
+  /** False for a run first observed through an assistant message. */
+  startObserved?: boolean;
   durationMs: number;
   /** Final assistant stopReason; undefined when it cannot be determined. */
   stopReason?: AssistantStopReason;
@@ -260,6 +273,8 @@ export interface ProviderConfig {
 
 export interface NotificationConfig {
   version: 1;
+  /** Independent read-only machine output; absent in legacy files means disabled. */
+  api: MessageApiConfig;
   enabled: boolean;
   /** Global threshold: notifications below this level are never delivered. */
   minLevel: NotifyLevel;
@@ -321,4 +336,109 @@ export interface Logger {
 export interface Deps {
   now(): number;
   log: Logger;
+}
+
+// Machine contracts are separate from NotificationRequest and its filtering semantics.
+export interface MessageApiConfig {
+  enabled: boolean;
+  url: string;
+  secretEnv: string;
+  headers: Record<string, string>;
+  includeLabels: boolean;
+  timeoutMs: number;
+  maxRetries: number;
+  queueLimit: number;
+}
+
+export type RuntimeState = "idle" | "working" | "blocked" | "done" | "error" | "unknown";
+export type CompactionReason = "manual" | "threshold" | "overflow";
+export type BlockingPromptKind = Exclude<UIPromptKind, "custom">;
+
+/** Wire-safe run summary: never contains assistant excerpts or raw context. */
+export interface MachineRun {
+  runId: string;
+  status: RunStatus;
+  startObserved: boolean;
+  startedAt?: number;
+  durationMs?: number;
+  stopReason?: AssistantStopReason;
+  errorMessage?: string;
+  toolFailures: ToolFailure[];
+  compactFailed?: boolean;
+  costUsd?: number;
+}
+
+export interface RuntimeSnapshot {
+  state: RuntimeState;
+  activeRun?: { runId: string; startObserved: boolean; startedAt?: number };
+  lastRun?: MachineRun;
+  compaction?: { operationId: string; reason: CompactionReason };
+  lastOperation?: { operationId: string; reason: CompactionReason; status: "completed" | "failed" | "aborted" };
+  prompts: Array<{ promptId: string; kind: BlockingPromptKind }>;
+  sessionCostUsd?: number;
+}
+
+export interface MessageDataMap {
+  "session.started": { reason: string; coverage: { agent: "settled"; compaction: "public-hooks"; prompts: "extension-ui-only"; heartbeat: false } };
+  "session.updated": Record<string, never>;
+  "session.ended": { reason: ShutdownReason };
+  "run.started": { startObserved: boolean };
+  "run.settled": MachineRun;
+  "tool.failed": { toolName: string; count: number };
+  "compaction.started": { reason: CompactionReason };
+  "compaction.settled": { reason: CompactionReason; status: "completed" | "failed" | "aborted"; errorMessage?: string };
+  "prompt.opened": { kind: BlockingPromptKind };
+  "prompt.closed": { kind: BlockingPromptKind };
+  "state.snapshot": Record<string, never>;
+}
+export type MessageType = keyof MessageDataMap;
+export type RuntimeFact = { [K in MessageType]: {
+  type: K;
+  at: number;
+  runId?: string;
+  operationId?: string;
+  promptId?: string;
+  data: MessageDataMap[K];
+} }[MessageType];
+
+export type MessageEnvelope = { [K in MessageType]: {
+  source: "pi-notification";
+  schemaVersion: 1;
+  type: K;
+  eventId: string;
+  streamId: string;
+  seq: number;
+  sessionId: string;
+  runId?: string;
+  operationId?: string;
+  promptId?: string;
+  occurredAt: number;
+  data: MessageDataMap[K];
+  snapshot: RuntimeSnapshot;
+  labels?: { sessionName?: string; projectName?: string };
+} }[MessageType];
+
+export interface LifecycleUpdate {
+  facts: RuntimeFact[];
+  outcome?: RunOutcome;
+  toolFailure?: ToolFailureEvent;
+  compactFailure?: { sessionId: string; runId: string; operationId: string };
+  prompt?: { promptId: string; kind: BlockingPromptKind };
+}
+
+export interface ApiSnapshot {
+  enabled: boolean;
+  queued: number;
+  active: number;
+  delivered: number;
+  failed: number;
+  dropped: number;
+  lastError?: string;
+}
+export interface MessagePublisher {
+  /** Synchronous, bounded enqueue. Never awaits the sender. */
+  publish(envelope: MessageEnvelope): void;
+  flush(timeoutMs: number): Promise<void>;
+  dispose(): void;
+  snapshot(): ApiSnapshot;
 }

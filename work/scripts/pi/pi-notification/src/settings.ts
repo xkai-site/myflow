@@ -65,9 +65,14 @@ export function isEmptyOverlay(overlay: SessionOverlay): boolean {
  * hand. An entry with an empty patch/providers is a valid snapshot meaning “everything was cleared”
  * and is returned as such: dropping it would let a `/reload` resurrect the previous entry's choices.
  */
+function notificationPatch(patch: ConfigPatch): ConfigPatch {
+  const { api: _api, ...allowed } = structuredClone(patch);
+  return allowed;
+}
+
 export function overlayFromEntry(value: unknown): SessionOverlay | undefined {
   if (!isPlainObject(value)) return undefined;
-  const patch = isPlainObject(value.patch) ? (value.patch as ConfigPatch) : {};
+  const patch = isPlainObject(value.patch) ? notificationPatch(value.patch as ConfigPatch) : {};
   const providers: Record<string, boolean> = {};
   if (isPlainObject(value.providers)) {
     for (const [id, enabled] of Object.entries(value.providers)) {
@@ -87,7 +92,7 @@ export const SESSION_OVERLAY_ENTRY = "notify-session-overlay";
 
 /** Session snapshot: only non-sensitive options are exposed by the settings items. */
 export function overlayEntryData(sessionId: string | undefined, overlay: SessionOverlay, at: number) {
-  return { sessionId, patch: overlay.patch, providers: overlay.providers, providerOptions: overlay.providerOptions, at };
+  return { sessionId, patch: notificationPatch(overlay.patch), providers: overlay.providers, providerOptions: overlay.providerOptions, at };
 }
 
 /**
@@ -123,7 +128,7 @@ export function applyOverlay(
   overlay: SessionOverlay,
 ): { config: NotificationConfig; problems: ConfigProblem[] } {
   if (isEmptyOverlay(overlay)) return { config: base, problems: [] };
-  const raw: ConfigPatch = structuredClone(overlay.patch);
+  const raw: ConfigPatch = notificationPatch(overlay.patch);
   if (Object.keys(overlay.providerOptions ?? {}).length > 0 || Object.keys(overlay.providers).length > 0) {
     raw.providers = base.providers.map((provider) => {
       const options = overlay.providerOptions?.[provider.id];

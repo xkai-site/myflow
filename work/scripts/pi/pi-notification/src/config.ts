@@ -22,6 +22,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import { isPlainObject, mergePatch, removeArrayEntryField, removePath, removeProviderOption, type ConfigPatch } from "./patch.ts";
+import { validateHttpOptions } from "./providers/http.ts";
 
 import type {
   NotificationConfig,
@@ -69,7 +70,7 @@ export interface ConfigLoadResult {
   config: NotificationConfig;
   /** Sources actually in effect, shown by the status view for diagnosis. */
   sources: string[];
-  /** Fatal parse or validation problems that trigger degradation. */
+  /** Parse/validation diagnostics. API-only problems disable that output, not notifications. */
   errors: ConfigProblem[];
   /** Non-fatal problems, such as unknown fields. */
   warnings: ConfigProblem[];
@@ -96,6 +97,8 @@ export function userConfigPath(agentDir: string): string {
 export function defaultConfig(): NotificationConfig {
   return {
     version: CONFIG_VERSION,
+    api: { enabled: false, url: "", secretEnv: "", headers: {}, includeLabels: false,
+      timeoutMs: 5000, maxRetries: 1, queueLimit: 100 },
     enabled: true,
     minLevel: "info",
     rules: {
@@ -428,6 +431,43 @@ export function mergeConfig(base: NotificationConfig, raw: unknown, source: stri
 
   const config: NotificationConfig = structuredClone(base);
 
+  if (raw.api !== undefined) {
+    const firstError = errors.length;
+    if (!isPlainObject(raw.api)) errors.push({ path: "api", message: "必须是对象" });
+    else {
+      const api = raw.api;
+      for (const key of ["enabled", "includeLabels"] as const) {
+        if (api[key] === undefined) continue;
+        if (typeof api[key] !== "boolean") errors.push({ path: `api.${key}`, message: "必须是布尔值" });
+        else config.api[key] = api[key];
+      }
+      for (const key of ["url", "secretEnv"] as const) {
+        if (api[key] === undefined) continue;
+        if (typeof api[key] !== "string") errors.push({ path: `api.${key}`, message: "必须是字符串" });
+        else config.api[key] = api[key].trim();
+      }
+      for (const [key, min, max] of [["timeoutMs", 1, 120000], ["maxRetries", 0, 10], ["queueLimit", 1, 1000]] as const) {
+        const value = api[key];
+        if (value === undefined) continue;
+        if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+          errors.push({ path: `api.${key}`, message: `必须是 ${min}..${max} 的整数` });
+        } else config.api[key] = value;
+      }
+      if (api.headers !== undefined) {
+        if (!isPlainObject(api.headers) || Object.values(api.headers).some((value) => typeof value !== "string")) {
+          errors.push({ path: "api.headers", message: "必须是字符串 → 字符串对象" });
+        } else config.api.headers = { ...api.headers } as Record<string, string>;
+      }
+      // Syntax validation is independent of current credential availability. The sender checks
+      // the actual environment before EVERY attempt (including a secret removed at runtime).
+      const problem = validateHttpOptions({ ...config.api,
+        url: config.api.url || (!config.api.enabled ? "http://127.0.0.1/" : "") },
+        config.api.secretEnv ? { [config.api.secretEnv]: "validation-only" } : {});
+      if (problem) errors.push({ path: "api", message: problem });
+    }
+    if (errors.length > firstError) config.api.enabled = false;
+  }
+
   if (raw.version !== undefined && raw.version !== CONFIG_VERSION) {
     errors.push({ path: "version", message: `只支持 version ${CONFIG_VERSION}，实际是 ${JSON.stringify(raw.version)}` });
   }
@@ -536,8 +576,8 @@ function readJsonFile(file: string): { ok: true; value: unknown } | { ok: false;
 /**
  * Loads the effective config: built-in defaults, then the sparse user file.
  *
- * A fatal problem in either layer degrades the whole config to the safe subset instead of
- * switching notifications off, and keeps the reason for the status view. The
+ * Notification errors degrade to the safe subset; API-only errors disable the API independently.
+ * Reasons remain visible in the status view. The
  * per-conversation overlay is applied later by `settings.ts`.
  */
 export function loadConfig(options: ReadConfigOptions): ConfigLoadResult {
@@ -560,8 +600,13 @@ export function loadConfig(options: ReadConfigOptions): ConfigLoadResult {
     sources.push(`${userPath}（读取失败）`);
   }
 
-  if (errors.length > 0) {
-    return { config: degradedConfig(), sources, errors, warnings, degraded: true };
+  const notificationErrors = errors.filter((problem) => problem.path !== "api" && !problem.path.startsWith("api."));
+  if (notificationErrors.length > 0) {
+    const fallback = degradedConfig();
+    // A valid explicitly enabled API is independent of notification rule degradation. Invalid
+    // JSON/root/version never acquires an endpoint from a partially understood configuration.
+    if (!notificationErrors.some((problem) => problem.path === "version" || problem.path === userPath)) fallback.api = config.api;
+    return { config: fallback, sources, errors, warnings, degraded: true };
   }
   return { config, sources, errors, warnings, degraded: false };
 }

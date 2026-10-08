@@ -37,7 +37,7 @@ import { createDefaultTerminalIo, selectTerminalChannel } from "./providers/term
 import { evaluateRunOutcome } from "./rules.ts";
 import { builtinDefaultValue, clearItemOverride, emailTestBlockReason, QQ_MAIL_URL, sessionOverrideValue, setPatchPath, channelUserFilePatch, providerOptionUserFilePatch, type SessionOverlay } from "./settings.ts";
 import { NotifySettingsComponent, type ItemValue, type NotifySettingsSummary, type SettingsHost, type SettingsRestriction } from "./ui.ts";
-import type { Logger, NotificationConfig, NotificationService, RunOutcome, RunSummary } from "./types.ts";
+import type { ApiSnapshot, Logger, NotificationConfig, NotificationService, RunOutcome, RunSummary } from "./types.ts";
 
 export interface CommandDeps {
   log: Logger;
@@ -53,6 +53,7 @@ export interface CommandDeps {
   sessionId(): string | undefined;
   /** True while a user prompt is open. */
   isWaitingForUser?(): boolean;
+  apiSnapshot?(): ApiSnapshot;
   /** Session overlay; the command layer only reads it, writes go through `setOverlay`. */
   overlay(): SessionOverlay;
   /** Writes the overlay: applies the effective config and persists a session entry. */
@@ -96,6 +97,12 @@ function formatStatus(deps: CommandDeps): string {
     + ` / 合并 ${snapshot.coalesced} / 冷却 ${snapshot.cooled}`
     + ` / 丢弃 ${snapshot.dropped} / 在队 ${snapshot.queued} / 在途 ${snapshot.active}`,
   );
+  const api = deps.apiSnapshot?.();
+  lines.push(`  机器 API（独立开关）: 配置${config.api.enabled ? "开启" : "关闭"} / 当前${api?.enabled ? "开启" : "关闭"}${forcedOff(deps) ? "（强制静默：通知与 API 均不外发）" : ""}`);
+  if (api) {
+    lines.push(`  API 统计: 成功 ${api.delivered} / 失败 ${api.failed} / 丢弃 ${api.dropped} / 在队 ${api.queued} / 在途 ${api.active}；best-effort，无补发/心跳`);
+    if (api.lastError) lines.push(`  API 错误: ${sanitizeError(api.lastError)}`);
+  }
   for (const [providerId, counts] of Object.entries(snapshot.byProvider)) {
     lines.push(`  渠道 ${providerId}: 成功 ${counts.delivered} / 失败 ${counts.failed} / 跳过 ${counts.skipped}`);
   }
@@ -127,7 +134,8 @@ function report(ctx: ExtensionCommandContext, text: string, type: "info" | "warn
 function configView(config: NotificationConfig): string {
   // Provider options may hold arbitrary header or query credentials; never guess secret names
   // with a regex.
-  const visible = { ...config, providers: config.providers.map(({ options: _options, ...provider }) => ({ ...provider, options: "[隐藏，请在配置文件查看]" })) };
+  const visible = { ...config, api: { enabled: config.api.enabled, options: "[隐藏，请在用户配置文件查看]" },
+    providers: config.providers.map(({ options: _options, ...provider }) => ({ ...provider, options: "[隐藏，请在配置文件查看]" })) };
   return sanitize(JSON.stringify(visible, null, 2), 12000);
 }
 

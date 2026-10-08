@@ -127,6 +127,8 @@ await step("format：结构化载荷只含元数据（不含 prompt / 完整回�
   assert.deepEqual(Object.keys(payload).sort(), [
     "at", "body", "dedupeKey", "event", "level", "runId", "sessionId", "source", "title", "version",
   ]);
+  const timed = webhook.buildWebhookPayload(request({ meta: { sessionId: "s", runId: "1", level: "error", durationMs: 0 } }), 123);
+  assert.deepEqual(timed, { ...payload, at: 123, durationMs: 0 }, "v1 保留已知零耗时，不增加新 API 字段");
 });
 
 await step("send：真实 POST + HMAC 签名（签名对象是实际发送的字节）", async () => {

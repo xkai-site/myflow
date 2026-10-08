@@ -133,15 +133,11 @@ await step("L3 隐式 run：没有 agent_start 也能记录，并使用实例内
   assert.equal(harness.lifecycle.onSettled({ sessionId: "s1", isIdle: true })?.runId, "tok-2", "runId 必须自增");
 });
 
-await step("L4 无 run 的 settle：给出 orphan 键，且时钟回退时时长不为负", () => {
+await step("L4 无 run / 重复 settle 不造结论，时钟回退时时长不为负", () => {
   const harness = makeLifecycle("t3");
   harness.lifecycle.onSessionStart({ sessionId: "session-abcdef", reason: "startup" });
-  const orphan = harness.lifecycle.onSettled({ sessionId: "session-abcdef", isIdle: true });
-  assert.equal(orphan.runId, "t3-orphan-session-");
-  assert.equal(orphan.status, "unknown", "没有 stopReason 时不得当作完成");
-  assert.equal(orphan.durationMs, 0);
-  assert.deepEqual(orphan.toolFailures, []);
-  assert.equal(orphan.stopReason, undefined);
+  assert.equal(harness.lifecycle.onSettled({ sessionId: "session-abcdef", isIdle: true }), null);
+  assert.equal(harness.records.at(-1).status, "no_active_run");
 
   const backwards = makeLifecycle();
   startRun(backwards);
@@ -204,8 +200,9 @@ await step("L6 工具失败与压缩失败：失败计数、累积顺序与标�
 
   const abandoned = makeLifecycle();
   abandoned.lifecycle.onSessionStart({ sessionId: "s1", reason: "startup" });
-  assert.equal(abandoned.lifecycle.onCompactFailed({ sessionId: "s1", reason: "overflow", aborted: false })?.runId, "tok-1");
-  assert.equal(abandoned.lifecycle.onSettled({ sessionId: "s1", isIdle: true }).compactFailed, true, "没有 agent_start 时也要保留压缩失败");
+  assert.equal(abandoned.lifecycle.onCompactFailed({ sessionId: "s1", reason: "overflow", aborted: false })?.operationId, "tok-compact-1");
+  assert.equal(abandoned.lifecycle.onSettled({ sessionId: "s1", isIdle: true }), null, "独立压缩不得造 agent run");
+  assert.equal(abandoned.lifecycle.snapshot().lastOperation.status, "failed");
 });
 
 await step("L7 等待输入计数：custom 不计、多余的 end 不会变负、shutdown 兜底复位", () => {
@@ -227,7 +224,7 @@ await step("L7 等待输入计数：custom 不计、多余的 end 不会变负�
   assert.equal(harness.lifecycle.isWaitingForUser(), false, "强杀可能不发 end，shutdown 必须复位");
 });
 
-await step("L8 摘录与错误消息：只保留最后一条非空文本，错误原文交给上层脱敏", () => {
+await step("L8 摘录与错误消息：只保留最后一条非空文本，失败说明在观察时脱敏", () => {
   const harness = makeLifecycle();
   startRun(harness);
   harness.lifecycle.onAssistantMessage({ sessionId: "s1", stopReason: "stop", text: "第一条" });
@@ -238,6 +235,45 @@ await step("L8 摘录与错误消息：只保留最后一条非空文本，错�
   assert.equal(outcome.assistantExcerpt, "最后一条", "空文本不得覆盖已有摘录");
   assert.equal(outcome.errorMessage, "provider 500");
   assert.equal(outcome.status, "failed");
+});
+
+await step("L9 多 start 同一逻辑 run：保留工具失败、成本、开始时间；aborted 优先", () => {
+  const h = makeLifecycle(); startRun(h);
+  h.lifecycle.onToolExecutionEnd({ sessionId: "s1", toolName: "bash", isError: true, toolCallId: "tool-1" });
+  assert.equal(h.lifecycle.onToolExecutionEnd({ sessionId: "s1", toolName: "bash", isError: true, toolCallId: "tool-1" }), null);
+  h.lifecycle.onAssistantMessage({ sessionId: "s1", stopReason: "error", errorMessage: "retry error", usageCostUsd: 0.1 });
+  h.advance(500); h.lifecycle.onAgentStart({ sessionId: "s1" });
+  h.lifecycle.onAssistantMessage({ sessionId: "s1", stopReason: "stop", usageCostUsd: 0.2 });
+  const run = h.lifecycle.onSettled({ sessionId: "s1", isIdle: true });
+  assert.equal(run.runId, "tok-1"); assert.equal(run.durationMs, 500);
+  assert.ok(Math.abs(run.costUsd - 0.3) < 1e-9);
+  assert.equal(run.status, "completed"); assert.equal(run.errorMessage, undefined);
+  assert.deepEqual(run.toolFailures, [{ toolName: "bash", count: 1 }]);
+  assert.equal(h.lifecycle.onSettled({ sessionId: "s1", isIdle: true }), null);
+  h.lifecycle.onAgentStart({ sessionId: "s1" });
+  assert.equal(h.lifecycle.onSettled({ sessionId: "s1", isIdle: true, aborted: true }).status, "aborted");
+});
+
+await step("L10 事实/快照：压缩与 prompt 独立，关闭 prompt 恢复 working，custom 排除", () => {
+  const h = makeLifecycle();
+  const observe = (kind, extra = {}) => h.lifecycle.observe({ kind, sessionId: "s1", at: h.now(), ...extra });
+  observe("session_started");
+  const op = observe("compact_started", { compact: { reason: "manual", aborted: false } }).facts[0];
+  assert.equal(op.runId, undefined); assert.equal(h.lifecycle.snapshot().state, "working");
+  const prompt = observe("ui_prompt_start", { uiPrompt: { kind: "input", title: "private title" } }).facts[0];
+  assert.equal(h.lifecycle.snapshot().state, "blocked");
+  const ended = observe("ui_prompt_end", { uiPrompt: { kind: "input" } }).facts[0];
+  assert.equal(ended.promptId, prompt.promptId); assert.equal(h.lifecycle.snapshot().state, "working");
+  const compact = observe("compact_completed", { compact: { reason: "manual", aborted: false } }).facts[0];
+  assert.equal(compact.operationId, op.operationId); assert.equal(compact.runId, undefined);
+  assert.equal(observe("run_settled", { settled: { isIdle: true } }).facts.length, 0);
+  assert.equal(observe("ui_prompt_start", { uiPrompt: { kind: "custom" } }).facts.length, 0);
+  assert.equal(observe("ui_prompt_end", { uiPrompt: { kind: "custom" } }).facts.length, 0);
+  observe("assistant_message", { assistant: { stopReason: "stop", text: "private reply" } });
+  const implicit = observe("run_settled", { settled: { isIdle: true } }).facts[0];
+  assert.equal(implicit.data.startObserved, false); assert.equal(implicit.data.startedAt, undefined);
+  assert.equal(implicit.data.durationMs, undefined);
+  assert.doesNotMatch(JSON.stringify(h.lifecycle.snapshot()), /private/);
 });
 
 /** Service harness: injected clock, controllable channel factory and no coalescing noise. */

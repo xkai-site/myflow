@@ -101,14 +101,15 @@ function buildStream(model, mode) {
     ? (run) => setTimeout(run, delay)
     : (run) => queueMicrotask(run);
   schedule(() => {
-    if (mode === "error") {
+    if (mode === "error" || mode === "retry-error") {
       stream.push({
         type: "error",
         reason: "error",
         error: assistantMessage(model, {
           content: [],
           stopReason: "error",
-          errorMessage: "Mock provider failure: invalid_request_error (probe-fail)",
+          errorMessage: mode === "retry-error" ? "429 Too Many Requests: rate limit (probe-retry)"
+            : "Mock provider failure: invalid_request_error (probe-fail)",
         }),
       });
       return;
@@ -125,13 +126,14 @@ function buildStream(model, mode) {
 }
 
 function providerConfig(modelId, mode) {
+  let calls = 0;
   return {
     baseUrl: "http://127.0.0.1:9/v1",
     apiKey: "dummy-not-a-secret",
     api: "openai-completions",
     models: [mockModel(modelId)],
     streamSimple(model) {
-      return buildStream(model, mode);
+      return buildStream(model, mode === "retry" ? (++calls === 1 ? "retry-error" : "ok") : mode);
     },
   };
 }
@@ -139,6 +141,7 @@ function providerConfig(modelId, mode) {
 export default function probeExtension(pi) {
   pi.registerProvider("probe-fake", providerConfig("fake-model", "ok"));
   pi.registerProvider("probe-fail", providerConfig("fail-model", "error"));
+  pi.registerProvider("probe-retry", providerConfig("retry-model", "retry"));
 
   pi.registerCommand("probe-cmd", {
     description: "probe: 纯命令，不进入 agent 生命周期",

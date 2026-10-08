@@ -23,7 +23,8 @@
  */
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -78,7 +79,7 @@ function readJsonl(file) {
 }
 
 /** Runs the real CLI once; returns stdout/stderr/exit code plus both JSONL logs. */
-function runPi({ label, args, userConfig, preserveConfig = false }) {
+function runPi({ label, args, userConfig, preserveConfig = false, asyncLaunch = false, extraEnv = {} }) {
   const configDir = path.join(AGENT_DIR, "pi-notification");
   const configFile = path.join(configDir, "config.json");
   if (preserveConfig) {
@@ -103,24 +104,24 @@ function runPi({ label, args, userConfig, preserveConfig = false }) {
     PI_SKIP_VERSION_CHECK: "1",
     PROBE_LOG: probeLog,
     PI_NOTIFY_LOG_FILE: pluginLog,
+    ...extraEnv,
   };
-  const result = spawnSync(piLaunch.command, [...piLaunch.args, ...args], {
-    cwd: TMP, // 刻意不用仓库目录：避免加载项目级 .pi 资源与 trust 交互
-    env,
-    encoding: "utf8",
-    timeout: 120_000,
-    windowsHide: true,
-    shell: piLaunch.shell,
-  });
-  return {
-    status: result.status,
-    signal: result.signal,
-    error: result.error,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-    probe: readJsonl(probeLog),
-    plugin: readJsonl(pluginLog),
-  };
+  const options = { cwd: TMP, env, encoding: "utf8", timeout: 120_000, windowsHide: true, shell: piLaunch.shell };
+  const collect = (result) => ({ status: result.status, signal: result.signal, error: result.error,
+    stdout: result.stdout ?? "", stderr: result.stderr ?? "", probe: readJsonl(probeLog), plugin: readJsonl(pluginLog) });
+  if (asyncLaunch) {
+    // Keep the parent event loop alive to serve loopback HTTP while the real CLI runs.
+    return new Promise((resolve) => {
+      const child = spawn(piLaunch.command, [...piLaunch.args, ...args], options);
+      let stdout = "", stderr = "", error;
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      child.on("error", (err) => { error = err; });
+      child.on("close", (status, signal) => resolve(collect({ status, signal, error, stdout, stderr })));
+      child.stdin.end();
+    });
+  }
+  return collect(spawnSync(piLaunch.command, [...piLaunch.args, ...args], options));
 }
 
 const EXTENSIONS = ["-e", PROBE_ENTRY, "-e", PLUGIN_ENTRY];
@@ -358,6 +359,43 @@ await step("N 非 TUI 的 /notify 在 stderr 输出路径/值，stdout 保持干
   assert.ok(!run.probe.some((r) => r.ev === "agent_start"));
   assert.ok(!fs.existsSync(path.join(AGENT_DIR, "pi-notification", "config.json")));
 });
+
+// Real print/json CLI pushes, with stdout remaining the host protocol rather than our API.
+const apiRequests = [];
+const apiServer = http.createServer((req, res) => {
+  let body = ""; req.on("data", (chunk) => { body += chunk; });
+  req.on("end", () => { apiRequests.push(JSON.parse(body)); res.writeHead(202); res.end(); });
+});
+await new Promise((resolve) => apiServer.listen(0, "127.0.0.1", resolve));
+try {
+  const userConfig = { enabled: false, api: { enabled: true, url: `http://127.0.0.1:${apiServer.address().port}/messages`, maxRetries: 0 }, shutdownFlushMs: 1000 };
+  for (const mode of ["print", "json"]) {
+    await step(`O ${mode} CLI：HTTP 可工作，stdout 无额外消息/OSC`, async () => {
+      const before = apiRequests.length;
+      const run = await runPi({ label: `api-${mode}`, asyncLaunch: true, userConfig,
+        args: ["--no-session", "--approve", "--no-tools", "--model", "probe-fake/fake-model", ...EXTENSIONS,
+          ...(mode === "json" ? ["--mode", "json"] : []), "-p", "只回复 OK"] });
+      assertCleanExit(`O ${mode}`, run);
+      assert.equal(run.plugin.filter((row) => row.event === "delivery").length, 0);
+      const messages = apiRequests.slice(before);
+      assert.equal(messages.filter((item) => item.type === "run.settled").length, 1);
+      assert.equal(messages.find((item) => item.type === "run.settled").data.status, "completed");
+      assert.doesNotMatch(run.stdout, /pi-notification|schemaVersion|\u001b|7501/);
+      if (mode === "json") for (const line of run.stdout.split("\n").filter(Boolean)) assert.doesNotThrow(() => JSON.parse(line));
+    });
+  }
+  await step("O2 --no-notify / PI_NOTIFY_DISABLE：真实 CLI 零 API 外发，状态仍结算", async () => {
+    for (const envDisabled of [false, true]) {
+      const before = apiRequests.length;
+      const run = await runPi({ label: `api-silent-${envDisabled}`, asyncLaunch: true, userConfig,
+        extraEnv: { PI_NOTIFY_DISABLE: envDisabled ? "1" : "0" },
+        args: ["--no-session", "--approve", "--no-tools", ...(envDisabled ? [] : ["--no-notify"]), "--model", "probe-fake/fake-model", ...EXTENSIONS, "-p", "只回复 OK"] });
+      assertCleanExit("O2", run);
+      assert.equal(apiRequests.length, before);
+      assert.ok(run.plugin.some((row) => row.event === "run_settled" && row.status === "completed"));
+    }
+  });
+} finally { apiServer.closeAllConnections(); await new Promise((resolve) => apiServer.close(resolve)); }
 
 // ---------------------------------------------------------------------------
 

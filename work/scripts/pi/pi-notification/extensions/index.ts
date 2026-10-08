@@ -2,9 +2,8 @@
  * Plugin entry point: thin wiring only (register, convert shapes, forward). No judgement logic
  * and no network access here.
  *
- * Registered hooks, all notification-only: session_start, agent_start, message_end (read-only),
- * agent_settled, session_shutdown, tool_execution_end, session_compact_failed, ui_prompt_start
- * and ui_prompt_end; plus one command (`/notify`) and one CLI flag (`--no-notify`).
+ * Public hooks feed one plain-data runtime; machine HTTP facts and human notifications are
+ * independent outputs. No OSC 7501 parser/emitter or control API.
  *
  * Three hard constraints:
  *  - The only exit is `agent_settled`; `agent_end` must never be registered because retries,
@@ -24,6 +23,7 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { basename } from "node:path";
+import { randomUUID } from "node:crypto";
 
 import { handleNotifyCommand } from "../src/commands.ts";
 import {
@@ -33,7 +33,7 @@ import {
   readUserConfigRaw,
   type ConfigLoadResult,
 } from "../src/config.ts";
-import { createLifecycle } from "../src/lifecycle.ts";
+import { createRuntime } from "../src/runtime.ts";
 import { createLogger } from "../src/log.ts";
 import { withReliability } from "../src/providers/decorators.ts";
 import { createDebugNotifier } from "../src/providers/debug.ts";
@@ -41,12 +41,6 @@ import { createEmailNotifier } from "../src/providers/email.ts";
 import { createRegistry } from "../src/providers/registry.ts";
 import { createTerminalNotifier } from "../src/providers/terminal.ts";
 import { createWebhookNotifier, type WebhookOptions } from "../src/providers/webhook.ts";
-import {
-  evaluateCompactFailure,
-  evaluateSettlement,
-  evaluateToolFailure,
-  evaluateWaitingForUser,
-} from "../src/rules.ts";
 import { createService } from "../src/service.ts";
 import {
   SESSION_OVERLAY_ENTRY,
@@ -57,10 +51,7 @@ import {
   restoreOverlayFromEntries,
   type SessionOverlay,
 } from "../src/settings.ts";
-import type { AssistantStopReason, Notifier, NotificationConfig, RunSummary, UIPromptKind } from "../src/types.ts";
-
-/** Instance token: keeps run ids and dedupe keys distinct across a reload. */
-const INSTANCE_TOKEN = Math.random().toString(36).slice(2, 8);
+import type { AssistantStopReason, CompactionReason, Notifier, NotificationConfig, SignalEvent, UIPromptKind } from "../src/types.ts";
 
 function isAssistantStopReason(value: unknown): value is AssistantStopReason {
   return (
@@ -111,6 +102,7 @@ function asPromptKind(value: unknown): UIPromptKind | undefined {
 
 export default function piNotification(pi: ExtensionAPI): void {
   const log = createLogger();
+  const INSTANCE_TOKEN = randomUUID();
 
   // Read the user defaults in the factory, and finish registration even when that fails so
   // `/notify` is always available.
@@ -158,17 +150,16 @@ export default function piNotification(pi: ExtensionAPI): void {
     reliable(createEmailNotifier(id, (options ?? {}) as Record<string, unknown>, {
       log, maxChars: config.content.maxMessageChars, timeoutMs: config.delivery.timeoutMs,
     })));
-  // Generic HTTP POST channel, the only type that needs credentials and the network.
+  // Legacy notification HTTP channel; the machine stream has its own independent publisher.
   registry.register("webhook", (id, options) =>
     reliable(createWebhookNotifier(id, (options ?? {}) as WebhookOptions, { log, maxChars: config.content.maxMessageChars })));
 
   const service = createService({ config, registry, log, now: () => Date.now() });
-  const lifecycle = createLifecycle({
-    config,
-    log,
-    now: () => Date.now(),
-    instanceToken: INSTANCE_TOKEN,
+  const runtime = createRuntime({
+    config, service, log, now: () => Date.now(), instanceToken: INSTANCE_TOKEN,
+    isSilenced: () => pi.getFlag("no-notify") === true || isDisabledByEnv(),
   });
+  const lifecycle = runtime.lifecycle;
 
   let currentSessionId: string | undefined;
   /**
@@ -178,9 +169,16 @@ export default function piNotification(pi: ExtensionAPI): void {
   let sessionName: string | undefined;
   /** Project directory name, used as the fallback label when the session has no name. */
   let projectName: string | undefined;
-  /** Stable dedupe keys for notifications that have no run context, kept separate from run keys. */
-  let promptSeq = 0;
-  let compactSeq = 0;
+  function observe(ctx: ExtensionContext, kind: SignalEvent["kind"], extra: Partial<SignalEvent> = {}): void {
+    const sessionId = sessionIdOf(ctx);
+    if (sessionId) runtime.handle({ ...extra, kind, sessionId, at: Date.now() });
+  }
+  function isIdleOf(ctx: ExtensionContext): boolean {
+    try { return ctx.isIdle(); } catch { return true; }
+  }
+  function compactReason(value: unknown): CompactionReason {
+    return value === "overflow" || value === "threshold" ? value : "manual";
+  }
 
   /** A stale `ctx` throws after a session switch or reload, so every access is defended. */
   function sessionIdOf(ctx: ExtensionContext | undefined): string | undefined {
@@ -228,6 +226,8 @@ export default function piNotification(pi: ExtensionAPI): void {
     config.delivery = effective.delivery;
     config.shutdownFlushMs = effective.shutdownFlushMs;
     config.providers = effective.providers;
+    config.api = effective.api;
+    runtime.updateConfig();
     log.record({
       event: "config_loaded",
       reason,
@@ -299,7 +299,7 @@ export default function piNotification(pi: ExtensionAPI): void {
   }
 
   pi.registerFlag("no-notify", {
-    description: "本会话不发送消息通知（不改配置文件）",
+    description: "本会话不发送通知或机器 API 消息（不改配置文件）",
     type: "boolean",
     default: false,
   });
@@ -318,6 +318,7 @@ export default function piNotification(pi: ExtensionAPI): void {
           isSilenced: () => pi.getFlag("no-notify") === true,
           sessionId: () => currentSessionId,
           isWaitingForUser: () => lifecycle.isWaitingForUser(),
+          apiSnapshot: () => runtime.apiSnapshot(),
           overlay: () => overlay,
           setOverlay,
           userRaw: () => {
@@ -343,7 +344,6 @@ export default function piNotification(pi: ExtensionAPI): void {
     guard("session_start", () => {
       const sessionId = sessionIdOf(ctx) ?? "unknown";
       currentSessionId = sessionId;
-      lifecycle.onSessionStart({ sessionId, reason: event.reason });
       try {
         sessionName = pi.getSessionName() || undefined;
       } catch {
@@ -359,6 +359,8 @@ export default function piNotification(pi: ExtensionAPI): void {
 
       restoreOverlay(ctx, sessionId);
       reloadConfig(ctx, `session_start:${event.reason}`);
+      runtime.handle({ kind: "session_started", sessionId, at: Date.now(), reason: event.reason,
+        labels: { sessionName, projectName }, settled: { isIdle: isIdleOf(ctx) } });
 
       log.record({
         event: "plugin_session_start",
@@ -383,9 +385,7 @@ export default function piNotification(pi: ExtensionAPI): void {
 
   pi.on("agent_start", (_event, ctx) => {
     guard("agent_start", () => {
-      const sessionId = sessionIdOf(ctx);
-      if (!sessionId) return;
-      lifecycle.onAgentStart({ sessionId });
+      observe(ctx, "run_started");
     });
   });
 
@@ -401,185 +401,69 @@ export default function piNotification(pi: ExtensionAPI): void {
         usage?: { cost?: { total?: unknown } };
       };
       if (message?.role !== "assistant") return;
-      const sessionId = sessionIdOf(ctx);
-      if (!sessionId) return;
-      const text = assistantText(message.content);
-      lifecycle.onAssistantMessage({
-        sessionId,
+      const text = config.content.includeAssistantExcerpt ? assistantText(message.content) : undefined;
+      observe(ctx, "assistant_message", { assistant: {
         stopReason: isAssistantStopReason(message.stopReason) ? message.stopReason : undefined,
         ...(typeof message.errorMessage === "string" ? { errorMessage: message.errorMessage } : {}),
         ...(typeof message.usage?.cost?.total === "number" ? { usageCostUsd: message.usage.cost.total } : {}),
         ...(text !== undefined ? { text } : {}),
-      });
+      } });
     });
   });
 
   // Read-only: refreshes the body label when the session name changes. The name itself is never
   // recorded, only whether one exists.
-  pi.on("session_info_changed", (event) => {
+  pi.on("session_info_changed", (event, ctx) => {
     guard("session_info_changed", () => {
       const name = typeof event.name === "string" && event.name.trim() !== "" ? event.name : undefined;
       sessionName = name;
+      observe(ctx, "session_updated", { labels: { sessionName, projectName } });
       log.record({ event: "session_name_changed", hasName: name !== undefined });
     });
   });
 
-  // Tool failures: like settle, this only accumulates and enqueues, never awaits.
   pi.on("tool_execution_end", (event, ctx) => {
     guard("tool_execution_end", () => {
-      if (pi.getFlag("no-notify") === true) return;
-      if (event.isError !== true) return; // A successful execution never produces a notification.
-      const sessionId = sessionIdOf(ctx);
-      if (!sessionId) return;
-      const toolName = typeof event.toolName === "string" ? event.toolName : "";
-      if (toolName === "") return;
-      const failure = lifecycle.onToolExecutionEnd({ sessionId, toolName, isError: true });
-      if (!failure) return;
-      // The default `aggregate` mode stays quiet here and lets `evaluateSettlement` decide at settle time.
-      const rule = config.rules.toolFailed;
-      if (rule.mode !== "immediate") return;
-      if (failure.count < rule.threshold) return;
-      const request = evaluateToolFailure(
-        {
-          sessionId,
-          runId: failure.runId,
-          toolFailures: [{ toolName, count: failure.count }],
-          accumulated: failure.accumulated,
-          toolName,
-        },
-        config,
-      );
-      if (request) service.submit(request);
+      if (!event.toolName) return;
+      observe(ctx, "tool_finished", { tool: { toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError === true } });
     });
   });
 
-  // Compact failure: a manual `/compact` has no run that can settle, so it must be delivered right
-  // now, otherwise this most important context warning would never appear.
+  // Observation only: never return cancel/compaction or retain preparation/branch entries.
+  pi.on("session_before_compact", (event, ctx) => {
+    guard("session_before_compact", () => observe(ctx, "compact_started", { compact: { reason: compactReason(event.reason), aborted: false } }));
+  });
+  pi.on("session_compact", (event, ctx) => {
+    guard("session_compact", () => observe(ctx, "compact_completed", { compact: { reason: compactReason(event.reason), aborted: false } }));
+  });
   pi.on("session_compact_failed", (event, ctx) => {
-    guard("session_compact_failed", () => {
-      if (pi.getFlag("no-notify") === true) return;
-      const sessionId = sessionIdOf(ctx);
-      if (!sessionId) return;
-      const errorMessage = typeof event.errorMessage === "string" ? event.errorMessage : undefined;
-      const aborted = event.aborted === true;
-      const info = lifecycle.onCompactFailed({
-        sessionId,
-        reason: typeof event.reason === "string" ? event.reason : "unknown",
-        ...(errorMessage !== undefined ? { errorMessage } : {}),
-        aborted,
-      });
-      if (!info) return;
-      compactSeq += 1;
-      const request = evaluateCompactFailure(
-        {
-          sessionId,
-          runId: info.runId,
-          reason: typeof event.reason === "string" ? event.reason : "unknown",
-          ...(errorMessage !== undefined ? { errorMessage } : {}),
-          aborted,
-          seq: compactSeq,
-        },
-        config,
-      );
-      if (request) service.submit(request);
-    });
+    guard("session_compact_failed", () => observe(ctx, "compact_failed", { compact: {
+      reason: compactReason(event.reason), aborted: event.aborted === true,
+      ...(typeof event.errorMessage === "string" ? { errorMessage: event.errorMessage } : {}),
+    } }));
   });
 
-  // Waiting for user input: the allow-list and the permanent exclusion of `custom` are enforced by
-  // the rules and config layers; this handler only converts shapes.
   pi.on("ui_prompt_start", (event, ctx) => {
-    guard("ui_prompt_start", () => {
-      if (pi.getFlag("no-notify") === true) return;
-      const sessionId = sessionIdOf(ctx);
-      if (!sessionId) return;
-      const kind = asPromptKind(event.kind) ?? "custom";
-      const title = typeof event.title === "string" ? event.title : undefined;
-      lifecycle.onUiPromptStart({ sessionId, kind, ...(title ? { title } : {}) });
-      const rule = config.rules.waitingForUser;
-      if (!rule.enabled) return;
-      if (kind === "custom") return; // Permanently excluded: the loader and progress UI emit it too.
-      promptSeq += 1;
-      const request = evaluateWaitingForUser(
-        {
-          sessionId,
-          // Dedicated run id: sharing the session's coalescing window could swallow a waiting
-          // prompt into a completion notification.
-          runId: `${INSTANCE_TOKEN}-prompt-${promptSeq}`,
-          kind,
-          ...(title ? { title } : {}),
-          seq: promptSeq,
-        },
-        config,
-      );
-      if (request) service.submit(request);
-    });
+    guard("ui_prompt_start", () => observe(ctx, "ui_prompt_start", { uiPrompt: {
+      kind: asPromptKind(event.kind) ?? "custom", ...(typeof event.title === "string" ? { title: event.title } : {}),
+    } }));
   });
-
   pi.on("ui_prompt_end", (event, ctx) => {
-    guard("ui_prompt_end", () => {
-      const sessionId = sessionIdOf(ctx);
-      if (!sessionId) return;
-      // Start and end cannot be paired by kind: nested prompts emit only the outer span.
-      lifecycle.onUiPromptEnd({ sessionId, kind: asPromptKind(event.kind) ?? "custom" });
-    });
+    guard("ui_prompt_end", () => observe(ctx, "ui_prompt_end", { uiPrompt: { kind: asPromptKind(event.kind) ?? "custom" } }));
   });
 
-  // The only exit, and it must return synchronously: the handler is awaited, so any network
-  // delivery would delay the user's next input.
-  pi.on("agent_settled", (_event, ctx) => {
-    guard("agent_settled", () => {
-      if (pi.getFlag("no-notify") === true) return;
-      const sessionId = sessionIdOf(ctx);
-      if (!sessionId) return;
-      let isIdle = true;
-      try {
-        isIdle = ctx.isIdle();
-      } catch {
-        isIdle = true;
-      }
-      const outcome = lifecycle.onSettled({ sessionId, isIdle });
-      if (!outcome) return;
-      // Session-level metadata is assembled here because the rules layer is pure: it reads neither
-      // `ctx` nor a clock.
-      const percent = contextPercentOf(ctx);
-      const summary: RunSummary = {
-        runStatus: outcome.status,
-        durationMs: outcome.durationMs,
-        toolFailures: outcome.toolFailures,
-        ...(sessionName !== undefined ? { sessionName } : {}),
-        ...(projectName !== undefined ? { projectName } : {}),
-        cumulativeCostUsd: lifecycle.sessionCostUsd(),
-        ...(percent !== undefined ? { contextPercent: percent } : {}),
-      };
-      // At most one notification per run: the result wins, and aggregated tool failures only act as
-      // a fallback when there is no result notification.
-      const request = evaluateSettlement({ outcome, summary }, config);
-      if (!request) return;
-      service.submit(request); // Synchronous enqueue, then return immediately.
-    });
+  // Synchronous handle/enqueue: awaiting a sender here would block the next user input.
+  pi.on("agent_settled", (event, ctx) => {
+    guard("agent_settled", () => observe(ctx, "run_settled", {
+      settled: { isIdle: isIdleOf(ctx), aborted: event.aborted === true },
+      labels: { sessionName, projectName }, contextPercent: contextPercentOf(ctx),
+    }));
   });
 
   pi.on("session_shutdown", async (event) => {
-    try {
-      lifecycle.onShutdown(event.reason);
-      if (event.reason === "quit") {
-        // The only shutdown path allowed to wait, and it must stay within its budget.
-        await service.flush(config.shutdownFlushMs);
-      } else {
-        // reload/new/resume/fork: a conversation that has been left must not raise more notifications.
-        service.discardPending(event.reason);
-      }
-    } catch (error) {
-      log.log("error", "session_shutdown 处理失败（已忽略）", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      log.record({ event: "plugin_shutdown", instance: INSTANCE_TOKEN, reason: event.reason });
-      try {
-        await service.dispose();
-      } catch {
-        // A failed idempotent release must not bubble either.
-      }
-    }
+    try { await runtime.shutdown(event.reason); }
+    catch (error) {
+      log.log("error", "session_shutdown 处理失败（已忽略）", { error: error instanceof Error ? error.message : String(error) });
+    } finally { log.record({ event: "plugin_shutdown", instance: INSTANCE_TOKEN, reason: event.reason }); }
   });
 }
