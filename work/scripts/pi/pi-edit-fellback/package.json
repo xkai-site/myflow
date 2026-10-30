@@ -1,0 +1,20 @@
+{
+  "name": "pi-edit-fellback",
+  "version": "0.1.0",
+  "description": "Annotate ambiguous native edit failures with progressive recovery guidance",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "test:host": "node test/host.mjs",
+    "typecheck": "node test/typecheck.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "keywords": ["pi-package", "pi", "extension", "edit", "recovery"],
+  "pi": {
+    "extensions": ["./extensions/index.ts"]
+  }
+}

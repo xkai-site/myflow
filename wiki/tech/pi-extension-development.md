@@ -6,11 +6,6 @@
 
 当前扩展位于 `work/scripts/pi/`，每个插件是独立目录。现有插件通过 `package.json` 的 `pi.extensions` 显式声明入口，入口通常是 `extensions/index.ts`；复杂实现放在 `src/` 或 `extensions/`，测试放在 `test/`。
 
-- [pi-usage-openai](../../work/scripts/pi/pi-usage-openai/README.md)
-- [pi-image-generation](../../work/scripts/pi/pi-image-generation/README.md)
-- [pi-video-generation](../../work/scripts/pi/pi-video-generation/README.md)
-- [pi-notification](../../work/scripts/pi/pi-notification/README.md)
-
 ## Pi 扩展机制速览
 
 扩展是运行在 Pi 进程内的 TypeScript/JavaScript 模块。扩展默认导出工厂函数，Pi 将 `ExtensionAPI` 传入工厂；扩展通过该 API 注册命令、工具、事件处理器、provider、快捷键等能力。Pi 使用 `jiti` 加载本地 TS 扩展，无需单独编译。

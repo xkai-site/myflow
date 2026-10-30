@@ -10,6 +10,7 @@
 - [pi-image-generation](work/scripts/pi/pi-image-generation/README.md)
 - [pi-video-generation](work/scripts/pi/pi-video-generation/README.md)
 - [pi-notification](work/scripts/pi/pi-notification/README.md)
+- [pi-edit-fellback](work/scripts/pi/pi-edit-fellback/README.md)
 
 ## 安装与卸载
 
