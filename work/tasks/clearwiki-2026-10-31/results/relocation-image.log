@@ -1,0 +1,8 @@
+Command: npm run test:host (pi-image-generation)
+Exit code: 0
+
+
+> pi-image-generation@0.1.0 test:host
+> node test/host-lifecycle.mjs
+
+Host-backed offline checks passed: mocked generation/edit, safe transport diagnostics/logs through SDK and RPC, direct original links without HTML writes, historical entries/reload, preview failure, styled OSC 8 targets, wrapping, theme refresh, per-image TUI link deduplication and RPC/unsupported-terminal fallback.

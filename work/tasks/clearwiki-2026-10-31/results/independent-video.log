@@ -1,0 +1,40 @@
+Working directory: <isolated-plugin-root>/pi-video-generation
+Source: only this plugin directory, including its installed npm dependencies
+Host: existing Pi SDK installation, no repository-shared modules
+Command: npm run test
+Exit code: 0
+
+
+> pi-video-generation@0.1.0 test
+> npm run test:unit && npm run test:host
+
+
+> pi-video-generation@0.1.0 test:unit
+> node --test test/*.test.ts test/sdk.test.mjs
+
+✔ an unknown adapter fails loudly instead of resolving undefined (2.7952ms)
+✔ dashscope dispatch: submit parses the task, poll returns the video, cancel maps the status (54.7963ms)
+✔ submit surfaces a provider error without echoing the API key (1.2339ms)
+✔ submit rejects a success response without a task id (0.5337ms)
+✔ poll timeout aborts an in-flight request even without a caller signal (41.7381ms)
+✔ poll timeout also aborts a stalled response body (45.2149ms)
+✔ poll timeout interrupts the polling interval without aborting the caller (45.6272ms)
+✔ a response arriving after the deadline is not accepted as success (92.9959ms)
+✔ caller cancellation remains distinguishable from the poll timeout (2.7266ms)
+✔ completed polling intervals leave no abort listeners (57.8453ms)
+✔ host tests resolve explicit paths, URLs, managed releases and PATH installations (60.8629ms)
+✔ invalid config JSON never includes source text from files or the editor (25.0543ms)
+✔ IPv6 private-prefix checks do not reject ordinary public hostnames (11.3755ms)
+ℹ tests 13
+ℹ suites 0
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 985.7521
+
+> pi-video-generation@0.1.0 test:host
+> node test/output-preview.mjs
+
+Video output checks passed: persistent TUI link, RPC fallback, historical entries, invalid paths, OSC 8 targets/wrapping, theme/capability refresh, no file writes or network.

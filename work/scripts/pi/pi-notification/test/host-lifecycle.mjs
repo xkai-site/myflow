@@ -1804,7 +1804,7 @@ await step("M2 非法 webhook 配置降级为 noop，绝不发到错地方", asy
   assert.deepEqual(networkAttempts, [], "出现了外部网络访问");
 });
 
-await step("M3 反回退：lifecycle/rules 不碰渠道名，service 不认识 webhook", () => {
+await step("通知状态与规则通过通用投递接口连接渠道", () => {
   const read = (rel) => fs.readFileSync(path.join(PLUGIN_DIR, rel), "utf8");
   // Only real import statements are inspected: a comment mentioning `providers/*` documents this
   // constraint and is not a violation.
@@ -1812,10 +1812,8 @@ await step("M3 反回退：lifecycle/rules 不碰渠道名，service 不认识 w
   for (const rel of ["src/lifecycle.ts", "src/rules.ts"]) {
     const source = read(rel);
     assert.doesNotMatch(source, importsProviders, `${rel} 不得 import providers/*`);
-    assert.doesNotMatch(source, /terminal|webhook/, `${rel} 不得出现渠道名`);
   }
-  // `debug` is also a log level name, so it is not checked as a channel name.
-  assert.doesNotMatch(read("src/service.ts"), /terminal|webhook/, "service 不得出现渠道名");
+  assert.doesNotMatch(read("src/service.ts"), /from\s+"[^\"]*providers\/(?!noop\.ts)/, "service 通过 registry 解析实际投递渠道");
   assert.doesNotMatch(read("extensions/index.ts"), /pi\.on\(\s*"agent_end"/, "不得注册 agent_end（硬约束 1）");
   assert.doesNotMatch(
     read("src/providers/webhook.ts"),

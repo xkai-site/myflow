@@ -2,17 +2,16 @@
 
 通过 Pi 的 `/video` 斜杠命令生成视频：文生视频（t2v）、单首帧图生视频（i2v）、参考图生视频（r2v）。
 
-- **调用入口**是 Pi 命令，不是 Shell 命令；不触发 LLM 对话轮次。
-- **视频 Provider**由插件独立配置，不复用 Pi coding-model Provider，也不向 `/model` 注册视频模型。
-- **没有注册 LLM 工具**，Agent 不能直接 tool call；外部程序可通过下文 RPC `prompt` 分发命令。
-- 当前仅支持 `dashscope` 协议，模板使用 Qwen Token Plan 的三个 HappyHorse 模型；模型权限、地域可用性、额度及价格须以服务商当前说明为准，未在此保证线上可用。
+用户在 Pi 中输入命令，外部程序通过下文 RPC `prompt` 分发；命令直接处理视频任务。视频 Provider 与模型由插件独立配置。
+
+当前适配器为 `dashscope`，模板使用 Qwen Token Plan 的三个 HappyHorse 模型。模板定义本地可选项，线上权限、地域、额度和价格由服务商决定。
 
 ## 安装与首次调用
 
-需要已安装 Pi，Node.js ≥22.19.0。在仓库根目录的终端执行（本地路径安装，不复制插件）：
+需要已安装 Pi，Node.js ≥22.19.0。在本插件目录执行 PowerShell：
 
-```bash
-pi install ./work/scripts/pi/pi-video-generation
+```powershell
+pi install .
 pi list
 ```
 
@@ -137,14 +136,21 @@ TUI 会话记录显示绝对路径与 **Open original video** 的 `file:///...` 
 
 ## 测试
 
-```bash
-cd work/scripts/pi/pi-video-generation
+在插件目录执行 PowerShell：
 
-MSYS_NO_PATHCONV=1 npm test                     # 离线单元测试（12 条）+ 输出渲染回归（1 套）
-MSYS_NO_PATHCONV=1 npm run test:adapters        # 只跑适配器单元测试（10 条）
-node test/output-preview.mjs "file:///<pi>/node_modules/@earendil-works/pi-coding-agent/dist/index.js"
+```powershell
+npm run test:unit
+npm run test:adapters
+npm run test:host
+npm test
 ```
 
-`output-preview.mjs` 需要宿主 SDK：优先用命令行传入的 `file://` URL，其次解析本目录可找到的包，
-最后回退到 PATH 上 `pi` 安装目录里的同名包（本插件不带 `node_modules`）。三个来源都找不到时会直接
-报错，而不是静默跳过。单元测试不需要 SDK，可以单独秒级运行。
+`test:unit` 使用模拟请求，并执行 `test/sdk.test.mjs` 的 SDK 定位回归；`test:host` 需要完整 Pi SDK 及其依赖，检查 TUI/RPC 结果与历史链接的渲染。`npm test` 依次执行两者。本插件运行时通过 Pi 加载，无额外运行时 npm 依赖。
+
+`test/sdk.mjs` 按命令行第二个参数 → `PI_SDK` → 本插件可解析的包 → Pi 托管安装 → PATH 定位 SDK。参数可为 `dist/index.js` 的绝对路径或 `file://` URL；其它安装方式可用 PowerShell 的 `$env:PI_SDK` 指定实际入口。全部测试与辅助文件位于本插件的 `test/`，复制本插件目录后即可独立测试。
+
+测试覆盖适配器、超时、配置错误、URL 校验与结果渲染，使用模拟请求和临时文件；真实生成服务、账号权限、费用及人工 TUI 操作由实际环境验证。
+
+## 许可证
+
+MIT，见 [LICENSE](LICENSE)。

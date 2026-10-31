@@ -7,12 +7,14 @@ Pi 通知扩展，要求 **Pi ≥ 1.1.0**。
 
 ## 安装与快速上手
 
-```bash
-# 推荐用户级安装；本地路径指向本插件目录
-pi install /absolute/path/to/pi-notification
+在本插件目录执行 PowerShell：
+
+```powershell
+npm ci --ignore-scripts
+pi install .
 
 # 或只在本次运行加载
-pi -e work/scripts/pi/pi-notification/extensions/index.ts
+pi -e ./extensions/index.ts
 ```
 
 项目级扩展需要项目已被信任。装好后默认只用本机提醒：执行完成和执行失败会提醒，需要回复默认关闭。
@@ -285,12 +287,29 @@ HTTP 输出仅支持 http/https，拒绝内嵌 URL 凭据和重定向。配置�
 
 ## 开发与测试
 
-```bash
-cd work/scripts/pi/pi-notification
+在本插件目录执行 PowerShell：
+
+```powershell
+npm ci --ignore-scripts
 npm test          # 全部专项
 npm run test:api  # 单个专项，其余见 package.json
 ```
 
-完整测试需要同版本 Pi SDK/CLI，可用 `PI_SDK=/path/to/pi-coding-agent/dist/index.js` 指定；Git Bash 下加 `MSYS_NO_PATHCONV=1`，避免参数被改写。
+测试使用支持直接运行 TypeScript 的 Node.js，已在 Node.js 24.22.1 验证。`npm run test:unit` 执行配置、路由、渠道与 API 测试；完整测试另需同版本 Pi SDK/CLI 及其依赖。可将 PowerShell 的 `$env:PI_SDK` 设为实际 `pi-coding-agent/dist/index.js` 绝对路径；也可在 `test:host` 后通过 `--` 传入 SDK 路径。自动定位逻辑位于本插件 `test/sdk-path.mjs`，Git Bash 运行宿主测试时另设 `MSYS_NO_PATHCONV=1`。
+
+| npm 脚本 | 用途 |
+| --- | --- |
+| `test:routing` | 统一与独立接收方式、显式测试筛选；`test:kiss` 为兼容别名 |
+| `test:config` / `test:patch` | 配置校验、降级、单项保存与恢复 |
+| `test:registry` / `test:lifecycle` | 渠道注册、日志清洗、运行状态 |
+| `test:terminal` / `test:service` | 本机通知、合并、冷却、队列与取消 |
+| `test:webhook` / `test:api` / `test:email` | 签名、消息序列、回环 HTTP 与模拟邮件 |
+| `test:ui` / `test:host` / `test:cli` | 真实组件、会话与进程加载；需要 SDK/CLI |
+
+全部测试、辅助模块与夹具位于本插件的 `test/`。模块调用关系见本插件的[架构说明](docs/architecture.md)。
 
 测试使用临时目录、假模型/SMTP/凭据库与回环 HTTP，不修改真实用户配置、不读真实授权码，也不发送真实邮件或系统通知。真实终端显示与邮件到箱需另行获得许可后人工验证。
+
+## 许可证
+
+MIT，见 [LICENSE](LICENSE)。

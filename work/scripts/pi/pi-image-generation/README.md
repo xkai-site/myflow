@@ -1,20 +1,18 @@
 # pi-image-generation
 
-Pi 图片生成与参考图编辑扩展，入口是 **`/image` 斜杠命令**，不触发 LLM 轮次。
-它不注册 LLM 工具，Agent **不能直接 tool call**；图片账户 provider 只用于认证和图片请求，不是 `/model` 中的对话模型选择。自动化使用下文 RPC，不要把 `/image` 当作 bash 命令。
+通过 Pi 的 **`/image` 斜杠命令**生成或编辑图片。用户在 TUI 操作，自动化通过 RPC 分发命令；命令直接处理图片请求，图片账户 provider 负责认证和请求。
 
 ## 安装与首次调用
 
 前提：已安装 **Pi ≥ 0.99.0**，Node.js ≥ 22.19.0。在本插件目录执行：
 
-```bash
+```powershell
 npm install --ignore-scripts
-cd ..
-pi install ./pi-image-generation
+pi install .
 ```
 
-本地安装直接引用目录，请勿移动或删除。启动 Pi；已运行的 Pi 执行 `/reload`。
-本扩展使用 Pi 0.99.x 的统一 `createModels()` / `createProvider()` 生图接口，保留 Codex / Token Plan CN 自定义请求协议及原认证优先级；图片模型只注册在插件局部集合，不修改 Pi 的聊天模型目录，也不新增 Agent 工具。
+本地安装引用源码目录，后续加载仍需保留此路径。启动 Pi；已运行的 Pi 执行 `/reload`。
+本扩展通过 `createModels()` / `createProvider()` 创建插件局部的图片模型集合，使用 Codex / Token Plan CN 请求协议。Pi 的聊天模型与 Agent 工具分别由宿主管理。
 完成下文任一种认证后，在要保存图片的项目目录启动 Pi，输入：
 
 ```text
@@ -71,8 +69,7 @@ OpenAI 图片生成需要 Pi 中已有且已认证的 `openai-codex` provider。
 
 即使提示词已开始，后面的 `--size` 等仍会被解析，除非先写 `--`。未知 `--选项` 会报错。
 
-**参考图编辑边界：没有 `--image`、`--input`、`--edit`、mask 或参考图路径参数。**
-TUI 向导选择编辑后，每行输入一个参考图文件路径，可拖入、加引号或写 `@path`；相对路径以 Pi 当前项目为基准，至少一张。不是在 `/image` 文本后追加路径。
+参考图编辑通过 TUI 向导选择，每行输入一个参考图文件路径，可拖入、加引号或写 `@path`；相对路径以 Pi 当前项目为基准，至少一张。命令文本解析器只处理上表列出的生成参数。
 
 **标准 RPC `/image` 目前仅支持生成；编辑请用 TUI。** RPC `images` 附件会被忽略，不会进入编辑，仍可能按纯文本生成并消耗额度。
 
@@ -80,7 +77,7 @@ TUI 向导选择编辑后，每行输入一个参考图文件路径，可拖入�
 
 唯一清单是本插件根目录 [models.jsonc](models.jsonc)，修改后 `/reload`。不会从 Codex 缓存发现图片模型，也不读取项目内或用户目录的另一份模型清单。
 
-**当前文件的五个模型均已启用**（`enabled` 省略即 true；Sunburst/Flare 显式为 true）。**Sunburst/Flare 已由使用者验证可通过当前 Codex 后端及账号调用**，分别使用 `openai-sunburst`、`openai-flare` 选择；其他账号的权限与额度以服务端为准。
+**当前文件的五个模型均已启用**（`enabled` 省略即 true；Sunburst/Flare 显式为 true）。分别使用 `openai-sunburst`、`openai-flare` 选择；本地清单表示可选择，实际账号权限与额度由服务端决定。
 
 | key | 上游模型 ID | 账户 / 默认模型 | 默认尺寸；预设 | 质量 |
 | --- | --- | --- | --- | --- |
@@ -136,3 +133,22 @@ TUI 会话显示路径、原图链接及可用时的终端预览。支持链接�
 
 网络诊断在项目 `.pi/image-generation-logs/`：失败通知给出 `error-<uuid>.json` 路径；也可能存在 `success-<uuid>.json`，它只表示 HTTP 读取/解析成功，不保证图片落盘。日志不自动清理，分享前检查脱敏结果，绝不分享 auth.json。修改启动环境后重启 Pi，`/reload` 不会重新继承 shell 环境；不要关闭 TLS 验证。
 会话记录会保留提示词、图片路径和元数据（不是 Key 或图片 base64）；生成时提示词及参考图会发送给所选服务。请保护会话、图片、日志和凭据，按项目需要排除版本控制。
+
+## 测试
+
+在插件目录执行 PowerShell：
+
+```powershell
+npm test
+npm run test:host
+```
+
+测试使用 Node.js ≥22.19.0，先在本插件目录执行 `npm ci --ignore-scripts` 准备锁文件声明的依赖。`npm test` 覆盖配置、命令、凭据、文件、网络诊断，以及 `test/sdk.test.mjs` 中的 SDK 定位回归；`test:host` 通过真实 SDK 和模拟上下文检查生成/编辑、设置及结果渲染。
+
+宿主测试需要完整的 Pi SDK 及其依赖。`test/sdk.mjs` 按命令行第二个参数 → `PI_SDK` → 本插件可解析的包 → Pi 托管安装 → PATH 定位 SDK。参数可为 `dist/index.js` 的绝对路径或 `file://` URL；其它安装方式可用 PowerShell 的 `$env:PI_SDK` 指定实际入口。测试与辅助文件全部位于本插件的 `test/`，复制本插件目录后即可独立准备依赖并运行。
+
+`test/host-dispatcher-probe.mjs` 和 `test/clash-https-probe.mjs` 是显式执行的本机网络排查脚本，所需参数见脚本头部；后者需要本机代理与证书工具。普通测试使用模拟响应或回环服务，线上账号权限、额度、服务可用性及人工 TUI 体验由实际环境另行验证。
+
+## 许可证
+
+MIT，见 [LICENSE](LICENSE)。

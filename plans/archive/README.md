@@ -1,7 +1,9 @@
-# 按项目归档的计划与记录
+# 已完成事项与历史记录
 
-按仓库根目录 `README.md` 的插件项目划分归档。插件当前用法与实现状态以各自的 `work/scripts/pi/<项目>/README.md` 为准；这里保存历史规划、设计、调查和测试结果，不代表当前待办或最新状态。
+插件当前使用说明位于各插件 README，开发与测试入口位于[扩展开发手册](../../wiki/tech/pi-extension-development.md)和[测试指南](../../wiki/tech/pi-extension-testing.md)。归档按功能提供导航，历史运行记录保留当时的环境、结果与限制。
 
-- [pi-image-generation](pi-image-generation/README.md)
-- [pi-notification](pi-notification/README.md)
-- [pi-usage-openai ](pi-usage-openai/README.md)
+- [图片模型配置、网络调查与原始探测](pi-image-generation/README.md)
+- [通知结构、设置界面与历史验证](pi-notification/README.md)
+- [用量查询职责与历史验证](pi-usage-openai/README.md)
+
+仓库整理与当次回归记录见 [2026-10-31 整理记录](../../work/tasks/clearwiki-2026-10-31/README.md)。

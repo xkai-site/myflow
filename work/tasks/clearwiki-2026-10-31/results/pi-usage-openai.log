@@ -1,0 +1,31 @@
+﻿
+> pi-usage-openai@0.1.0 test
+> node --test test/*.test.ts
+
+✔ reads a valid live ChatGPT usage credential without requiring a refresh token (12.6791ms)
+✔ rejects a missing or malformed auth file without exposing token content (16.3089ms)
+✔ rejects non-ChatGPT auth mode and missing token fields (8.3888ms)
+✔ rejects expired or nearly expired access tokens (6.8365ms)
+✔ rejects malformed JWTs and missing required claims (8.5758ms)
+✔ uses CODEX_HOME when resolving auth.json (0.6684ms)
+✔ rejects account identity mismatches (4.7594ms)
+✔ parses plan and both known rate-limit windows (4.9269ms)
+✔ aligns the reset-time text after one- and two-digit percentages (0.3675ms)
+✔ preserves percentage boundaries and omits unrepresentable reset times (0.2754ms)
+✔ parses legacy windows, percent-left and ISO reset values (0.3433ms)
+✔ accepts plural and feature-specific rate-limit response variants (0.2503ms)
+✔ ignores malformed, out-of-range, missing and unknown window fields (0.233ms)
+✔ fetches with bearer token and account ID without exposing them in errors (40.7743ms)
+✔ keeps credentials isolated across concurrent usage requests (1.1663ms)
+✔ rejects empty or non-string credentials before making a request (1.0409ms)
+✔ reports unauthorized and malformed JSON without leaking response bodies (2.3234ms)
+✔ reports other HTTP failures generically and handles request timeouts (0.4919ms)
+✔ registers only the /usage-openai command and no model provider (2.865ms)
+ℹ tests 19
+ℹ suites 0
+ℹ pass 19
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 774.8061

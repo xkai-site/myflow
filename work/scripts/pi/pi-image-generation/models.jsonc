@@ -74,8 +74,7 @@
       }
     },
     {
-      // Public Image API support is NOT proof of Codex OAuth endpoint compatibility.
-      // Keep these definitions, but require explicit opt-in after backend verification.
+      // Enabled in this catalog; backend access depends on the authenticated account.
       // https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst
       "key": "openai-sunburst", "id": "gpt-image-2.5-sunburst", "name": "GPT Image 2.5 Sunburst", "provider": "openai",
       "enabled": true,

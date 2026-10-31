@@ -1,0 +1,43 @@
+﻿
+> pi-image-generation@0.1.0 test
+> node --test test/*.test.ts
+
+✔ legacy command selectors and current request defaults (38.0528ms)
+✔ GPT Image 2.5 commands serialize generation/edit parameters from the actual config (11.8053ms)
+✔ disabled models are recognized as selectors but rejected, never silently sent as default-model prompts (1.4393ms)
+✔ direct OpenAI adapter preserves the default quality (0.4232ms)
+✔ config-only model upgrade/addition changes parsing, request and validation (1.8932ms)
+✔ task, quality, prompt, reference and CLI validation (6.3939ms)
+✔ saved Key persists, overrides fallback without mixing headers, deletion restores fallback (515.6283ms)
+✔ OpenAI resolves fresh each request and never creates image credential file (2.5603ms)
+✔ official endpoint boundary and explicit secret redaction (0.8232ms)
+✔ secret state supports split paste, rejects controls, cancels and never exposes value in state labels (0.4251ms)
+✔ network failures retain bounded cause/AggregateError chains, code, stage and recovery hints without retrying (89.2229ms)
+✔ HTTP errors preserve status and header/payload request IDs, including HTML instead of JSON (23.1924ms)
+✔ body-read failures remain distinguishable from connection failures (1.7245ms)
+✔ both adapters and the CDN download carry safe diagnostics without forwarding credentials to CDN (4.2113ms)
+✔ redaction covers cause fields, reflected prompts, credentials, encoded secrets and terminal controls before truncation (1.7981ms)
+✔ explicit cancellation is not logged, but deadline expiration is actionable and logged (1.1771ms)
+✔ log failures cannot mask network errors or successful requests (2.7422ms)
+✔ diagnostic files are unique, atomic, private and reject unsafe directories (59.6165ms)
+✔ diagnostic writes refuse linked .pi and log directories (29.596ms)
+✔ shipped config preserves current models and defaults (4.3988ms)
+✔ GPT Image 2.5 models are enabled with configured quality and dimension rules (2.9684ms)
+✔ either GPT Image 2.5 model can be configured as the OpenAI default (1.4402ms)
+✔ dimension boundaries and edit-specific policies (0.3696ms)
+✔ JSONC permits comments/trailing commas, rejects duplicate properties and syntax without echo (6.6626ms)
+✔ schema rejects unknown fields, duplicate models, bad auth/defaults/references/ranges (3.8391ms)
+✔ single config file reload A -> B -> invalid -> repaired -> missing (62.8173ms)
+✔ local peer close after upload distinguishes waiting for headers from unsent request (149.1194ms)
+✔ parallel observers isolate request identities, retain no payload, and detach (2.176ms)
+✔ real local HTTP records sent body, headers, completion and sanitized success IDs (93.4753ms)
+✔ upstream rejection redacts opaque Key and disables redirects (24.999ms)
+✔ atomic image output: unique files, validation rollback and cancellation (26.9972ms)
+ℹ tests 31
+ℹ suites 0
+ℹ pass 31
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1612.6692

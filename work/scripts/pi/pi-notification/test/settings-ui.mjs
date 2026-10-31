@@ -19,7 +19,7 @@ const { NotifySettingsComponent } = await jiti.import("../src/ui.ts");
 const { createService } = await jiti.import("../src/service.ts");
 const { resolveChannels } = await jiti.import("../src/rules.ts");
 const K = { up: "\x1b[A", down: "\x1b[B", enter: "\r", esc: "\x1b", space: " ", save: "\x13", test: "\x14", reload: "\x12", status: "\x0f" };
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "notify-ui-kiss-"));
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "notify-ui-"));
 let serial = 0, passed = 0;
 const failures = [];
 async function step(name, run) { try { await run(); passed++; console.log(`  ✓ ${name}`); } catch (error) { failures.push({ name, error }); console.error(`  ✗ ${name}: ${error.stack}`); } }

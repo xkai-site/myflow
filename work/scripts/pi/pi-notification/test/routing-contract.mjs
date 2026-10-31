@@ -1,14 +1,10 @@
-/** JTBD contracts. Temporary files and fake channels only; never resolve real credentials. */
+/** Unified destinations, per-rule overrides and manual notification delivery. */
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import * as config from "../src/config.ts";
 import * as settings from "../src/settings.ts";
 import * as rules from "../src/rules.ts";
 import { createService } from "../src/service.ts";
 
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "notify-kiss-"));
 const failures = [];
 async function step(name, run) {
   try { await run(); console.log(`  ✓ ${name}`); }
@@ -28,7 +24,7 @@ const harness = (c) => {
   } } });
   return { service, sends };
 };
-try {
+{
   await step("legacy JSON explicit routes stay custom, even when equal to defaults", () => {
     const c = merged({ rules: { runCompleted: { channels: ["terminal"] }, runFailed: { channels: [] } } });
     assert.deepEqual(c.rules.runCompleted.channels, ["terminal"]);
@@ -82,6 +78,6 @@ try {
     c.channels = ["terminal", "email"];
     assert.ok(settings.emailReadiness(c, true).usedBy > 0);
   });
-} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+}
 if (failures.length) process.exitCode = 1;
-console.log(`KISS: ${6 - failures.length}/6 passed`);
+console.log(`Routing: ${6 - failures.length}/6 passed`);

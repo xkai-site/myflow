@@ -1,12 +1,16 @@
-# pi-notification 归档
+# 通知插件归档索引
 
-插件当前状态与用法以 [`work/scripts/pi/pi-notification/README.md`](../../../work/scripts/pi/pi-notification/README.md) 为准。以下文档保存通知插件的历史设计与实施记录：
+当前用法见[插件 README](../../../work/scripts/pi/pi-notification/README.md)，实现关系见[模块说明](../../../wiki/tech/pi-notification-architecture.md)，执行命令见[测试指南](../../../wiki/tech/pi-extension-testing.md)。
 
-- [交接与维护记录](pi-notification-handoff.md)
-- [插件设计方案](pi-notification-plugin-design.md)
-- [里程碑 2 记录](pi-notification-plugin-m2.md)
-- [渐进式设置界面改造计划](pi-notification-progressive-ui.md)
-- [设置 UX 计划](pi-notification-ux.md)
-- [设置 UX 调研/计划/进度台账](pi-notification-ux/)
-- [配置体验 JTBD/KISS 方案](pi-notification-kiss-ux.md)
-- [测试与注释收尾计划](polish-tests-and-comments.md)
+| 主题 | 导航 |
+| --- | --- |
+| 事件、运行状态与双路输出 | [模块结构](pi-notification-plugin-design.md) |
+| 合并、冷却与失败处理 | [投递服务](pi-notification-plugin-m2.md) |
+| 维护入口与运行模式 | [维护导航](pi-notification-handoff.md) |
+| 会话覆盖与单项保存 | [设置持久化](pi-notification-ux.md) |
+| 菜单与字段展示 | [设置界面](pi-notification-progressive-ui.md) |
+| 统一接收方式与测试反馈 | [路由设置](pi-notification-kiss-ux.md) |
+| 测试定位 | [测试与注释维护](polish-tests-and-comments.md) |
+| 后续首页调整 | [功能导航](pi-notification-ux/task_plan.md)、[原调研](pi-notification-ux/findings.md)、[原运行记录](pi-notification-ux/progress.md) |
+
+[历史验证摘录](verification-history.md)保留旧版宿主、命令、计数与未验证范围。原调研和运行记录按历史材料保存。

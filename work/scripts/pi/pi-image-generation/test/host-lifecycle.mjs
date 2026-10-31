@@ -1,17 +1,17 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { resolveSdkUrl, siblingEntry } from './sdk.mjs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { mkdtemp, rm, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-const require = createRequire(import.meta.url);
-const sdk = process.argv[2] ?? pathToFileURL(require.resolve('@earendil-works/pi-coding-agent')).href;
+const sdk = resolveSdkUrl({ candidate: process.argv[2], from: import.meta.url });
 const hostRequire = createRequire(sdk);
 const { createJiti } = hostRequire('jiti');
 const jiti = createJiti(import.meta.url, { moduleCache:false, fsCache:false, alias: {
  '@earendil-works/pi-coding-agent':fileURLToPath(sdk),
- '@earendil-works/pi-ai':fileURLToPath(new URL('../node_modules/@earendil-works/pi-ai/dist/index.js',sdk)),
- '@earendil-works/pi-tui':fileURLToPath(new URL('../node_modules/@earendil-works/pi-tui/dist/index.js',sdk)),
+ '@earendil-works/pi-ai':siblingEntry(sdk,'@earendil-works/pi-ai'),
+ '@earendil-works/pi-tui':siblingEntry(sdk,'@earendil-works/pi-tui'),
 }});
 const dir=await mkdtemp(path.join(tmpdir(),'image-host-'));
 process.env.PI_CODING_AGENT_DIR=dir;

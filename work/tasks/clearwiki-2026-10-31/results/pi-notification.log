@@ -1,0 +1,666 @@
+﻿
+> pi-notification@0.2.0 test
+> npm run test:unit && npm run test:ui && npm run test:host && npm run test:cli
+
+
+> pi-notification@0.2.0 test:unit
+> node test/routing-contract.mjs && node test/config-validation.mjs && node test/settings-patch.mjs && node test/registry-log.mjs && node test/lifecycle-state.mjs && node test/terminal-channel.mjs && node test/service-coalesce.mjs && node test/webhook-channel.mjs && node test/message-api.mjs && node test/email-channel.mjs
+
+  ✓ legacy JSON explicit routes stay custom, even when equal to defaults
+  ✓ inherit, custom and empty destinations have distinct semantics
+  ✓ old session arrays survive; changing unified destinations does not erase them
+  ✓ manual test bypasses error threshold, ordinary bypassFilters does not
+  ✓ disabled master switch returns rejection, never a queued-success claim
+  ✓ configured email without any enabled rule reference is not ready-to-remind
+Routing: 6/6 passed
+配置校验专项回归：pi-notification
+  ✓ C1 version 必须是 1；非法版本导致整份降级并保留原因
+  ✓ C2 未知规则名只给警告（前向兼容）且不生效；rules 非对象才是错误
+  ✓ C3 数值字段边界：边界值通过，越界/非整数/字符串数字一律报错
+  ✓ C4 规则内部字段：level / channels / toolFailed 策略与阈值
+  ✓ C5 waitingForUser.kinds：未知 kind 报错，custom 只警告并从生效值里滤掉
+  ✓ C6 providers：重复 id / 缺 type / options 非对象报错；非法项被丢弃而不是整份失效
+  ✓ C6c 邮箱默认关闭、稀疏 options 继承，旧用户 providers 数组兼容
+  ✓ C6d 逐项保存邮箱参数不丢本机渠道，显式关闭与自定义渠道语义保留
+  ✓ C6b providers[].enabled 非布尔必须报错，而不是静默当作 true
+  ✓ C7 degradedConfig 形状：仅失败通知、error 门槛、唯一渠道、不启用静默时段
+  ✓ C8 loadConfig：坏文件整份降级；只有未知字段时只提示不降级
+  ✓ C9 isDisabledByEnv 只认 1/true；describeConfig 汇总开关与渠道
+  ✓ C10 readUserConfigRaw：缺文件返回空、根不是对象与损坏 JSON 都拒绝
+  ✓ C11 writeUserDefault：稀疏写盘只动这一项，保留其它原文；拒绝损坏文件与非法值
+  ✓ C11b 复合事务用最新 raw 构建，批量删除一次完成，非法部分不写入
+  ✓ C12 writeUserConfig：写全量快照，失败时不留临时文件也不改动原文件
+  ✓ C13 API 独立校验/降级、敏感值不进入错误说明
+
+通过：字段校验矩阵 / 降级 / 稀疏与原子写盘 全部断言成立。
+稀疏补丁与配置项助手专项回归：pi-notification
+  ✓ P1 isPlainObject / getPathValue / hasPath 的边界语义
+  ✓ P2 setPatchPath 逐层创建、覆盖已有值、绝不修改入参
+  ✓ P3 mergePatch：数组整体替换、对象深合并、标量覆盖、引用不共享
+  ✓ P4 补丁不能替换结果的原型：__proto__ / constructor / prototype 一律丢弃
+  ✓ S1 overlay 形状防御：空 overlay 与非法条目
+  ✓ S2 hasUserDefault / userDefaultValue：按路径存在性判断，不靠与出厂默认比较
+  ✓ S3 isCurrentValue / collectionValue：标量相等，集合按成员
+  ✓ S4 candidatesOf：枚举项给出全部候选，时间项给出预设集
+  ✓ S5 中文化只改展示：值/配置键不变，阈值与规则严重程度使用不同文案
+  ✓ S6 JSON-only 参数不出现在 TUI 表；保留内容长度/时间校验
+  ✓ S7 来源按 overlay 存在性判定：false / 空集合 / 与默认同值都算“已覆盖”
+  ✓ S8 渠道内置缺省：开关缺省为开启；定义来源看用户文件，不看同名 id
+  ✓ S9 渠道用户文件补丁：只改目标 enabled，保留 options/未知字段/其他渠道
+  ✓ S10 恢复清空最后一个 overlay：空快照仍然被认作有效快照（不复活旧值）
+  ✓ S11 removePath：删除单项并剪空祖先，保留旁支，缺失即幂等零变化
+  ✓ S12 removeArrayEntryField：按 provider id 删一个字段，保留定义/options/未知字段/其它渠道
+  ✓ S13 clearItemOverride：只清目标项的本对话覆盖（普通字段/渠道都支持）
+  ✓ S14 复合项保存有效混合状态，不统一、不泄漏其他会话字段
+  ✓ S15 接收多选与启用原子应用，provider 归属转移后不误还原
+  ✓ S16 显式归一只修改六个 channels；旧元数据不猜测归属
+
+通过：补丁语义 / overlay 形状 / 用户默认存在性 / 候选值 全部断言成立。
+渠道注册降级与日志/脱敏专项回归：pi-notification
+  ✓ L1 注册表是唯一分派点：正常渠道透传，四条不可用路径都降级为 Noop 并留痕
+  ✓ L2 Noop 渠道：validate 回显原因、send 无副作用、dispose 可重复
+  ✓ L3 Debug 渠道：按 maxChars 截断、换行归一、已取消的投递要抛错
+  ✓ L4 redact：按 token 家族遮蔽，并去掉家目录前缀
+  ✓ L4b 带认证方案的 Authorization 头与 Cookie 头必须整段遮蔽
+  ✓ L4c 空格分隔的键值也要遮蔽，但短词散文不得被误伤
+  ✓ L5 sanitize：非字符串、不可见字符与按码位截断
+  ✓ L6 sanitizeError：先脱敏后清洗，并受长度上限约束
+  ✓ L7 createLogger：sink 只在设了 PI_NOTIFY_LOG_FILE 时开启，失败不冒泡
+
+通过：渠道降级 / Noop 与 Debug / 脱敏与清洗 / 日志 sink 纪律 全部断言成立。
+状态机与投递服务边界专项回归：pi-notification
+  ✓ L1 stopReason 判定表：只有终态语义才给出结论
+  ✓ L2 结构性丢弃：非空闲 / 会话不匹配 / 陈旧实例都不消耗 run 状态
+  ✓ L3 隐式 run：没有 agent_start 也能记录，并使用实例内递增的 runId
+  ✓ L4 无 run / 重复 settle 不造结论，时钟回退时时长不为负
+  ✓ L5 成本累计：保留运行时上报的零值，缺失时为未知；本 run 与会话累计分开
+  ✓ L6 工具失败与压缩失败：失败计数、累积顺序与标志位
+  ✓ L7 等待输入计数：custom 不计、多余的 end 不会变负、shutdown 兜底复位
+  ✓ L8 摘录与错误消息：只保留最后一条非空文本，失败说明在观察时脱敏
+  ✓ L9 多 start 同一逻辑 run：保留工具失败、成本、开始时间；aborted 优先
+  ✓ L10 事实/快照：压缩与 prompt 独立，关闭 prompt 恢复 working，custom 排除
+  ✓ S1 失败投递：计数与上次错误可见，且不抛回调用方
+  ✓ S2 渠道缓存随配置刷新失效：同一 id 换 type 后必须按新类型重建
+  ✓ S3 discardPending：清空队列、中止在途、留下记录，且服务仍可继续使用
+  ✓ S4 flush：预算到期就返回，并把超预算未完成写进日志
+  ✓ S5 dispose 幂等且丢弃之后的提交；dispose 之后 submit 不再投递
+
+通过：状态机结构性丢弃 / run 簿记 / 服务队列与 dispose 全部断言成立。
+S3 终端渠道回归：pi-notification
+  ✓ 机制选择表：kitty→OSC99 / win32→toast / 其它 TTY→OSC777 / 非 TTY→none
+  ✓ PI_NOTIFY_CHANNEL 覆盖：off 全局静默、显式机制优先，但 TTY 纪律优先于一切
+  ✓ OSC 777 渲染：字节精确、换行归一、空 body 不留分隔符
+  ✓ OSC 99 渲染：两段同 id、末段 d=1、ST 结尾
+  ✓ 注入面：载荷不能让通知提前终止或夹带新序列
+  ✓ Windows toast：脚本静态零插值，载荷只走环境变量 base64
+  ✓ 未认证/不可用：非 TTY 下 send() 跳过而非失败，且一个字节都不写
+  ✓ TTY 下真的写出 OSC；win32 下走 toast；toast 失败会冒泡为投递失败
+  ✓ 取消信号：已 abort 时不得写出任何字节
+  ✓ 长文案截断：以 maxMessageChars 为界，且不切断代理对
+
+通过：终端渠道选择 / 渲染 / 注入面 / TTY 纪律 全部断言成立。
+S4 投递服务门槛/过滤回归：pi-notification
+  ✓ 默认值：windowMs=1500 / cooldownMs=3000（0 表示关闭该过滤）
+  ✓ 精确去重：同一个 dedupeKey 只投递一次
+  ✓ 门槛：enabled=false / minLevel / 空渠道列表都不投递
+  ✓ 冷却：同 kind 在 cooldownMs 内只放行一条，窗口过后恢复
+  ✓ 合并窗口：同一（sessionId+runId）只放行一条，换 runId 立即放行
+  ✓ 请求级窗口覆盖：coalesceWindowMs 优先于配置（immediate 工具失败靠它聚合）
+  ✓ bypassFilters：自检通知不受合并/冷却影响（但仍受去重与门槛约束）
+  ✓ 队列上限：丢等级最低的最新一项并计数，不无限增长
+  ✓ Provider 挂起：超时算失败，不阻塞后面
+  ✓ dispose 幂等：之后 submit 一律丢弃，且不抛异常
+  ✓ Q 静默跨午夜 23:00 → 静默
+  ✓ Q 静默跨午夜 23:30 → 静默
+  ✓ Q 静默跨午夜 7:59 → 静默
+  ✓ Q 静默跨午夜 8:00 → 放行
+  ✓ Q 静默跨午夜 12:00 → 放行
+  ✓ Q 等级例外：静默时 error 仍投递，warning 静默
+  ✓ Q enabled=false 全时段放行；默认与降级均不启用静默
+  ✓ Q 同日左闭右开 / start=end 全天
+  ✓ Q 自检绕过静默，不绕过门槛；静默不推进合并/冷却
+  ✓ Q 非法时间 25:00 → 读盘降级并保留原因
+  ✓ Q 非法时间 8:00 → 读盘降级并保留原因
+  ✓ Q exceptLevels 严格数组/去重，enabled/end 同样严格校验
+  ✓ F 同消息多渠道有界并发，noop 计为跳过且终端不等待邮箱
+  ✓ T1 手动测试绕过等级/免打扰/频率但不绕过去重，逐请求进度完整
+  ✓ T2 分渠道报告：部分成功、失败、关闭、未知、noop 均不能混淆
+  ✓ T3 有界队列：替换/拒收/discard 都有测试终态
+  ✓ T4 取消订阅及异常观察者不会污染普通通知或留下晚到 UI 回调
+  ✓ T5 实际发送前重查强制静默；禁用/空渠道/已释放立即拒收
+  ✓ T6 已缓存的接收方式也重新检查可用性；校验异常有逐渠道终态
+
+通过：门槛/去重/静默时段/冷却/合并窗口/队列/超时 全部断言成立。
+S7 Webhook 渠道 + 装饰器回归：pi-notification
+  ✓ validate：URL 合法性与「只存环境变量名」都被严格校验
+  ✓ format：结构化载荷只含元数据（不含 prompt / 完整回复 / 密钥）
+  ✓ send：真实 POST + HMAC 签名（签名对象是实际发送的字节）
+  ✓ send：无 secretEnv 时发送但不签名（signed=false）
+  ✓ send：非 2xx 抛错（含状态码），错误信息里的凭据被脱敏
+  ✓ send：不跟随重定向（redirect: error），已 abort 时立即失败
+  ✓ withRetry：有界重试 + 指数退避，失败尝试留痕
+  ✓ withRetry：外层 signal 已 abort 时不再重试
+  ✓ withCircuitBreaker：连续 N 次失败后熔断、冷却后半开恢复
+  ✓ withTimeout：内层无视 signal 也会被自己的 deadline 打断
+  ✓ withRedaction：出口错误信息一律脱敏
+  ✓ withReliability：每次尝试有自己的 deadline，重试才真的有意义
+  ✓ 渠道契约：validate/format/dispose 都透传（渠道替换不改调用点）
+
+通过：Webhook 校验/签名/错误处理 + 装饰器（重试/熔断/超时/脱敏）全部断言成立。
+  ✓ 信封：稳定身份、白名单、隐私和不可变快照
+  ✓ 旧配置默认不外发；API 非法独立降级；稀疏写保留 API
+  ✓ API endpoint/凭据不进入会话 overlay
+  ✓ 真实 HTTP：重试不改变字节/身份，HMAC 可验证
+  ✓ 永久 4xx 不重试，408/429 可有限重试
+  ✓ 安全：保留头大小写、凭据 URL、重定向、密钥运行中消失
+  ✓ 有界 FIFO：不丢在途，丢最旧等待消息，保留最新快照
+  ✓ 超时/flush/dispose 有界，即使注入 sender 忽略 signal
+  ✓ runtime：事实不受通知关闭/强制静默影响，热切换与恢复发快照
+  ✓ 热切换中止旧请求；最初缺密钥可恢复；quit 强制静默仍零外发
+  ✓ quit 收尾共用一次预算，reload 立即丢弃旧在途
+
+通过：消息契约 / API 配置 / 队列 / HTTP / runtime 全部成立。
+邮箱 SMTP sender/provider 离线回归通过
+
+> pi-notification@0.2.0 test:ui
+> node test/settings-ui.mjs
+
+  ✓ 首页只有五个任务入口；用户语言，不暴露配置键
+  ✓ 普通提醒仅完成/失败/等我回复，默认不改变
+  ✓ 失败混合状态可保存但不强制归一
+  ✓ Enter/Space 不写文件；Ctrl+S 只保存已生效而非悬停候选
+  ✓ 保存失败不回滚本对话值、不改坏 JSON
+  ✓ 专业参数不在设置表或搜索，逐规则开关/等级/接收仍可编辑
+  ✓ 返回保留焦点，重读保持本对话修改
+  ✓ 旧规则自定义不被统一接收设置覆盖
+  ✓ 归一默认取消；确认只改六个接收数组，结果可单项保存
+  ✓ 逐规则接收方式：跟随统一 / 显式多选 / 空集合
+  ✓ 邮箱缺配置时进入步骤页，不先开启或测试
+  ✓ 配置齐全的邮箱仍需明确确认；取消不产生外发
+  ✓ 邮箱启用步骤可以重新启用已选但关闭的邮箱
+  ✓ 数字自定义及非法输入；时间自定义严格校验
+  ✓ a/d 单项还原：默认取消，确认才删，其他字段保留
+  ✓ 窄屏/宽字符/标记/页数不超宽，详情可以分页
+  ✓ 免打扰折叠与提醒预览不发送
+  ✓ 强制静默是额外限制；关闭组件不写盘
+  ✓ 测试按页面选择接收方式，结果部分成功且不宣称已收到
+  ✓ 旧测试与关闭后回调不访问旧页面；新结果不串线
+  ✓ 同步完成的结果不被已排队提示覆盖
+  ✓ 未知接收方式可见且可取消，旧规则不被改写
+  ✓ 邮箱结果不冒充地址或授权码修改后的新配置测试
+  ✓ 主题变化后 invalidate 重绘，宽度变化不复用旧缓存
+  ✓ 任务旅程：仅普通页面配置失败时本机+邮箱，真实服务管线用假渠道验收
+  ✓ Ctrl+O 可分页、重读动作可见，Ctrl+T 独立于业务开关
+UI: 26 passed, 0 failed
+
+> pi-notification@0.2.0 test:host
+> node test/host-lifecycle.mjs
+
+S1.5 / S3 / S5 / M3 回归：pi-notification
+  ✓ P0 控制字符清洗 / 脱敏
+  ✓ P1 加载无错误，且 session_start 被绑定触发
+  ✓ A 纯 /probe-cmd 不产生 agent 生命周期，也不产生通知
+  ✓ B 一次成功运行恰好投递 1 条 run_completed（并真的写出 1 条 OSC）
+    （实测最小间隔 181ms，样本 [181, 373, 557]）
+  ✓ C settled 内不阻塞：下一次 run 在 250ms 内启动（取 3 次最小值）
+  ✓ D /reload 后不重复投递（旧实例失效、新实例不叠加）
+  ✓ F 失败运行投递 1 条 run_failed(error)
+  ✓ H 非终端模式（stdout 非 TTY）不得写入任何字节，只记 channel_skipped
+  ✓ E 无扩展异常、无网络访问、未改写配置文件
+    （对照间隔 1779ms，用于证明测量有效）
+  ✓ 对照 settled 内阻塞 1500ms → 下一次 run 显著推迟
+  ✓ I1 无配置文件 → 内置默认值生效
+  ✓ I2 enabled=false → 一条都不发
+  ✓ I3 minLevel=error → info 级成功通知被门槛拦下
+  ✓ I4 rules.runCompleted.enabled=false → 成功不通知，失败仍通知
+  ✓ I5 配置损坏 → 降级为「仅失败/仅 error」，但绝不静默全关
+  ✓ I6 非法字段值 → 同样降级（不是只认 JSON 语法错误）
+  ✓ I7 渠道可切换：配置换成 debug 渠道后不再写终端
+  ✓ I8 配置里引用未定义渠道 → 保留记录，不伪装成功
+  ✓ I9 项目级配置已删除：即使项目被信任、文件就在那里，也不读它
+node.exe : pi-notification: 开启
+所在位置 行:1 字符: 1
++ & "D:\Nodejs/node.exe" "D:\Nodejs/node_modules/npm/bin/npm-cli.js" ru ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (pi-notification: 开启:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  当前情况：提醒已启用。没有收到时，请先发送测试查看具体结果。
+  邮箱：缺发件地址；0 类提醒使用邮箱。
+  技术详情（供进一步排查）：
+  规则/渠道: enabled=true minLevel=info channels=terminal rules=runCompleted,runFailed,toolFailed,compactFailed providers=t
+erminal:terminal timeoutMs=30000
+  会话: 01a18fce-8a7f-71e4-beaa-4dbb7b319262
+  送达前提: 1 个渠道启用；规则开启只表示通过筛选，实际送达取决于渠道可用性
+  合并/冷却: 同运行窗口 1500ms / 同 kind 冷却 3000ms / 工具失败 aggregate(1)
+  静默时段: 23:00–08:00（未开启；本地时间；例外 error）
+  配置来源: defaults
+  用户默认: C:\Users\HP\AppData\Local\Temp\pi-notify-host-3jAoQN\command\agent\pi-notification\config.json（单项保存，未保存的项跟随出厂默认
+）
+  终端机制: osc777；邮箱 已关闭；QQ SMTP 授权码：未设置
+  投递统计: 成功 0 / 失败 0 / 跳过 0 / 去重 0 / 合并 0 / 冷却 0 / 丢弃 0 / 在队 0 / 在途 0
+  机器 API（独立开关）: 配置关闭 / 当前关闭
+  API 统计: 成功 0 / 失败 0 / 丢弃 0 / 在队 0 / 在途 0；best-effort，无补发/心跳
+  上次成功: —
+  测试提醒：Ctrl+T 测试当前接收方式。
+  测试忽略重要程度和免打扰，不绕过强制静默或关闭的接收方式。
+  接收服务接受不等于实际送达，请确认是否看到或收到。
+
+设置界面仅 TUI 可用；用户级默认文件: C:\Users\HP\AppData\Local\Temp\pi-notify-host-3jAoQN\command\agent\pi-notification\config.json
+当前生效值（渠道 options 隐藏）:
+{
+"version": 1,
+"api": {
+"enabled": false,
+"options": "[隐藏，请在用户配置文件查看]"
+},
+"enabled": true,
+"minLevel": "info",
+"channels": [
+"terminal"
+],
+"rules": {
+"runCompleted": {
+"enabled": true,
+"level": "info",
+"channels": "inherit"
+},
+"runFailed": {
+"enabled": true,
+"level": "error",
+"channels": "inherit"
+},
+"runAborted": {
+"enabled": false,
+"level": "info",
+"channels": "inherit"
+},
+"toolFailed": {
+"enabled": true,
+"level": "warning",
+"channels": "inherit",
+"mode": "aggregate",
+"threshold": 1
+},
+"compactFailed": {
+"enabled": true,
+"level": "error",
+"channels": "inherit"
+},
+"waitingForUser": {
+"enabled": false,
+"level": "info",
+"channels": "inherit",
+"kinds": [
+"select",
+"confirm",
+"input",
+"editor"
+]
+}
+},
+"coalesce": {
+"windowMs": 1500,
+"toolFailureWindowMs": 10000,
+"cooldownMs": 3000
+},
+"quietHours": {
+"enabled": false,
+"start": "23:00",
+"end": "08:00",
+"exceptLevels": [
+"error"
+]
+},
+"content": {
+"includeDuration": true,
+"includeToolFailureNames": true,
+"includeSessionLabel": true,
+"includeAssistantExcerpt": false,
+"includeCost": true,
+"maxMessageChars": 300
+},
+"delivery": {
+"timeoutMs": 30000,
+"maxRetries": 1,
+"concurrency": 1,
+"channelConcurrency": 4,
+"queueLimit": 50,
+"circuitBreakerFailures": 3
+},
+"providers": [
+{
+"id": "terminal",
+"type": "terminal",
+"enabled": true,
+"options": "[隐藏，请在配置文件查看]"
+},
+{
+"id": "email",
+"type": "email",
+"enabled": false,
+"options": "[隐藏，请在配置文件查看]"
+}
+],
+"shutdownFlushMs": 200
+}
+  ✓ J1 非 TUI：/notify 只打印状态与配置路径（凭据隐藏），不写盘不投递
+通知设置已收敛为单一入口：直接输入 /notify 打开设置。
+状态与诊断 Ctrl+O、测试通知 Ctrl+T、重读配置 Ctrl+R 都在设置界面里。
+通知设置已收敛为单一入口：直接输入 /notify 打开设置。
+状态与诊断 Ctrl+O、测试通知 Ctrl+T、重读配置 Ctrl+R 都在设置界面里。
+通知设置已收敛为单一入口：直接输入 /notify 打开设置。
+状态与诊断 Ctrl+O、测试通知 Ctrl+T、重读配置 Ctrl+R 都在设置界面里。
+通知设置已收敛为单一入口：直接输入 /notify 打开设置。
+状态与诊断 Ctrl+O、测试通知 Ctrl+T、重读配置 Ctrl+R 都在设置界面里。
+通知设置已收敛为单一入口：直接输入 /notify 打开设置。
+状态与诊断 Ctrl+O、测试通知 Ctrl+T、重读配置 Ctrl+R 都在设置界面里。
+通知设置已收敛为单一入口：直接输入 /notify 打开设置。
+状态与诊断 Ctrl+O、测试通知 Ctrl+T、重读配置 Ctrl+R 都在设置界面里。
+  ✓ J2 旧子命令已移除：/notify status 只给单一入口指路，不执行动作
+  ✓ J3 TUI：/notify 打开设置；Esc 关闭不改磁盘与内存
+  ✓ J4 footer 按焦点提示操作：字段可保存，导航/测试行给出对应快捷键
+  ✓ J5 Enter 只改本对话：立即生效，但用户文件一个字节都不写
+  ✓ J6 本对话覆盖跨 /reload 保留（同一 sessionId 恢复）
+  ✓ J7 Ctrl+S：只写这一项到用户默认文件，且标记与状态行同时给出反馈
+  ✓ J8 Ctrl+S 再保存另一项：两项并存，其余字段不出现
+  ✓ J9 Ctrl+R 重读配置、Ctrl+O 状态与诊断可用且不产生副作用
+  ✓ J9b 状态与诊断：可见“重新读取配置”动作触发真实重读
+  ✓ J10 Ctrl+T 真的走一遍投递链路（折叠的旧 /notify test）
+  ✓ J11 渠道开关：Ctrl+S 写整个 providers 数组，下一次运行零投递
+  ✓ J12 写盘失败：状态行报错、标记不迁移、内存里当前值不回滚
+  ✓ J13 强制静默不可被界面绕过：不允许把 enabled 打开，也不写盘
+  ✓ J13b 渠道保存隔离：Ctrl+S 只改目标渠道，不固化其他渠道的本对话选择/options/未知字段
+  ✓ J13c 无启用渠道：首页与状态页都直说是送达前提问题
+  ✓ J13d 清空最后一个覆盖后 /reload 不复活旧值
+pi-notification: 开启
+  当前情况：提醒使用的接收方式已关闭或不存在，请检查接收方式开关。
+  邮箱：缺发件地址；0 类提醒使用邮箱。
+  技术详情（供进一步排查）：
+  规则/渠道: enabled=true minLevel=info channels=terminal rules=runCompleted,runFailed,toolFailed,compactFailed providers=d
+ebug:debug timeoutMs=30000
+  会话: 01a18fce-ba2a-71e4-beaa-4dc4df380caf
+  送达前提: 1 个渠道启用；规则开启只表示通过筛选，实际送达取决于渠道可用性
+  合并/冷却: 同运行窗口 1500ms / 同 kind 冷却 3000ms / 工具失败 aggregate(1)
+  静默时段: 23:00–08:00（未开启；本地时间；例外 error）
+  配置来源: defaults → C:\Users\HP\AppData\Local\Temp\pi-notify-host-3jAoQN\settings-print\agent\pi-notification\config.jso
+n
+  用户默认: C:\Users\HP\AppData\Local\Temp\pi-notify-host-3jAoQN\settings-print\agent\pi-notification\config.json（单项保存，未保存的
+项跟随出厂默认）
+  终端机制: osc777；邮箱 已关闭；QQ SMTP 授权码：未设置
+  投递统计: 成功 0 / 失败 0 / 跳过 0 / 去重 0 / 合并 0 / 冷却 0 / 丢弃 0 / 在队 0 / 在途 0
+  机器 API（独立开关）: 配置关闭 / 当前关闭
+  API 统计: 成功 0 / 失败 0 / 丢弃 0 / 在队 0 / 在途 0；best-effort，无补发/心跳
+  上次成功: —
+  测试提醒：Ctrl+T 测试当前接收方式。
+  测试忽略重要程度和免打扰，不绕过强制静默或关闭的接收方式。
+  接收服务接受不等于实际送达，请确认是否看到或收到。
+
+设置界面仅 TUI 可用；用户级默认文件: C:\Users\HP\AppData\Local\Temp\pi-notify-host-3jAoQN\settings-print\agent\pi-notification\config.
+json
+当前生效值（渠道 options 隐藏）:
+{
+"version": 1,
+"api": {
+"enabled": false,
+"options": "[隐藏，请在用户配置文件查看]"
+},
+"enabled": true,
+"minLevel": "info",
+"channels": [
+"terminal"
+],
+"rules": {
+"runCompleted": {
+"enabled": true,
+"level": "info",
+"channels": "inherit"
+},
+"runFailed": {
+"enabled": true,
+"level": "error",
+"channels": "inherit"
+},
+"runAborted": {
+"enabled": false,
+"level": "info",
+"channels": "inherit"
+},
+"toolFailed": {
+"enabled": true,
+"level": "warning",
+"channels": "inherit",
+"mode": "aggregate",
+"threshold": 1
+},
+"compactFailed": {
+"enabled": true,
+"level": "error",
+"channels": "inherit"
+},
+"waitingForUser": {
+"enabled": false,
+"level": "info",
+"channels": "inherit",
+"kinds": [
+"select",
+"confirm",
+"input",
+"editor"
+]
+}
+},
+"coalesce": {
+"windowMs": 1500,
+"toolFailureWindowMs": 10000,
+"cooldownMs": 3000
+},
+"quietHours": {
+"enabled": false,
+"start": "23:00",
+"end": "08:00",
+"exceptLevels": [
+"error"
+]
+},
+"content": {
+"includeDuration": true,
+"includeToolFailureNames": true,
+"includeSessionLabel": true,
+"includeAssistantExcerpt": false,
+"includeCost": true,
+"maxMessageChars": 300
+},
+"delivery": {
+"timeoutMs": 30000,
+"maxRetries": 1,
+"concurrency": 1,
+"channelConcurrency": 4,
+"queueLimit": 50,
+"circuitBreakerFailures": 3
+},
+"providers": [
+{
+"id": "debug",
+"type": "debug",
+"enabled": true,
+"options": "[隐藏，请在配置文件查看]"
+},
+{
+"id": "email",
+"type": "email",
+"enabled": false,
+"options": "[隐藏，请在配置文件查看]"
+}
+],
+"shutdownFlushMs": 200
+}
+pi-notification: 开启
+  当前情况：提醒使用的接收方式已关闭或不存在，请检查接收方式开关。
+  邮箱：缺发件地址；0 类提醒使用邮箱。
+  技术详情（供进一步排查）：
+  规则/渠道: enabled=true minLevel=info channels=terminal rules=runCompleted,runFailed,toolFailed,compactFailed providers=d
+ebug:debug timeoutMs=30000
+  会话: 01a18fce-bc87-71e4-beaa-4dc64227f2f4
+  送达前提: 1 个渠道启用；规则开启只表示通过筛选，实际送达取决于渠道可用性
+  合并/冷却: 同运行窗口 1500ms / 同 kind 冷却 3000ms / 工具失败 aggregate(1)
+  静默时段: 23:00–08:00（未开启；本地时间；例外 error）
+  配置来源: defaults → C:\Users\HP\AppData\Local\Temp\pi-notify-host-3jAoQN\settings-json\agent\pi-notification\config.json
+  用户默认: C:\Users\HP\AppData\Local\Temp\pi-notify-host-3jAoQN\settings-json\agent\pi-notification\config.json（单项保存，未保存的项
+跟随出厂默认）
+  终端机制: osc777；邮箱 已关闭；QQ SMTP 授权码：未设置
+  投递统计: 成功 0 / 失败 0 / 跳过 0 / 去重 0 / 合并 0 / 冷却 0 / 丢弃 0 / 在队 0 / 在途 0
+  机器 API（独立开关）: 配置关闭 / 当前关闭
+  API 统计: 成功 0 / 失败 0 / 丢弃 0 / 在队 0 / 在途 0；best-effort，无补发/心跳
+  上次成功: —
+  测试提醒：Ctrl+T 测试当前接收方式。
+  测试忽略重要程度和免打扰，不绕过强制静默或关闭的接收方式。
+  接收服务接受不等于实际送达，请确认是否看到或收到。
+
+设置界面仅 TUI 可用；用户级默认文件: C:\Users\HP\AppData\Local\Temp\pi-notify-host-3jAoQN\settings-json\agent\pi-notification\config.j
+son
+当前生效值（渠道 options 隐藏）:
+{
+"version": 1,
+"api": {
+"enabled": false,
+"options": "[隐藏，请在用户配置文件查看]"
+},
+"enabled": true,
+"minLevel": "info",
+"channels": [
+"terminal"
+],
+"rules": {
+"runCompleted": {
+"enabled": true,
+"level": "info",
+"channels": "inherit"
+},
+"runFailed": {
+"enabled": true,
+"level": "error",
+"channels": "inherit"
+},
+"runAborted": {
+"enabled": false,
+"level": "info",
+"channels": "inherit"
+},
+"toolFailed": {
+"enabled": true,
+"level": "warning",
+"channels": "inherit",
+"mode": "aggregate",
+"threshold": 1
+},
+"compactFailed": {
+"enabled": true,
+"level": "error",
+"channels": "inherit"
+},
+"waitingForUser": {
+"enabled": false,
+"level": "info",
+"channels": "inherit",
+"kinds": [
+"select",
+"confirm",
+"input",
+"editor"
+]
+}
+},
+"coalesce": {
+"windowMs": 1500,
+"toolFailureWindowMs": 10000,
+"cooldownMs": 3000
+},
+"quietHours": {
+"enabled": false,
+"start": "23:00",
+"end": "08:00",
+"exceptLevels": [
+"error"
+]
+},
+"content": {
+"includeDuration": true,
+"includeToolFailureNames": true,
+"includeSessionLabel": true,
+"includeAssistantExcerpt": false,
+"includeCost": true,
+"maxMessageChars": 300
+},
+"delivery": {
+"timeoutMs": 30000,
+"maxRetries": 1,
+"concurrency": 1,
+"channelConcurrency": 4,
+"queueLimit": 50,
+"circuitBreakerFailures": 3
+},
+"providers": [
+{
+"id": "debug",
+"type": "debug",
+"enabled": true,
+"options": "[隐藏，请在配置文件查看]"
+},
+{
+"id": "email",
+"type": "email",
+"enabled": false,
+"options": "[隐藏，请在配置文件查看]"
+}
+],
+"shutdownFlushMs": 200
+}
+  ✓ J14 非 TUI 模式守卫：print/json/rpc 都不打开组件、不写盘、凭据不外泄
+  ✓ R1 内容字段默认值与字段替换：no-op 字段已删，新字段仍严格校验
+  ✓ R2 窗口标识：标题显示项目/会话名，不暴露内部 session ID，可关闭人类可读名称
+  ✓ R3 assistant 摘录：默认关闭；开启后 10 字截断 + 截断标记 + 悬空标点去除
+  ✓ R4 成本：本次 + 会话累计；includeCost=false 时两者一起消失
+  ✓ R5 上下文占比：拿得到才算，低于 1% 不显示
+  ✓ L0 默认参数的合并/冷却与出厂默认一致
+  ✓ L1 默认配置：极短时间内的两次运行只发一条（同 kind 冷却）
+  ✓ L2 cooldownMs=0 后恢复「每次运行各发一条」（参数真的被读取）
+  ✓ K1 聚合模式：工具失败并入运行结果，一次运行仍然只发一条
+  ✓ K2 运行结果不通知时，聚合的工具失败自己发一条（去重后按工具名列出）
+  ✓ K3 immediate 模式：工具一失败就提醒，同 run 的后续事件被合并窗口吸收
+  ✓ K4 压缩失败立即提醒（error）；用户自己取消（aborted）不发
+  ✓ K5 等待输入：真 select 触发一条；custom 永久排除；end 能复位
+  ✓ K6 shutdown/reload 兜底复位 waiting（强杀时可能收不到 end）
+  ✓ M1 webhook 端到端：真实 POST + HMAC 签名 + 日志不复现 query/密钥
+  ✓ M2 非法 webhook 配置降级为 noop，绝不发到错地方
+  ✓ 通知状态与规则通过通用投递接口连接渠道
+  ✓ N1 通知关闭仍发送完整事实；HMAC/隐私/工具失败快照
+  ✓ N2 真实对话与压缩公开 hooks：独立 ID、before 只观察
+  ✓ N3 reload/new/resume/fork 新 stream，旧实例不再发送结论
+  ✓ N4 宿主真实重试：多个 agent_start、只一次 run.started/settled、完整成本
+  ✓ N5 宿主实际取消：run.settled aborted，保留最近取消结果
+  ✓ N6 强制静默零外发，但观察 waiting 仍更新
+  ✓ N7 慢 HTTP 不阻塞后续运行或非 quit 切换
+  ✓ N8 print/json/rpc 宿主模式：HTTP 可用，不写额外 stdout
+
+通过：判定/去重/阻塞/reload（A–F,H）+ 配置读盘（I1–I9）+ 单一入口与三层值（J1–J14） + 合并/冷却（L0–L2）+ 工具失败/压缩失败/等待输入（K1–K6）+ Webhook（M1–M3）+ 机器 API（N1–N8）全部成立。
+
+> pi-notification@0.2.0 test:cli
+> node test/cli-smoke.mjs
+
+S1.5 真实 CLI 冒烟（pi = C:\Users\HP\.pi\agent\bin\pi.cmd，launcher = node+bundle）
+  ✓ G 纯 /probe-cmd：可加载、零 agent 生命周期、零投递
+  ✓ H 假 provider + 真实 prompt：投递 1 条 run_completed
+  ✓ I /notify（单一入口）：真实 CLI 下可派发、退出干净、stdout 未被污染
+  ✓ I2 旧子命令在真实 CLI 下已移除：只给指路，不执行、不写盘
+  ✓ J 用户级配置 enabled=false 在真实 CLI 下生效（一条通知都不发）
+  ✓ K 配置损坏时降级，但失败通知仍能发出（不静默全关）
+  ✓ L --no-notify：本会话静默，一条都不发（且不改写配置文件）
+  ✓ M 旧 /notify off 不再写盘（写盘只发生在设置界面的 Ctrl+S）
+  ✓ M2 稀疏用户默认跨进程生效：预置的单项默认决定下一个进程的行为
+  ✓ N 非 TUI 的 /notify 在 stderr 输出路径/值，stdout 保持干净
+  ✓ O print CLI：HTTP 可工作，stdout 无额外消息/OSC
+  ✓ O json CLI：HTTP 可工作，stdout 无额外消息/OSC
+  ✓ O2 --no-notify / PI_NOTIFY_DISABLE：真实 CLI 零 API 外发，状态仍结算
+
+通过：真实 CLI 下 G/H（判定与管道纪律）+ I（单一入口命令面）+ J/K（配置真实生效）+ L（--no-notify）+ M/N（旧子命令不写盘、稀疏默认跨进程生效、非 TUI 展示）全部成立。

@@ -1,0 +1,29 @@
+﻿
+> pi-edit-fallback@0.1.0 test:host
+> node test/host.mjs
+
+Host: Pi 1.4.0, v24.22.1, win32
+SKIP personal single-file entry check; package install is verified below
+PASS alternative single-file auto-discovery (removed before package install)
+CLI list: No packages installed.
+CLI install: Installing D:\XuKai\Project\myflow\work\scripts\pi\pi-edit-fallback...
+Installed D:\XuKai\Project\myflow\work\scripts\pi\pi-edit-fallback
+CLI list: User packages:
+  D:\XuKai\Project\myflow\work\scripts\pi\pi-edit-fallback
+    D:\XuKai\Project\myflow\work\scripts\pi\pi-edit-fallback
+PASS isolated CLI install → list: one persisted local package, no copied entry
+PASS auto-discovery/Jiti, unchanged tools, schemas and system prompt
+PASS real native edit success: no hint, normal result/diff preserved
+PASS real single-edit ambiguity: original error plus one hint, isError=true, no writes
+PASS real batch ambiguity: correct diagnostic and atomic native failure
+PASS retry with unique context uses native edit and changes only the target
+PASS other native edit failures are byte-identical to native diagnostics
+PASS real runner preserves structuredContent/details/usage/images and deduplicates
+PASS SDK reload: fresh runtime, one hint, unchanged prompt and tool schemas
+PASS test-owned native bash fallback: checked standard patch, unrelated edits retained, failed check does not apply
+PASS subsequent edits still use unmodified native edit
+CLI remove: Removing D:\XuKai\Project\myflow\work\scripts\pi\pi-edit-fallback...
+Removed D:\XuKai\Project\myflow\work\scripts\pi\pi-edit-fallback
+CLI list: No packages installed.
+PASS isolated CLI remove → list → SDK reload: no extension or hint, source retained
+PASS zero external network requests and zero extension runtime errors

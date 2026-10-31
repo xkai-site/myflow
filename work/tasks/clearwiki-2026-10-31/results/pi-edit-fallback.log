@@ -1,0 +1,44 @@
+﻿
+> pi-edit-fallback@0.1.0 test
+> node --test test/*.test.ts
+
+✔ registers only one synchronous tool_result handler and accesses no other API (4.4908ms)
+✔ normal results and non-edit results return before inspecting content (0.5277ms)
+✔ enhances ambiguity: Found 2 occurrences of edits[2] in assets/css/style.scss. Each oldText must be unique. Please provide more context to make it unique. (0.5881ms)
+✔ enhances ambiguity: Found 2 occurrences of the text in sample.txt. The text must be unique. Please provide more context to make it unique. (0.1151ms)
+✔ enhances ambiguity: Found 12 occurrences of oldText in file.txt. (0.1165ms)
+✔ enhances ambiguity: FOUND 100 OCCURRENCES OF edits[10] in C:\path with spaces\file.ts. (0.0819ms)
+✔ enhances ambiguity: Found
+3 occurrences of the text in file.txt. (0.0731ms)
+✔ enhances ambiguity: Each oldText must be unique. (0.2294ms)
+✔ enhances ambiguity: oldText is not unique in target.ts (0.2556ms)
+✔ enhances ambiguity: The old text is not unique. (0.2595ms)
+✔ enhances ambiguity: oldText matches multiple locations in target.ts (0.3206ms)
+✔ enhances ambiguity: Old text matched more than one position in target.ts (0.1319ms)
+✔ leaves unrelated failure untouched: Could not find the exact text in sample.txt. The old text must match exactly including all whitespace and newlines. (0.1112ms)
+✔ leaves unrelated failure untouched: Could not find edits[2] in sample.txt. The oldText must match exactly including all whitespace and newlines. (0.0313ms)
+✔ leaves unrelated failure untouched: Could not edit file: missing.ts. Error code: ENOENT. (0.0265ms)
+✔ leaves unrelated failure untouched: EACCES: permission denied (0.0567ms)
+✔ leaves unrelated failure untouched: oldText must not be empty in sample.txt. (0.0726ms)
+✔ leaves unrelated failure untouched: edits[0] and edits[1] overlap in file.ts. Merge them into one edit or target disjoint regions. (0.0352ms)
+✔ leaves unrelated failure untouched: No changes made to sample.txt. The replacement produced identical content. (0.0781ms)
+✔ leaves unrelated failure untouched: Operation aborted (0.0568ms)
+✔ leaves unrelated failure untouched: Found 0 occurrences of oldText in file.ts. (0.0251ms)
+✔ leaves unrelated failure untouched: Found 1 occurrence of the text in file.ts. (0.0269ms)
+✔ leaves unrelated failure untouched: Found 12 occurrences of a search pattern in file.ts. (0.029ms)
+✔ leaves unrelated failure untouched: Error parsing oldText: invalid input (0.0381ms)
+✔ leaves unrelated failure untouched: file name must be unique (0.0239ms)
+✔ leaves unrelated failure untouched: (empty) (0.0284ms)
+✔ preserves original blocks, details, structuredContent, usage and input without mutation (0.5343ms)
+✔ preserves falsey structured content values (0.1084ms)
+✔ duplicate detection can span multiple text blocks; never reads image data as error text (0.0783ms)
+✔ is idempotent across handler chaining and repeated dispatch, with no cross-call state (0.0938ms)
+✔ recovery guidance covers safe progressive repair without automatic execution (0.2692ms)
+ℹ tests 31
+ℹ suites 0
+ℹ pass 31
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 500.7055
