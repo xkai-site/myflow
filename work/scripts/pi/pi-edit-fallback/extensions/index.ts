@@ -51,6 +51,6 @@ export function enhanceEditFailure(event: ToolResultEvent): ToolResultEventResul
   };
 }
 
-export default function piEditFellback(pi: ExtensionAPI): void {
+export default function piEditFallback(pi: ExtensionAPI): void {
   pi.on("tool_result", enhanceEditFailure);
 }

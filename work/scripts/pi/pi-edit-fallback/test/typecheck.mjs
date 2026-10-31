@@ -8,7 +8,7 @@ import { resolveSdk, siblingEntry } from "./sdk.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const sdk = resolveSdk();
-const temporary = mkdtempSync(path.join(tmpdir(), "pi-edit-fellback-types-"));
+const temporary = mkdtempSync(path.join(tmpdir(), "pi-edit-fallback-types-"));
 try {
   const config = path.join(temporary, "tsconfig.json");
   const nodeTypes = path.dirname(siblingEntry(sdk, "@types/node/package.json"));

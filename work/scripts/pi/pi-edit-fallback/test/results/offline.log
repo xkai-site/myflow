@@ -1,0 +1,98 @@
+Offline verification: 2026-10-31T02:20:59.218Z
+Platform: win32/x64; Node v24.22.1
+Pi: 1.4.0
+npm: 11.19.1
+TypeScript: Version 5.9.3
+Isolation: fresh source copy; empty HOME/agent/npm cache; no project node_modules or inherited credentials/config.
+Prerequisites: pre-provisioned Pi SDK/dependencies and TypeScript only (outside clean source).
+PASS network guard self-check: fetch, TCP, HTTPS and DNS blocked; probe counters reset.
+
+$ npm test
+
+> pi-edit-fallback@0.1.0 test
+> node --test test/*.test.ts
+
+✔ registers only one synchronous tool_result handler and accesses no other API (5.8966ms)
+✔ normal results and non-edit results return before inspecting content (0.2259ms)
+✔ enhances ambiguity: Found 2 occurrences of edits[2] in assets/css/style.scss. Each oldText must be unique. Please provide more context to make it unique. (0.3587ms)
+✔ enhances ambiguity: Found 2 occurrences of the text in sample.txt. The text must be unique. Please provide more context to make it unique. (0.1079ms)
+✔ enhances ambiguity: Found 12 occurrences of oldText in file.txt. (0.1332ms)
+✔ enhances ambiguity: FOUND 100 OCCURRENCES OF edits[10] in C:\path with spaces\file.ts. (0.1142ms)
+✔ enhances ambiguity: Found
+3 occurrences of the text in file.txt. (0.1146ms)
+✔ enhances ambiguity: Each oldText must be unique. (0.1928ms)
+✔ enhances ambiguity: oldText is not unique in target.ts (0.1952ms)
+✔ enhances ambiguity: The old text is not unique. (0.2644ms)
+✔ enhances ambiguity: oldText matches multiple locations in target.ts (0.2813ms)
+✔ enhances ambiguity: Old text matched more than one position in target.ts (0.1585ms)
+✔ leaves unrelated failure untouched: Could not find the exact text in sample.txt. The old text must match exactly including all whitespace and newlines. (0.0932ms)
+✔ leaves unrelated failure untouched: Could not find edits[2] in sample.txt. The oldText must match exactly including all whitespace and newlines. (0.0392ms)
+✔ leaves unrelated failure untouched: Could not edit file: missing.ts. Error code: ENOENT. (0.0403ms)
+✔ leaves unrelated failure untouched: EACCES: permission denied (0.0746ms)
+✔ leaves unrelated failure untouched: oldText must not be empty in sample.txt. (0.0581ms)
+✔ leaves unrelated failure untouched: edits[0] and edits[1] overlap in file.ts. Merge them into one edit or target disjoint regions. (0.0448ms)
+✔ leaves unrelated failure untouched: No changes made to sample.txt. The replacement produced identical content. (0.0312ms)
+✔ leaves unrelated failure untouched: Operation aborted (0.0255ms)
+✔ leaves unrelated failure untouched: Found 0 occurrences of oldText in file.ts. (0.029ms)
+✔ leaves unrelated failure untouched: Found 1 occurrence of the text in file.ts. (0.0302ms)
+✔ leaves unrelated failure untouched: Found 12 occurrences of a search pattern in file.ts. (0.0292ms)
+✔ leaves unrelated failure untouched: Error parsing oldText: invalid input (0.0303ms)
+✔ leaves unrelated failure untouched: file name must be unique (0.0238ms)
+✔ leaves unrelated failure untouched: (empty) (0.0232ms)
+✔ preserves original blocks, details, structuredContent, usage and input without mutation (0.3745ms)
+✔ preserves falsey structured content values (0.1074ms)
+✔ duplicate detection can span multiple text blocks; never reads image data as error text (0.0873ms)
+✔ is idempotent across handler chaining and repeated dispatch, with no cross-call state (0.0953ms)
+✔ recovery guidance covers safe progressive repair without automatic execution (0.2129ms)
+ℹ tests 31
+ℹ suites 0
+ℹ pass 31
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 348.0793
+PASS npm test (exit 0)
+
+$ npm run test:host
+
+> pi-edit-fallback@0.1.0 test:host
+> node test/host.mjs
+
+Host: Pi 1.4.0, v24.22.1, win32
+SKIP personal single-file entry check; package install is verified below
+PASS alternative single-file auto-discovery (removed before package install)
+CLI list: No packages installed.
+CLI install: Installing <clean-room>\pi-edit-fallback...
+Installed <clean-room>\pi-edit-fallback
+CLI list: User packages:
+  ..\..\pi-edit-fallback-offline-6sbpOe\pi-edit-fallback
+    <clean-room>\pi-edit-fallback
+PASS isolated CLI install → list: one persisted local package, no copied entry
+PASS auto-discovery/Jiti, unchanged tools, schemas and system prompt
+PASS real native edit success: no hint, normal result/diff preserved
+PASS real single-edit ambiguity: original error plus one hint, isError=true, no writes
+PASS real batch ambiguity: correct diagnostic and atomic native failure
+PASS retry with unique context uses native edit and changes only the target
+PASS other native edit failures are byte-identical to native diagnostics
+PASS real runner preserves structuredContent/details/usage/images and deduplicates
+PASS SDK reload: fresh runtime, one hint, unchanged prompt and tool schemas
+PASS test-owned native bash fallback: checked standard patch, unrelated edits retained, failed check does not apply
+PASS subsequent edits still use unmodified native edit
+CLI remove: Removing <clean-room>\pi-edit-fallback...
+Removed <clean-room>\pi-edit-fallback
+CLI list: No packages installed.
+PASS isolated CLI remove → list → SDK reload: no extension or hint, source retained
+PASS zero external network requests and zero extension runtime errors
+PASS npm run test:host (exit 0)
+
+$ npm run typecheck
+
+> pi-edit-fallback@0.1.0 typecheck
+> node test/typecheck.mjs
+
+Typecheck passed against <pi-sdk>\dist\index.js
+PASS npm run typecheck (exit 0)
+
+PASS all three commands; zero network attempts in Node processes (including npm/CLI children).
+Scope: application-level network guard, not OS-level network isolation; no real model or interactive TUI used.

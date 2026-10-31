@@ -1,5 +1,5 @@
 {
-  "name": "pi-edit-fellback",
+  "name": "pi-edit-fallback",
   "version": "0.1.0",
   "description": "Annotate ambiguous native edit failures with progressive recovery guidance",
   "type": "module",
@@ -8,6 +8,7 @@
   "scripts": {
     "test": "node --test test/*.test.ts",
     "test:host": "node test/host.mjs",
+    "test:offline": "node test/offline.mjs",
     "typecheck": "node test/typecheck.mjs"
   },
   "peerDependencies": {

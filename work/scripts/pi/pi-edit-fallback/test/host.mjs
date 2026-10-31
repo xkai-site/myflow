@@ -9,10 +9,11 @@ import { resolveSdk } from "./sdk.mjs";
 import { EDIT_RECOVERY } from "../extensions/index.ts";
 
 const source = fileURLToPath(new URL("../extensions/index.ts", import.meta.url));
-const installed = process.env.PI_EDIT_FELLBACK_INSTALLED ?? path.join(
-  process.env.PI_CODING_AGENT_DIR ?? path.join(homedir(), ".pi", "agent"), "extensions", "pi-edit-fellback.ts",
+const packageRoot = path.dirname(path.dirname(source));
+const installed = process.env.PI_EDIT_FALLBACK_INSTALLED ?? path.join(
+  process.env.PI_CODING_AGENT_DIR ?? path.join(homedir(), ".pi", "agent"), "extensions", "pi-edit-fallback.ts",
 );
-const temporary = mkdtempSync(path.join(tmpdir(), "pi-edit-fellback-host-"));
+const temporary = mkdtempSync(path.join(tmpdir(), "pi-edit-fallback-host-"));
 const agentDir = path.join(temporary, "agent");
 const cwd = path.join(temporary, "workspace");
 mkdirSync(path.join(agentDir, "extensions"), { recursive: true });
@@ -39,12 +40,39 @@ try {
 
   if (existsSync(installed)) {
     assert.equal(readFileSync(installed, "utf8"), readFileSync(source, "utf8"));
-    copyFileSync(installed, path.join(agentDir, "extensions", "pi-edit-fellback.ts"));
     console.log("PASS installed entry is byte-identical to source");
   } else {
-    copyFileSync(source, path.join(agentDir, "extensions", "pi-edit-fellback.ts"));
-    console.log("SKIP installed entry check (not installed); testing source via auto-discovery");
+    console.log("SKIP personal single-file entry check; package install is verified below");
   }
+
+  // Also retain coverage for the alternative single-file auto-discovery mode.
+  const autoEntry = path.join(agentDir, "extensions", "pi-edit-fallback.ts");
+  copyFileSync(source, autoEntry);
+  const autoLoader = new sdk.DefaultResourceLoader({
+    cwd, agentDir, settingsManager: sdk.SettingsManager.inMemory({}, { projectTrusted: false }),
+    noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+  });
+  await autoLoader.reload();
+  assert.deepEqual(autoLoader.getExtensions().errors, []);
+  assert.equal(autoLoader.getExtensions().extensions.length, 1);
+  rmSync(autoEntry);
+  console.log("PASS alternative single-file auto-discovery (removed before package install)");
+
+  const cliEntry = path.join(path.dirname(sdkEntry), "cli.js");
+  function cli(...args) {
+    const output = execFileSync(process.execPath, [cliEntry, ...args], {
+      cwd, env: process.env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    });
+    console.log(`CLI ${args[0]}: ${output.trim()}`);
+    return output;
+  }
+  const readSettings = () => JSON.parse(readFileSync(path.join(agentDir, "settings.json"), "utf8"));
+  assert.match(cli("list"), /No packages installed/);
+  cli("install", packageRoot);
+  assert.equal(readSettings().packages.length, 1);
+  assert.match(cli("list").replaceAll("\\\\", "/"), /pi-edit-fallback/);
+  assert.ok(!existsSync(autoEntry), "Package and single-file installations must not coexist");
+  console.log("PASS isolated CLI install → list: one persisted local package, no copied entry");
 
   const runtime = await sdk.ModelRuntime.create({
     authPath: path.join(agentDir, "auth.json"),
@@ -65,9 +93,9 @@ try {
   const errors = [];
 
   async function makeSession(enabled) {
-    const settingsManager = sdk.SettingsManager.inMemory({
-      retry: { enabled: false }, compaction: { enabled: false }, cacheWarming: "off",
-    }, { projectTrusted: false });
+    const settingsManager = sdk.SettingsManager.create(cwd, agentDir, { projectTrusted: false });
+    settingsManager.setRetryEnabled(false);
+    settingsManager.setCompactionEnabled(false);
     const loader = new sdk.DefaultResourceLoader({
       cwd, agentDir, settingsManager,
       noExtensions: !enabled, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
@@ -94,6 +122,7 @@ try {
   assert.equal(session.systemPrompt, initialPrompt);
   assert.deepEqual(session.getActiveToolNames(), baseline.session.getActiveToolNames());
   const extension = host.loader.getExtensions().extensions[0];
+  assert.equal(path.resolve(extension.path), source, "Installed manifest must load the expected source entry");
   assert.deepEqual([...extension.handlers.keys()], ["tool_result"]);
   assert.equal(extension.tools.size, 0);
   assert.equal(extension.commands.size, 0);
@@ -238,6 +267,19 @@ try {
   assert.equal(result.isError, false);
   assert.equal(countHints(result), 0);
   console.log("PASS subsequent edits still use unmodified native edit");
+
+  cli("remove", packageRoot);
+  assert.deepEqual(readSettings().packages, []);
+  assert.match(cli("list"), /No packages installed/);
+  await session.reload();
+  assert.deepEqual(host.loader.getExtensions().errors, []);
+  assert.equal(host.loader.getExtensions().extensions.length, 0);
+  assert.deepEqual(declarations(session), initialDeclarations);
+  result = await execute("edit", { path: "sample.txt", edits: [{ oldText: "keep", newText: "changed" }] });
+  assert.equal(result.isError, true);
+  assert.equal(countHints(result), 0);
+  assert.ok(existsSync(source), "Removing a local package must not delete its source");
+  console.log("PASS isolated CLI remove → list → SDK reload: no extension or hint, source retained");
   assert.deepEqual(errors, []);
   assert.deepEqual(networkAttempts, []);
   console.log("PASS zero external network requests and zero extension runtime errors");
