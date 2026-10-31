@@ -1,47 +1,58 @@
-# Pi 扩展开发
+# Pi 插件开发与维护
 
-本仓库集中存放五个可独立使用和维护的插件，目录为 `work/scripts/pi/<插件名>/`。每个目录包含自己的源码、配置、依赖声明、测试、测试辅助、README 和许可证，可单独复制并准备依赖后运行。各插件通过 `package.json` 的 `pi.extensions` 声明 `extensions/index.ts`。
+本页只约定插件共用的组织方式与维护原则，不维护具体插件清单、功能入口、配置字段、依赖版本或测试命令。具体用法和实现说明以各插件目录内的文档、包清单及源码为准；新增插件无需在本页登记。
 
-本页提供开发导航，各插件 README 维护完整的安装、配置与测试说明；[测试索引](pi-extension-testing.md)链接到各自入口。小型辅助代码由使用它的插件自行维护，修改与版本验证均以单个插件为范围。
+## 目录与职责
 
-## 实现入口
+插件放在 `work/scripts/pi/<插件名>/`，以单个插件目录作为使用、测试和维护边界。按需组织文件，不为满足目录模板创建空模块：
 
-| 插件 | 用户入口 | 实现位置 |
-| --- | --- | --- |
-| [pi-usage-openai](../../work/scripts/pi/pi-usage-openai/README.md) | `/usage-openai` | `extensions/index.ts` 注册命令，`codex-auth.ts` 读取登录，`codex-usage.ts` 查询与格式化 |
-| [pi-image-generation](../../work/scripts/pi/pi-image-generation/README.md) | `/image` | `models.jsonc` 定义模型，`src/credentials.ts` 解析认证，`src/runtime.ts` 生成并保存 |
-| [pi-video-generation](../../work/scripts/pi/pi-video-generation/README.md) | `/video` | `src/command.ts` 解析输入，`src/submission.ts` 与适配器处理任务，`src/task-store.ts` 保存恢复记录 |
-| [pi-notification](../../work/scripts/pi/pi-notification/README.md) | `/notify` 与生命周期事件 | `src/runtime.ts` 组织状态、通知和消息 API；插件内的[模块说明](../../work/scripts/pi/pi-notification/docs/architecture.md)列出调用关系 |
-| [pi-edit-fallback](../../work/scripts/pi/pi-edit-fallback/README.md) | `tool_result` | `extensions/index.ts` 增强 edit 的非唯一匹配错误 |
+```text
+<插件名>/
+├── package.json       # 入口、依赖、兼容范围和测试命令
+├── README.md          # 功能、安装、配置、开发与测试说明
+├── LICENSE            # 独立分发所需的许可证
+├── extensions/        # 宿主加载入口与注册逻辑
+├── src/               # 按职责拆分的实现（按需）
+├── test/              # 测试与本插件的测试辅助
+└── docs/              # 较长的架构或协议说明（按需）
+```
 
-图片、视频和用量插件注册用户命令；编辑恢复处理工具结果；通知处理公开生命周期事件并提供设置命令。新增功能按实际调用者选择 `registerCommand`、`registerTool`、`on` 或 `registerProvider`。图片与视频模型由插件管理，和聊天 provider 的职责分别由各自实现确定。
+- 入口位置由 `package.json` 的 `pi.extensions` 声明，入口主要负责注册和连接宿主，不堆叠业务逻辑。
+- 复杂逻辑按配置、状态、外部访问、交互等职责拆分；模块结构取决于实际调用关系。
+- 源码相对导入、测试辅助和本地文档链接应留在插件目录内，不依赖仓库中的兄弟插件或公共测试目录。
+- 运行依赖、开发依赖与宿主提供的依赖分别在包清单中声明；兼容范围与实际验证版本分别记录，不在公共文档复制各包版本表。
+- 小型辅助代码由使用它的插件自行维护。若确需共享，应显式发布和声明依赖，不通过仓库相对路径隐式耦合。
 
-## 配置与资源
+## 配置、状态与资源
 
-扩展由宿主加载 TypeScript 入口。入口负责注册，复杂逻辑在 `src/` 或 `extensions/` 模块中维护。运行时依赖写入 `dependencies`，宿主提供的 Pi 包写入 `peerDependencies`。
+配置说明应明确文件位置、默认值、生效时机、覆盖顺序，以及临时修改和持久保存的范围。读取失败、非法输入和保存失败应有可解释的处理方式，避免静默覆盖用户数据。
 
-会话级资源在 `session_start` 或实际调用时创建，在 `session_shutdown` 中收尾。通知插件通过 `agent_settled` 判定最终结果；其退出等待受 `shutdownFlushMs` 限制。用户界面按 `ctx.mode` 处理 TUI、RPC、print 和 JSON 的差异。
+凭据说明应交代读取来源、存储形式、发送目标和失败结果；日志与错误信息不得泄露密钥。用户配置、运行状态与恢复记录按用途区分，避免将机器路径、账号信息或运行产物作为可分发默认值。
 
-配置说明应标明文件位置、生效时机、默认值、会话与用户级保存范围。凭据说明应标明读取来源、发送目标、存储形式及失败结果；日志记录实际需要的脱敏诊断。项目级扩展的加载遵循宿主的项目信任设置。
+资源按实际调用和会话生命周期创建，并在结束时清理；外部访问应有超时、取消和有界的退出等待。异步任务、重试与恢复需明确所属会话及状态边界，防止跨会话串用。交互逻辑应区分交互式和非交互式运行，不假定所有环境都有终端界面。
 
-## 修改与验证
+## 测试与验证
 
-先阅读目标插件的 README、清单、入口及实际调用模块，再在该插件目录运行相关测试。修改用户入口、配置、权限或输出时同步修改该插件说明。依赖与测试辅助由该插件目录提供，包安装使用本地源码引用，后续加载依赖该目录的位置。
+测试命令、准备步骤及覆盖范围由各插件 README 和 `package.json` 维护。进入目标插件目录，按其说明安装依赖并运行测试；公共文档不复制具体命令或测试文件清单。
 
-| 插件 | 当前宿主声明 |
+根据功能选择验证层次：
+
+| 层次 | 核对重点 |
 | --- | --- |
-| pi-image-generation | `@earendil-works/pi-coding-agent >=0.99.0` |
-| pi-notification | `@earendil-works/pi-coding-agent >=1.1.0` |
-| pi-usage-openai、pi-edit-fallback | `@earendil-works/pi-coding-agent *` |
-| pi-video-generation | `@earendil-works/pi-coding-agent *`、`@earendil-works/pi-tui *` |
+| 模块测试 | 输入校验、状态变化、配置合并、边界条件与失败路径 |
+| 外部交互测试 | 使用本机服务或替身验证协议、超时、重试、取消及脱敏 |
+| 宿主集成测试 | 在目标宿主版本中核对加载、注册、事件、输出与资源释放 |
+| 独立性验证 | 将插件复制到仓库外，按自身文档准备依赖，核对加载、测试和本地引用不依赖仓库结构 |
 
-这些声明来自各包清单，最低版本与实际验证版本分别记录。本次 Pi 1.4.0 的运行范围见[整理记录](../../work/tasks/clearwiki-2026-10-31/README.md)。升级时用目标安装中的类型声明、实现和宿主测试核对相关接口。
+测试优先使用临时目录、模拟凭据和可控响应，避免修改个人配置或触发真实付费服务。需要 SDK、宿主或系统能力时，插件应自行说明定位方式、前置条件和跳过条件，不能依赖某台机器的固定路径。
 
-## 外部资料
+通过模拟测试不等于真实服务、账号权限或最终投递已验证；运行时测试也不能替代类型检查。记录命令、工作目录、源码版本、环境、退出状态与未覆盖范围，不将旧环境中的结果当作当前兼容保证。
 
-以下链接用于查阅 Pi 接口；具体行为以使用版本的实现和测试为依据。
+## 修改与文档维护
 
-- [扩展 API 与事件](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md)
-- [包清单与安装](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md)
-- [配置](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/configuration.md)与[设置](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/settings.md)
-- [终端 UI](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/tui.md)
+1. 修改前阅读目标插件的 README、包清单、入口和实际调用模块。
+2. 修改后运行受影响的专项测试；涉及宿主接口、安装或目录依赖时，补充集成或独立性验证。
+3. 用户入口、配置、权限、输出、依赖或测试方式变化时，同步更新该插件内的说明。详细架构也在插件内维护，不复制到 wiki。
+4. 本页仅在共用组织方式或维护原则变化时更新；具体插件的新增和调整不要求同步修改本页。
+
+仓库整理或集中验证的记录放在 `work/tasks/`，已完成计划与历史材料放在 `plans/archive/`。报告应关联当时的命令、环境和源码版本；需要对照历史材料时固定源提交，复跑结果另存，不覆盖原始记录。历史结果与当前使用说明分开维护。

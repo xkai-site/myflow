@@ -1,6 +1,6 @@
 # 图片插件配置与调查索引
 
-当前使用说明见[插件 README](../../../work/scripts/pi/pi-image-generation/README.md)，执行环境与测试命令见[测试指南](../../../wiki/tech/pi-extension-testing.md)。
+当前使用说明见[插件 README](../../../work/scripts/pi/pi-image-generation/README.md)，执行环境与测试命令见[插件测试说明](../../../work/scripts/pi/pi-image-generation/README.md#测试)。
 
 - [模型配置与认证实现](image-generation-model-config.md)，以及[原配置改造验证记录](model-config-verification.md)。
 - [生图请求调查](openai-image-request-investigation.md)与[客户端长任务研究报告](openai-image-async-client-research.md)：保留原始内容，结论对应报告中的版本、账号及证据范围。

@@ -7,10 +7,11 @@ import path from 'node:path';
 
 const root = process.cwd();
 const record = 'work/tasks/clearwiki-2026-10-31';
-const reportFile = process.argv[2] || `${record}/results/document-check.json`;
+const baselineCommit = '02ad9791eb051d790005b3255dab0fb6f5b64881';
+const reportFile = process.argv[2] || `${record}/results/rerun-check.json`;
 const normalize = text => text.replaceAll('\r\n', '\n');
 const read = file => readFileSync(path.join(root, file), 'utf8');
-const original = file => execFileSync('git', ['show', `HEAD:${file}`], { cwd: root, encoding: 'utf8', windowsHide: true });
+const original = file => execFileSync('git', ['show', `${baselineCommit}:${file}`], { cwd: root, encoding: 'utf8', windowsHide: true });
 const files = [];
 function visit(directory = '') {
   for (const entry of readdirSync(path.join(root, directory), { withFileTypes: true })) {
@@ -132,7 +133,7 @@ const hashFiles = directory => {
 for (const name of ['pi-image-generation', 'pi-video-generation', 'pi-notification', 'pi-usage-openai', 'pi-edit-fallback']) {
   hashFiles(`work/scripts/pi/${name}`);
 }
-const report = { checkedAt: new Date().toISOString(), environment: { node: process.version, platform: process.platform, arch: process.arch }, markdownFiles: files.length, localLinks: links,
+const report = { checkedAt: new Date().toISOString(), baselineCommit, environment: { node: process.version, platform: process.platform, arch: process.arch }, markdownFiles: files.length, localLinks: links,
   preservedFiles: preserved, preservedExcerpts: excerpts.map(([file]) => file), packages: packages.map(entry => entry.name),
   independentPackages, scriptEntries, errors, files, sourceHashes };
 writeFileSync(reportFile, JSON.stringify(report, null, 2) + '\n');

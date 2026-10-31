@@ -6,6 +6,6 @@
 
 `src/runtime.ts` 在插件局部创建图片模型集合，按选定适配器生成，再由 `src/image-files.ts` 校验并保存输出。TUI 编辑接收本地参考图，标准 RPC `/image` 为文本生成入口。
 
-配置字段、认证端点、密钥明文保存与输入限制见[插件 README](../../../work/scripts/pi/pi-image-generation/README.md)。配置和认证专项、宿主模拟生成/编辑见[测试指南](../../../wiki/tech/pi-extension-testing.md)。
+配置字段、认证端点、密钥明文保存与输入限制见[插件 README](../../../work/scripts/pi/pi-image-generation/README.md)。配置和认证专项、宿主模拟生成/编辑见[插件测试说明](../../../work/scripts/pi/pi-image-generation/README.md#测试)。
 
 原三模型配置改造的执行结果保存在[历史验证记录](model-config-verification.md)，模型清单与本次运行范围分别以当前配置和整理报告为准。

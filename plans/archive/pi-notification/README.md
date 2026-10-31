@@ -1,6 +1,6 @@
 # 通知插件归档索引
 
-当前用法见[插件 README](../../../work/scripts/pi/pi-notification/README.md)，实现关系见[模块说明](../../../wiki/tech/pi-notification-architecture.md)，执行命令见[测试指南](../../../wiki/tech/pi-extension-testing.md)。
+当前用法见[插件 README](../../../work/scripts/pi/pi-notification/README.md)，实现关系见[模块说明](../../../work/scripts/pi/pi-notification/docs/architecture.md)，执行命令见[插件测试说明](../../../work/scripts/pi/pi-notification/README.md#开发与测试)。
 
 | 主题 | 导航 |
 | --- | --- |

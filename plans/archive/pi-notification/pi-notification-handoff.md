@@ -1,6 +1,6 @@
 # 通知插件维护入口
 
-使用与配置从 [插件 README](../../../work/scripts/pi/pi-notification/README.md) 开始，查调用关系读 [模块说明](../../../wiki/tech/pi-notification-architecture.md)，查环境与执行命令读 [测试指南](../../../wiki/tech/pi-extension-testing.md)。
+使用与配置从 [插件 README](../../../work/scripts/pi/pi-notification/README.md) 开始，查调用关系读 [模块说明](../../../work/scripts/pi/pi-notification/docs/architecture.md)，查环境与执行命令读 [插件测试说明](../../../work/scripts/pi/pi-notification/README.md#开发与测试)。
 
 TUI 使用 `/notify` 设置；RPC、print、JSON 模式展示状态。旧 `/notify on|off|status|config|reload` 子命令已由单一入口替代，配置重读使用界面动作或 `/reload`。
 

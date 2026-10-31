@@ -4,4 +4,4 @@
 
 原 `pi-codex-official` 的对话 provider、模型缓存与 OAuth 注册已从该插件职责中移除。图片插件的 OpenAI 认证通过独立 `openai-codex` provider 配置。
 
-凭据有效期、账号匹配、用量响应和命令注册的测试见[测试指南](../../../wiki/tech/pi-extension-testing.md)。原重构时的测试结果、安装核对与图片宿主失败保存在[历史验证记录](verification-history.md)。
+凭据有效期、账号匹配、用量响应和命令注册的测试见[插件测试说明](../../../work/scripts/pi/pi-usage-openai/README.md#开发与测试)。原重构时的测试结果、安装核对与图片宿主失败保存在[历史验证记录](verification-history.md)。

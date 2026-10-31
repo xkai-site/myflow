@@ -7,10 +7,10 @@
 | 范围 | 处理 |
 | --- | --- |
 | 根 README、[开发手册](../../../wiki/tech/pi-extension-development.md) | 统一功能、开发、测试与历史记录入口；按包清单修正宿主版本声明 |
-| [测试指南](../../../wiki/tech/pi-extension-testing.md) | 集中维护 PowerShell 命令、依赖、专项脚本、SDK 设置与覆盖边界 |
+| 原测试指南（现并入[开发与维护](../../../wiki/tech/pi-extension-development.md#测试与验证)） | 当时集中维护 PowerShell 命令、依赖、专项脚本、SDK 设置与覆盖边界；具体命令现由各插件 README 维护 |
 | 五个插件 README | 核对入口与配置，精简重复说明；补图片测试入口，修正视频的 Git Bash 示例和用量测试的执行目录 |
 | 编辑恢复 README | 以输入、输出、安装、测试和卸载组织；完整恢复提示仍由源码常量维护 |
-| [通知模块说明](../../../wiki/tech/pi-notification-architecture.md) | 根据当前入口、runtime、配置与渠道代码说明调用关系 |
+| [通知模块说明](../../scripts/pi/pi-notification/docs/architecture.md) | 根据入口、runtime、配置与渠道代码说明调用关系；现仅在插件内维护 |
 | [归档目录](../../../plans/archive/README.md) | 已完成计划改为功能导航，去掉执行步骤、检查点、过期目录与重复配置描述 |
 | 历史验证 | 将图片配置、通知、用量改造中的验证段落另存为历史报告，保留当时命令、结果和限制 |
 | 测试代码 | 通知 `kiss-contract.mjs` 更名为 `routing-contract.mjs`，删除未使用的临时目录；结构检查改为检查实际导入；视频拆出 `test:unit` / `test:host` |
@@ -51,7 +51,7 @@
 
 测试均退出 0。首次图片宿主复测暴露仅 ESM 导出的包无法用 `require.resolve` 定位，修正后通过；[首次失败日志](results/pi-image-generation-host-attempt-1.log)保留。Node 测试子进程曾被沙箱以 `spawn EPERM` 阻止，获执行许可后在沙箱外完成上述测试。
 
-文档检查脚本为 [`verify.mjs`](verify.mjs)。在仓库根运行 `node work/tasks/clearwiki-2026-10-31/verify.mjs`，检查 Markdown 编码、围栏、相对链接、包清单与测试脚本路径，并对照 Git HEAD 验证原材料和历史段落的保留情况；结果、全部文件清单和源码 SHA-256 写入 [document-check.json](results/document-check.json)。已检查 32 份 Markdown、125 个本地链接、五个包清单及 28 处测试脚本引用，原始材料与历史段落核对通过，`git diff --check` 通过。链接锚点及外部 URL 未作联网验证。
+文档检查脚本为 [`verify.mjs`](verify.mjs)，检查 Markdown 编码、围栏、相对链接、包清单与测试脚本路径，以及原材料和历史段落的保留情况。原始结果、全部文件清单和源码 SHA-256 保留在 [document-check.json](results/document-check.json)：当时已检查 32 份 Markdown、125 个本地链接、五个包清单及 28 处测试脚本引用，原始材料与历史段落核对通过，`git diff --check` 通过。链接锚点及外部 URL 未作联网验证。
 
 ## 保留材料与验证限制
 
@@ -76,3 +76,9 @@
 独立性验证将图片、视频插件分别复制到仓库外的新临时目录，包含本插件已安装的 npm 依赖，使用现有 Pi SDK 作为宿主。副本通过本插件的相对导入加载全部测试与辅助代码：图片 `npm run test` 32 项及 `npm run test:host` 均通过（[日志](results/independent-image.log)）；视频 `npm run test` 的 13 项单元及宿主测试均通过（[日志](results/independent-video.log)）。本轮没有重新下载依赖，依赖获取过程不属于这次验证范围。
 
 五个插件的相对源码导入与文档链接均位于各自目录，独立许可证与仓库 MIT 原文一致；检查记录见 [independent-check.json](results/independent-check.json)。本轮其它三个插件的变更为文档与许可证，未重复执行它们的测试。`git diff --check` 通过。
+
+## 验证脚本复跑修复
+
+原脚本通过动态 `HEAD` 读取历史材料，整理提交后会读取已清理的文件，导致历史段落缺失断言，原文件核对也退化为自身比较。现将对照版本固定为清理前的提交 `02ad9791eb051d790005b3255dab0fb6f5b64881`，并在报告的 `baselineCommit` 字段记录该版本；本地 Git 必须包含此提交。
+
+在仓库根运行 `node work/tasks/clearwiki-2026-10-31/verify.mjs`，默认将本次结果写入独立的 [rerun-check.json](results/rerun-check.json)，不覆盖原始 `document-check.json` 或其它历史报告。仍可通过首个参数指定其它输出文件；复跑时应使用新的报告路径，而非前述历史报告路径。

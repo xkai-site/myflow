@@ -1,6 +1,6 @@
 # 图片配置改造的历史验证记录
 
-以下执行记录从原 `image-generation-model-config.md` 原样保留。计数、SDK 路径和验证边界对应当时的三个模型，不代表当前五模型清单的测试结果。当前入口见[测试指南](../../../wiki/tech/pi-extension-testing.md)。
+以下执行记录从原 `image-generation-model-config.md` 原样保留。计数、SDK 路径和验证边界对应当时的三个模型，不代表当前五模型清单的测试结果。当前入口见[插件测试说明](../../../work/scripts/pi/pi-image-generation/README.md#测试)。
 
 ## Execution log
 - Step 5: 添加单一 models.jsonc、严格 JSONC 校验、尺寸策略及显式依赖。`npm install --ignore-scripts --no-audit --no-fund` 完成；`npm test` 5/5 通过，未访问真实凭据或生图服务。
