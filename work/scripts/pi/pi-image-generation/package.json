@@ -13,7 +13,9 @@
     "proper-lockfile": "4.1.2"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.99.0"
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": ">=0.99.0",
+    "@earendil-works/pi-tui": "*"
   },
   "keywords": [
     "pi-package",

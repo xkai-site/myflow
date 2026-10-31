@@ -1,8 +1,0 @@
-Command: npm run test:host (pi-video-generation)
-Exit code: 0
-
-
-> pi-video-generation@0.1.0 test:host
-> node test/output-preview.mjs
-
-Video output checks passed: persistent TUI link, RPC fallback, historical entries, invalid paths, OSC 8 targets/wrapping, theme/capability refresh, no file writes or network.

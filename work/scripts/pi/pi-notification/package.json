@@ -24,7 +24,8 @@
     "test:cli": "node test/cli-smoke.mjs"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=1.1.0"
+    "@earendil-works/pi-coding-agent": ">=1.1.0",
+    "@earendil-works/pi-tui": "*"
   },
   "keywords": [
     "pi-package",
