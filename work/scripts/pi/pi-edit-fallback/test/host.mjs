@@ -37,6 +37,7 @@ try {
   const ai = await import(pathToFileURL(path.resolve(path.dirname(sdkEntry), "../../pi-ai/dist/index.js")).href);
   const hostPackage = JSON.parse(readFileSync(path.join(path.dirname(sdkEntry), "..", "package.json"), "utf8"));
   console.log(`Host: Pi ${hostPackage.version}, ${process.version}, ${process.platform}`);
+  assert.equal(hostPackage.version, "1.5.0", "Host regression tests require the exact Pi 1.5.0 SDK");
 
   if (existsSync(installed)) {
     assert.equal(readFileSync(installed, "utf8"), readFileSync(source, "utf8"));
@@ -195,37 +196,45 @@ try {
   assert.equal(toolResultSeenByModel(result.toolCallId ?? "").split("Edit recovery:").length - 1, 1);
   console.log("PASS the model request carries the hint exactly once");
 
-  // Display regression: the hint belongs to the model, not to a second region outside the edit box.
+  // Pi 1.5.0's real resolver chain must preserve native output at multiple TUI widths.
   const renderersEntry = path.join(path.dirname(sdkEntry), "core", "tools", "renderers", "index.js");
-  if (existsSync(renderersEntry) && typeof sdk.ToolExecutionComponent === "function") {
-    const { editRenderers } = await import(pathToFileURL(renderersEntry).href);
-    sdk.initTheme("dark", false);
-    const strip = (line) => line.replace(/\x1b\[[0-9;]*m/g, "");
-    const drawEdit = (content, definition) => {
-      const component = new sdk.ToolExecutionComponent(
-        "edit",
-        "render-check",
-        { path: "sample.txt", edits: [{ oldText: "value=old", newText: "value=new" }] },
-        { outputPad: 1 },
-        definition,
-        { requestRender() {} },
-        cwd,
-      );
-      component.setArgsComplete();
-      component.updateResult({ content, details: undefined, isError: true }, false);
-      return component.render(70).map(strip).join("\n");
-    };
-    const resolved = extension.toolRenderers[0]("edit", () => ({ renderShell: "self", ...editRenderers }));
-    assert.ok(resolved?.renderResult, "The resolver must keep the native edit result renderer");
-    const drawn = drawEdit(result.content, resolved);
-    assert.match(drawn, /Found 2 occurrences of the text in sample\.txt\./);
-    assert.ok(!drawn.includes("Edit recovery:"), "the hint must not be drawn as a second region");
-    assert.ok(!drawn.includes("Patch safety:"));
-    assert.match(textOf(result), /Edit recovery:/, "the model still receives the hint");
-    console.log("PASS displayed edit error keeps the native rendering; the hint stays model-facing");
-  } else {
-    console.log("SKIP display check; this SDK exposes no ToolExecutionComponent or built-in renderers");
+  assert.ok(existsSync(renderersEntry), "Pi 1.5.0 must expose built-in renderers");
+  assert.equal(typeof sdk.ToolExecutionComponent, "function", "Pi 1.5.0 must export ToolExecutionComponent");
+  const { withBuiltInRenderers } = await import(pathToFileURL(renderersEntry).href);
+  sdk.initTheme("dark", false);
+  const resolved = session.extensionRunner.resolveToolRenderers("edit", () => withBuiltInRenderers("edit", session.getToolDefinition("edit")));
+  const native = withBuiltInRenderers("edit", session.getToolDefinition("edit"));
+  assert.ok(resolved?.renderResult && native?.renderResult);
+  const strip = (line) => line.replace(/\\x1b\\[[0-9;]*m/g, "");
+  const drawEdit = (content, definition, width, expanded) => {
+    const component = new sdk.ToolExecutionComponent(
+      "edit",
+      "render-check",
+      { path: "sample.txt", edits: [{ oldText: "value=old", newText: "value=new" }] },
+      { outputPad: 1 },
+      definition,
+      { requestRender() {} },
+      cwd,
+    );
+    component.setExpanded(expanded);
+    component.setArgsComplete();
+    component.updateResult({ content, details: undefined, isError: true }, false);
+    return component.render(width).map(strip).join("\\n");
+  };
+  const rawContent = result.content.filter((block) => !(block.type === "text" && block.text === EDIT_RECOVERY));
+  assert.equal(result.content.length - rawContent.length, 1, "Fixture must have one added hint");
+  for (const width of [40, 70, 110]) {
+    for (const expanded of [false, true]) {
+      const drawn = drawEdit(result.content, resolved, width, expanded);
+      const baselineDrawn = drawEdit(rawContent, native, width, expanded);
+      assert.equal(drawn, baselineDrawn, `Pi 1.5 native TUI layout diverged at width=${width}, expanded=${expanded}`);
+      assert.ok(!drawn.includes("Edit recovery:") && !drawn.includes("Patch safety:"));
+    }
   }
+  assert.match(textOf(result), /Edit recovery:/, "the model-facing result retains the hint");
+  console.log("PASS Pi 1.5.0 real renderer chain: native TUI output at 40/70/110 columns, collapsed/expanded");
+  const bashRenderers = session.extensionRunner.resolveToolRenderers("bash", () => withBuiltInRenderers("bash", session.getToolDefinition("bash")));
+  assert.ok(bashRenderers?.renderResult, "Unrelated bash renderer must remain available");
 
   result = await execute("edit", { path: "sample.txt", edits: [
     { oldText: "updated header", newText: "should not be written" },
