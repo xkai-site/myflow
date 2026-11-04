@@ -24,11 +24,15 @@ re-read and re-locate (never force). Preserve unrelated changes; inspect
 the target and diff. Stop and explain if the target is unclear.
 Use native edit for subsequent edits.`;
 
-// Pi 1.4 reports "the text" for one replacement and "edits[n]" for a batch.
+// Pi reports "the text" for one replacement and "edits[n]" for a batch.
 // Match diagnostic fragments, not the complete message or a particular path.
 const DUPLICATE_OCCURRENCES = /\bfound\s+(?:[2-9]|[1-9]\d+)\s+occurrences?\s+of\s+(?:the\s+(?:old\s*)?text\b|old\s*text\b|edits\s*\[\s*\d+\s*\])/i;
 const NON_UNIQUE_TEXT = /\b(?:old\s*text|the\s+(?:old\s+)?text)\s+(?:must\s+be\s+unique|is\s+not\s+unique)\b/i;
 const MULTIPLE_MATCHES = /\bold\s*text\b\s+match(?:es|ed)?\s+(?:multiple|more\s+than\s+one)\s+(?:locations?|positions?|places?)\b/i;
+
+function isAmbiguousEditDiagnostic(text: string): boolean {
+  return DUPLICATE_OCCURRENCES.test(text) || NON_UNIQUE_TEXT.test(text) || MULTIPLE_MATCHES.test(text);
+}
 
 export function enhanceEditFailure(event: ToolResultEvent): ToolResultEventResult | undefined {
   // The normal path does not even inspect content or allocate a result.
@@ -40,7 +44,7 @@ export function enhanceEditFailure(event: ToolResultEvent): ToolResultEventResul
     .join("\n");
 
   if (text.includes(RECOVERY_MARKER)) return;
-  if (!DUPLICATE_OCCURRENCES.test(text) && !NON_UNIQUE_TEXT.test(text) && !MULTIPLE_MATCHES.test(text)) return;
+  if (!isAmbiguousEditDiagnostic(text)) return;
 
   return {
     // Append a separate text block: all original blocks and their metadata stay intact.
@@ -63,11 +67,14 @@ export function hideRecoveryHint(renderers: ToolRenderers | undefined): ToolRend
   return {
     ...renderers,
     renderResult(result, options, theme, context) {
-      const content = Array.isArray(result?.content)
-        ? result.content.filter((block) => !(block.type === "text" && block.text === EDIT_RECOVERY))
-        : undefined;
-      // Untouched results keep their identity, so unrelated rendering behavior is unchanged.
-      if (!content || content.length === result.content.length) return renderResult(result, options, theme, context);
+      // Only suppress the recovery hint for ambiguous edit errors. Do not alter unrelated output.
+      const blocks = result?.content;
+      if (!context.isError || !Array.isArray(blocks)) return renderResult(result, options, theme, context);
+      const content = blocks.filter((block) => !(block.type === "text" && block.text === EDIT_RECOVERY));
+      if (content.length === blocks.length) return renderResult(result, options, theme, context);
+      const diagnostic = content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
+      if (!isAmbiguousEditDiagnostic(diagnostic)) return renderResult(result, options, theme, context);
+      // The underlying result is unchanged: the model and session still receive the full hint.
       return renderResult({ ...result, content }, options, theme, context);
     },
   };

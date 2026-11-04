@@ -42,7 +42,7 @@ Copy-Item -LiteralPath ./extensions/index.ts -Destination (Join-Path $extensionD
 
 ### 显示与模型内容分离
 
-原生 edit 工具自行绘制外壳（`renderShell: "self"`）。它的 `renderResult` 会把全部文本块拼接后作为一块独立区域绘制在标题框之外，一旦该文本与标题预览错误不同，就会在框外重复错误并让附加提示溢出到工具块外面。扩展在渲染路径上只隐藏自己追加的那一块（`hideRecoveryHint`），其余块、`details` 与渲染器原样透传，因此 TUI 显示与原生一致：错误仍在工具框内，不重复、不外溢；持久化结果和发给模型的内容仍包含完整提示。宿主没有 `registerToolRenderer`（Pi 1.5 引入）时，扩展只注册结果处理，提示照常送达模型。
+原生 edit 工具自行绘制外壳（`renderShell: "self"`）。它的 `renderResult` 会把全部文本块拼接后作为一块独立区域绘制在标题框之外，一旦该文本与标题预览错误不同，就会在框外重复错误并让附加提示溢出到工具块外面。扩展在渲染路径上只隐藏自己追加的那一块（`hideRecoveryHint`），其余块、`details` 与渲染器原样透传，因此 TUI 显示与原生一致：错误仍在工具框内，不重复、不外溢；持久化结果和发给模型的内容仍包含完整提示。本仓库的集成测试以 **Pi 1.5.0** 为指定宿主版本；`registerToolRenderer` 并非 1.5 才引入（上游 Pi v1.1.0 已提供），更早缺失该 API 的宿主仅执行结果增强，提示仍送达模型，但不保证交互式 TUI 抑制显示。
 
 ## 测试
 
@@ -54,9 +54,9 @@ npm run test:host
 npm run typecheck
 ```
 
-单元测试由 Node 直接运行，已在 Node.js 24.22.1 验证。宿主测试需要完整 Pi SDK、Git 和原生 bash 所需的 shell；`PI_SDK` 指向 SDK 的 `dist/index.js`。类型检查另需预先准备 TypeScript，`PI_TSC` 指向 `typescript/bin/tsc`。两项环境变量均可在 PowerShell 中通过 `$env:PI_SDK` / `$env:PI_TSC` 设置为实际绝对路径；`test/sdk.mjs` 也会尝试定位 Pi 托管安装及本插件可解析的 SDK。
+单元测试由 Node 直接运行；下方 2026-10-31 的离线验证记录仅适用于旧版 Pi 1.4.0，不代表本次 Pi 1.5.0 渲染变更已通过测试。当前宿主测试和类型检查要求 **Pi SDK 1.5.0**（版本不符时失败，而不是静默跳过）；宿主测试还需要 Git 和原生 bash 所需的 shell；`PI_SDK` 指向 SDK 的 `dist/index.js`。类型检查另需预先准备 TypeScript，`PI_TSC` 指向 `typescript/bin/tsc`。两项环境变量均可在 PowerShell 中通过 `$env:PI_SDK` / `$env:PI_TSC` 设置为实际绝对路径；`test/sdk.mjs` 也会尝试定位 Pi 托管安装及本插件可解析的 SDK。
 
-宿主测试检查真实 edit 与 bash、结果元数据、幂等性、工具声明及 System Prompt，并在临时 agent 中运行 CLI install/list/remove 与 SDK reload。它还会用 `ToolExecutionComponent` 绘制扩展增强后的错误结果，确认提示不会作为第二块区域溢出到工具框外，同时模型仍收到提示；SDK 缺少内置渲染器或该组件时跳过这一项。`PI_EDIT_FALLBACK_INSTALLED` 可指定已安装入口进行一致性核对；缺少个人副本时跳过这项可选核对，隔离安装测试照常执行。
+宿主测试检查真实 edit 与 bash、结果元数据、幂等性、工具声明及 System Prompt，并在临时 agent 中运行 CLI install/list/remove 与 SDK reload。它通过 Pi 1.5.0 的实际扩展渲染解析链（`extensionRunner.resolveToolRenderers` + `withBuiltInRenderers`）驱动 `ToolExecutionComponent`，在多种终端宽度和展开状态下对比原生渲染结果，并确认模型仍收到提示。缺失渲染依赖时测试会失败，不再静默跳过。`PI_EDIT_FALLBACK_INSTALLED` 可指定已安装入口进行一致性核对；缺少个人副本时跳过这项可选核对，隔离安装测试照常执行。
 
 准备好 SDK 与 TypeScript 后，可将本次离线结果写到独立报告路径：
 
@@ -66,7 +66,7 @@ npm run test:offline -- --report test/results/offline-current.log
 
 脚本复制源码到临时目录，使用空 HOME、agent、npm 配置与缓存，依次运行单元、宿主和类型检查。Node 网络 API 拦截器先自检，再要求测试期间网络尝试为零；这是应用层拦截。所需 SDK、传递依赖和编译器在离线阶段前准备。
 
-原 Pi 1.4.0 / Node.js 24.22.1 / Windows x64 的隔离验证与 TypeScript 5.9.3 结果保存在本插件的[验证报告](test/results/VERIFICATION.md)和[原始日志](test/results/offline.log)。SDK reload 验证的是重载实现，交互式 TUI 与真实模型行为分别需要实际会话验证。
+历史 Pi 1.4.0 / Node.js 24.22.1 / Windows x64 的隔离验证与 TypeScript 5.9.3 结果保存在本插件的[验证报告](test/results/VERIFICATION.md)和[原始日志](test/results/offline.log)。SDK reload 验证的是重载实现，交互式 TUI 与真实模型行为分别需要实际会话验证。
 
 ## 卸载
 
