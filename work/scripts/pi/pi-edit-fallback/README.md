@@ -1,6 +1,6 @@
 # pi-edit-fallback
 
-Pi 的 edit 错误恢复提示扩展。当原生 `edit` 因 `oldText` 匹配多处而失败时，扩展在原错误后附加恢复步骤，帮助 Agent 重新定位文本。扩展入口是 `extensions/index.ts`，通过一个同步 `tool_result` handler 处理结果。
+Pi 的 edit 错误恢复提示扩展。当原生 `edit` 因 `oldText` 匹配多处而失败时，扩展在原错误后附加恢复步骤，帮助 Agent 重新定位文本。扩展入口是 `extensions/index.ts`，通过一个同步 `tool_result` handler 处理结果，并注册一个 edit 渲染器解析器保持原生显示。
 
 ## 安装与加载
 
@@ -40,6 +40,10 @@ Copy-Item -LiteralPath ./extensions/index.ts -Destination (Join-Path $extensionD
 
 提示由 Agent 阅读并决定后续动作。扩展自身只处理内存中的错误结果；文件修改、子进程与恢复验证由调用方执行。工具声明、System Prompt 和额外 Agent 轮次均不受扩展修改。供应商缓存命中率与真实模型遵循提示的情况尚未实测。
 
+### 显示与模型内容分离
+
+原生 edit 工具自行绘制外壳（`renderShell: "self"`）。它的 `renderResult` 会把全部文本块拼接后作为一块独立区域绘制在标题框之外，一旦该文本与标题预览错误不同，就会在框外重复错误并让附加提示溢出到工具块外面。扩展在渲染路径上只隐藏自己追加的那一块（`hideRecoveryHint`），其余块、`details` 与渲染器原样透传，因此 TUI 显示与原生一致：错误仍在工具框内，不重复、不外溢；持久化结果和发给模型的内容仍包含完整提示。宿主没有 `registerToolRenderer`（Pi 1.5 引入）时，扩展只注册结果处理，提示照常送达模型。
+
 ## 测试
 
 在插件目录执行 PowerShell：
@@ -52,7 +56,7 @@ npm run typecheck
 
 单元测试由 Node 直接运行，已在 Node.js 24.22.1 验证。宿主测试需要完整 Pi SDK、Git 和原生 bash 所需的 shell；`PI_SDK` 指向 SDK 的 `dist/index.js`。类型检查另需预先准备 TypeScript，`PI_TSC` 指向 `typescript/bin/tsc`。两项环境变量均可在 PowerShell 中通过 `$env:PI_SDK` / `$env:PI_TSC` 设置为实际绝对路径；`test/sdk.mjs` 也会尝试定位 Pi 托管安装及本插件可解析的 SDK。
 
-宿主测试检查真实 edit 与 bash、结果元数据、幂等性、工具声明及 System Prompt，并在临时 agent 中运行 CLI install/list/remove 与 SDK reload。`PI_EDIT_FALLBACK_INSTALLED` 可指定已安装入口进行一致性核对；缺少个人副本时跳过这项可选核对，隔离安装测试照常执行。
+宿主测试检查真实 edit 与 bash、结果元数据、幂等性、工具声明及 System Prompt，并在临时 agent 中运行 CLI install/list/remove 与 SDK reload。它还会用 `ToolExecutionComponent` 绘制扩展增强后的错误结果，确认提示不会作为第二块区域溢出到工具框外，同时模型仍收到提示；SDK 缺少内置渲染器或该组件时跳过这一项。`PI_EDIT_FALLBACK_INSTALLED` 可指定已安装入口进行一致性核对；缺少个人副本时跳过这项可选核对，隔离安装测试照常执行。
 
 准备好 SDK 与 TypeScript 后，可将本次离线结果写到独立报告路径：
 

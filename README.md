@@ -14,4 +14,4 @@
 
 ## 维护资料
 
-[插件开发与维护](wiki/tech/pi-extension-development.md)说明共用目录结构、职责边界与验证原则，不维护具体插件清单。功能、安装、配置、凭据及测试说明维护在各插件目录中；[归档索引](plans/archive/README.md)连接已完成事项与历史报告，每次整理或验证的记录放在 `work/tasks/`。
+[插件开发与维护](wiki/tech/pi-extension-development.md)说明共用目录结构、职责边界与验证原则，不维护具体插件清单。功能、安装、配置、凭据及测试说明维护在各插件目录中；每次整理或验证的记录放在 [`work/tasks/`](work/tasks/)。

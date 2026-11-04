@@ -123,7 +123,9 @@ try {
   assert.deepEqual(session.getActiveToolNames(), baseline.session.getActiveToolNames());
   const extension = host.loader.getExtensions().extensions[0];
   assert.equal(path.resolve(extension.path), source, "Installed manifest must load the expected source entry");
+  assert.ok(extension.handlers.has("tool_result"));
   assert.deepEqual([...extension.handlers.keys()], ["tool_result"]);
+  assert.equal(extension.toolRenderers?.length, 1);
   assert.equal(extension.tools.size, 0);
   assert.equal(extension.commands.size, 0);
   console.log("PASS auto-discovery/Jiti, unchanged tools, schemas and system prompt");
@@ -134,6 +136,7 @@ try {
   const messages = (content, stopReason) => ({ role: "assistant", content, stopReason,
     api: model.api, provider: model.provider, model: model.id, usage: structuredClone(zeroUsage), timestamp: Date.now() });
 
+  let modelRequest = [];
   async function execute(toolName, args) {
     const id = `fixture-${++callNumber}`;
     const responses = [
@@ -141,7 +144,9 @@ try {
       messages([{ type: "text", text: "Fixture complete." }], "stop"),
     ];
     let responseCount = 0;
-    session.agent.streamFunction = () => {
+    session.agent.streamFunction = (_model, context) => {
+      // Capture what the model actually receives for this request.
+      modelRequest = context?.messages ?? [];
       const message = responses[responseCount++];
       assert.ok(message, "Extension must not trigger extra model turns");
       const stream = ai.createAssistantMessageEventStream();
@@ -158,6 +163,10 @@ try {
   }
   const textOf = (result) => result.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
   const countHints = (result) => textOf(result).split("Edit recovery:").length - 1;
+  const toolResultSeenByModel = (toolCallId) => modelRequest
+    .filter((message) => message.role === "toolResult" && message.toolCallId === toolCallId)
+    .flatMap((message) => message.content.filter((block) => block.type === "text").map((block) => block.text))
+    .join("\n");
 
   const target = path.join(cwd, "sample.txt");
   const original = "header\nfirst\nvalue=old\nkeep first\nsecond\nvalue=old\nkeep second\nfooter\n";
@@ -180,6 +189,43 @@ try {
   assert.equal(countHints(result), 1);
   assert.equal(readFileSync(target, "utf8"), beforeDuplicate);
   console.log("PASS real single-edit ambiguity: original error plus one hint, isError=true, no writes");
+
+  // The hint must reach the model even though the display keeps the native rendering.
+  assert.match(toolResultSeenByModel(result.toolCallId ?? ""), /Edit recovery:/);
+  assert.equal(toolResultSeenByModel(result.toolCallId ?? "").split("Edit recovery:").length - 1, 1);
+  console.log("PASS the model request carries the hint exactly once");
+
+  // Display regression: the hint belongs to the model, not to a second region outside the edit box.
+  const renderersEntry = path.join(path.dirname(sdkEntry), "core", "tools", "renderers", "index.js");
+  if (existsSync(renderersEntry) && typeof sdk.ToolExecutionComponent === "function") {
+    const { editRenderers } = await import(pathToFileURL(renderersEntry).href);
+    sdk.initTheme("dark", false);
+    const strip = (line) => line.replace(/\x1b\[[0-9;]*m/g, "");
+    const drawEdit = (content, definition) => {
+      const component = new sdk.ToolExecutionComponent(
+        "edit",
+        "render-check",
+        { path: "sample.txt", edits: [{ oldText: "value=old", newText: "value=new" }] },
+        { outputPad: 1 },
+        definition,
+        { requestRender() {} },
+        cwd,
+      );
+      component.setArgsComplete();
+      component.updateResult({ content, details: undefined, isError: true }, false);
+      return component.render(70).map(strip).join("\n");
+    };
+    const resolved = extension.toolRenderers[0]("edit", () => ({ renderShell: "self", ...editRenderers }));
+    assert.ok(resolved?.renderResult, "The resolver must keep the native edit result renderer");
+    const drawn = drawEdit(result.content, resolved);
+    assert.match(drawn, /Found 2 occurrences of the text in sample\.txt\./);
+    assert.ok(!drawn.includes("Edit recovery:"), "the hint must not be drawn as a second region");
+    assert.ok(!drawn.includes("Patch safety:"));
+    assert.match(textOf(result), /Edit recovery:/, "the model still receives the hint");
+    console.log("PASS displayed edit error keeps the native rendering; the hint stays model-facing");
+  } else {
+    console.log("SKIP display check; this SDK exposes no ToolExecutionComponent or built-in renderers");
+  }
 
   result = await execute("edit", { path: "sample.txt", edits: [
     { oldText: "updated header", newText: "should not be written" },
@@ -238,6 +284,7 @@ try {
   assert.notEqual(session.extensionRunner, oldRunner);
   assert.deepEqual(host.loader.getExtensions().errors, []);
   assert.equal(host.loader.getExtensions().extensions.length, 1);
+  assert.equal(host.loader.getExtensions().extensions[0]?.toolRenderers?.length, 1);
   assert.deepEqual(declarations(session), initialDeclarations);
   assert.equal(session.systemPrompt, initialPrompt);
   result = await execute("edit", { path: "sample.txt", edits: [{ oldText: "keep", newText: "changed" }] });

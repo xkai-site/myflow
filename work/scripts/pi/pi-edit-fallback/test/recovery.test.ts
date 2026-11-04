@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { ExtensionAPI, ToolResultEvent } from "@earendil-works/pi-coding-agent";
-import install, { EDIT_RECOVERY, enhanceEditFailure } from "../extensions/index.ts";
+import type { ExtensionAPI, ToolRenderers, ToolResultEvent } from "@earendil-works/pi-coding-agent";
+import install, { EDIT_RECOVERY, enhanceEditFailure, resolveEditRenderers } from "../extensions/index.ts";
 
 const duplicate = "Found 2 occurrences of edits[2] in assets/css/style.scss. Each oldText must be unique. Please provide more context to make it unique.";
 
@@ -22,17 +22,91 @@ function textOf(result: { content?: ToolResultEvent["content"] }): string {
   return (result.content ?? []).filter((block) => block.type === "text").map((block) => block.text).join("\n");
 }
 
-test("registers only one synchronous tool_result handler and accesses no other API", () => {
-  const registrations: unknown[][] = [];
+const component = { render: () => [] as string[], invalidate() {} };
+
+function renderers(seen: unknown[], override: Partial<ToolRenderers> = {}): ToolRenderers {
+  return {
+    renderShell: "self",
+    renderCall: () => component,
+    renderResult: (result: unknown) => { seen.push(result); return component; },
+    ...override,
+  } as unknown as ToolRenderers;
+}
+
+test("registers one synchronous tool_result handler and one edit renderer resolver", () => {
+  const calls: Array<[string, unknown[]]> = [];
   const pi = new Proxy({}, {
     get(_target, key) {
-      assert.equal(key, "on", `Unexpected ExtensionAPI access: ${String(key)}`);
-      return (...args: unknown[]) => { registrations.push(args); return () => {}; };
+      assert.ok(key === "on" || key === "registerToolRenderer", `Unexpected ExtensionAPI access: ${String(key)}`);
+      return (...args: unknown[]) => { calls.push([String(key), args]); return () => {}; };
     },
   });
   install(pi as ExtensionAPI);
-  assert.deepEqual(registrations, [["tool_result", enhanceEditFailure]]);
+  assert.deepEqual(calls.map(([key]) => key), ["on", "registerToolRenderer"]);
+  assert.deepEqual(calls[0]?.[1], ["tool_result", enhanceEditFailure]);
+  assert.deepEqual(calls[1]?.[1], [resolveEditRenderers]);
   assert.ok(!(enhanceEditFailure(event()) instanceof Promise));
+});
+
+test("loads on hosts without renderer resolution and still handles results", () => {
+  const registrations: unknown[][] = [];
+  install({ on: (...args: unknown[]) => { registrations.push(args); return () => {}; } } as unknown as ExtensionAPI);
+  assert.deepEqual(registrations, [["tool_result", enhanceEditFailure]]);
+});
+
+test("resolves only edit, keeping its shell, call renderer and returned component", () => {
+  const seen: unknown[] = [];
+  const base = renderers(seen);
+  let calls = 0;
+  const next = () => { calls++; return base; };
+  assert.equal(resolveEditRenderers("bash", next), base);
+  assert.equal(calls, 1);
+  const resolved = resolveEditRenderers("edit", next)!;
+  assert.equal(calls, 2);
+  assert.notEqual(resolved, base);
+  assert.equal(resolved.renderShell, "self");
+  assert.equal(resolved.renderCall, base.renderCall);
+  const options = { expanded: false, isPartial: false };
+  assert.equal(resolved.renderResult?.({ content: [], details: undefined } as never, options as never, "theme" as never, "context" as never), component);
+  assert.deepEqual(seen, [{ content: [], details: undefined }]);
+});
+
+test("hides only its own appended block from the native renderer without mutating the result", () => {
+  const seen: Array<{ content: Array<{ type: string; text: string }>; details?: unknown }> = [];
+  const base = renderers(seen);
+  const resolved = resolveEditRenderers("edit", () => base)!;
+  const nativeBlock = { type: "text", text: duplicate };
+  const otherBlock = { type: "text", text: "Additional diagnostic" };
+  const image = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+  const details = { keep: "details" };
+  const content = [nativeBlock, image, otherBlock, { type: "text", text: EDIT_RECOVERY }];
+  Object.freeze(content);
+  const result = Object.freeze({ content, details });
+  resolved.renderResult?.(result as never, {} as never, "theme" as never, "context" as never);
+  assert.deepEqual(seen, [{ content: [nativeBlock, image, otherBlock], details }]);
+  assert.equal(content.length, 4, "the persisted result keeps the hint for the model");
+  assert.deepEqual(result.details, details);
+});
+
+test("passes results without its block through unchanged", () => {
+  for (const content of [
+    [{ type: "text", text: duplicate }],
+    [{ type: "text", text: "Successfully replaced 1 block(s) in sample.txt." }],
+    [{ type: "text", text: `${EDIT_RECOVERY} (edited by another tool)` }],
+    [],
+  ]) {
+    const seen: unknown[] = [];
+    const resolved = resolveEditRenderers("edit", () => renderers(seen))!;
+    const result = { content, details: undefined };
+    resolved.renderResult?.(result as never, {} as never, "theme" as never, "context" as never);
+    assert.equal(seen[0], result, "untouched results keep their identity");
+  }
+});
+
+test("leaves renderers it cannot wrap untouched", () => {
+  assert.equal(resolveEditRenderers("edit", () => undefined), undefined);
+  const withoutResult = { renderShell: "self" as const, renderCall: () => component } as ToolRenderers;
+  assert.equal(resolveEditRenderers("edit", () => withoutResult), withoutResult);
 });
 
 test("normal results and non-edit results return before inspecting content", () => {

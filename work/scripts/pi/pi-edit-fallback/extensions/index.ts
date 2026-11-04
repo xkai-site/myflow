@@ -1,5 +1,7 @@
 import type {
   ExtensionAPI,
+  ToolRendererResolver,
+  ToolRenderers,
   ToolResultEvent,
   ToolResultEventResult,
 } from "@earendil-works/pi-coding-agent";
@@ -51,6 +53,31 @@ export function enhanceEditFailure(event: ToolResultEvent): ToolResultEventResul
   };
 }
 
+// The native edit tool draws its own shell (renderShell: "self") and prints the joined text of
+// every text block as one region *outside* that box as soon as it differs from the header preview
+// error. Appending the hint therefore spilled it outside the box and repeated the error there.
+// Hide only our own block from the renderers so the display stays native; the model still gets it.
+export function hideRecoveryHint(renderers: ToolRenderers | undefined): ToolRenderers | undefined {
+  const renderResult = renderers?.renderResult;
+  if (!renderers || !renderResult) return renderers;
+  return {
+    ...renderers,
+    renderResult(result, options, theme, context) {
+      const content = Array.isArray(result?.content)
+        ? result.content.filter((block) => !(block.type === "text" && block.text === EDIT_RECOVERY))
+        : undefined;
+      // Untouched results keep their identity, so unrelated rendering behavior is unchanged.
+      if (!content || content.length === result.content.length) return renderResult(result, options, theme, context);
+      return renderResult({ ...result, content }, options, theme, context);
+    },
+  };
+}
+
+export const resolveEditRenderers: ToolRendererResolver = (toolName, next) =>
+  toolName === "edit" ? hideRecoveryHint(next()) : next();
+
 export default function piEditFallback(pi: ExtensionAPI): void {
   pi.on("tool_result", enhanceEditFailure);
+  // Hosts without renderer resolution still deliver the hint to the model.
+  pi.registerToolRenderer?.(resolveEditRenderers);
 }
