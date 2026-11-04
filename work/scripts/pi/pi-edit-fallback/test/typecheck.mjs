@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -8,6 +8,8 @@ import { resolveSdk, siblingEntry } from "./sdk.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const sdk = resolveSdk();
+const sdkVersion = JSON.parse(readFileSync(path.join(path.dirname(sdk), "..", "package.json"), "utf8")).version;
+if (sdkVersion !== "1.5.0") throw new Error(`Typecheck requires Pi 1.5.0 SDK, got ${sdkVersion}`);
 const temporary = mkdtempSync(path.join(tmpdir(), "pi-edit-fallback-types-"));
 try {
   const config = path.join(temporary, "tsconfig.json");
