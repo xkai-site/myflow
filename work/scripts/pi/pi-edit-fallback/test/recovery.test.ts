@@ -67,7 +67,7 @@ test("resolves only edit, keeping its shell, call renderer and returned componen
   assert.equal(resolved.renderShell, "self");
   assert.equal(resolved.renderCall, base.renderCall);
   const options = { expanded: false, isPartial: false };
-  assert.equal(resolved.renderResult?.({ content: [], details: undefined } as never, options as never, "theme" as never, "context" as never), component);
+  assert.equal(resolved.renderResult?.({ content: [], details: undefined } as never, options as never, "theme" as never, { isError: true } as never), component);
   assert.deepEqual(seen, [{ content: [], details: undefined }]);
 });
 
@@ -82,10 +82,34 @@ test("hides only its own appended block from the native renderer without mutatin
   const content = [nativeBlock, image, otherBlock, { type: "text", text: EDIT_RECOVERY }];
   Object.freeze(content);
   const result = Object.freeze({ content, details });
-  resolved.renderResult?.(result as never, {} as never, "theme" as never, "context" as never);
+  resolved.renderResult?.(result as never, {} as never, "theme" as never, { isError: true } as never);
   assert.deepEqual(seen, [{ content: [nativeBlock, image, otherBlock], details }]);
   assert.equal(content.length, 4, "the persisted result keeps the hint for the model");
   assert.deepEqual(result.details, details);
+});
+
+test("does not suppress a matching recovery block for success or unrelated errors", () => {
+  for (const [isError, diagnostic] of [
+    [false, duplicate],
+    [true, "EACCES: permission denied"],
+    [true, "Could not find oldText"],
+  ] as const) {
+    const seen: unknown[] = [];
+    const resolved = resolveEditRenderers("edit", () => renderers(seen))!;
+    const result = { content: [{ type: "text", text: diagnostic }, { type: "text", text: EDIT_RECOVERY }] };
+    resolved.renderResult?.(result as never, {} as never, "theme" as never, { isError } as never);
+    assert.equal(seen[0], result, "only ambiguous edit errors may hide the hint");
+  }
+});
+
+test("preserves other extension content while removing only its own hint", () => {
+  const seen: unknown[] = [];
+  const resolved = resolveEditRenderers("edit", () => renderers(seen))!;
+  const other = { type: "text", text: "Other extension warning" };
+  const result = { content: [{ type: "text", text: duplicate }, other, { type: "text", text: EDIT_RECOVERY }] };
+  resolved.renderResult?.(result as never, {} as never, "theme" as never, { isError: true } as never);
+  assert.deepEqual((seen[0] as typeof result).content, result.content.slice(0, 2));
+  assert.equal(result.content.length, 3);
 });
 
 test("passes results without its block through unchanged", () => {
@@ -98,7 +122,7 @@ test("passes results without its block through unchanged", () => {
     const seen: unknown[] = [];
     const resolved = resolveEditRenderers("edit", () => renderers(seen))!;
     const result = { content, details: undefined };
-    resolved.renderResult?.(result as never, {} as never, "theme" as never, "context" as never);
+    resolved.renderResult?.(result as never, {} as never, "theme" as never, { isError: true } as never);
     assert.equal(seen[0], result, "untouched results keep their identity");
   }
 });
