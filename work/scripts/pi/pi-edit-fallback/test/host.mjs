@@ -205,7 +205,7 @@ try {
   const resolved = session.extensionRunner.resolveToolRenderers("edit", () => withBuiltInRenderers("edit", session.getToolDefinition("edit")));
   const native = withBuiltInRenderers("edit", session.getToolDefinition("edit"));
   assert.ok(resolved?.renderResult && native?.renderResult);
-  const strip = (line) => line.replace(/\\x1b\\[[0-9;]*m/g, "");
+  const strip = (line) => line.replace(/\x1b\[[0-9;]*m/g, "");
   const drawEdit = (content, definition, width, expanded) => {
     const component = new sdk.ToolExecutionComponent(
       "edit",
@@ -219,7 +219,7 @@ try {
     component.setExpanded(expanded);
     component.setArgsComplete();
     component.updateResult({ content, details: undefined, isError: true }, false);
-    return component.render(width).map(strip).join("\\n");
+    return component.render(width).map(strip).join("\n");
   };
   const rawContent = result.content.filter((block) => !(block.type === "text" && block.text === EDIT_RECOVERY));
   assert.equal(result.content.length - rawContent.length, 1, "Fixture must have one added hint");
