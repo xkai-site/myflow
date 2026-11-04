@@ -24,7 +24,7 @@ re-read and re-locate (never force). Preserve unrelated changes; inspect
 the target and diff. Stop and explain if the target is unclear.
 Use native edit for subsequent edits.`;
 
-// Pi 1.4 reports "the text" for one replacement and "edits[n]" for a batch.
+// Pi reports "the text" for one replacement and "edits[n]" for a batch.
 // Match diagnostic fragments, not the complete message or a particular path.
 const DUPLICATE_OCCURRENCES = /\bfound\s+(?:[2-9]|[1-9]\d+)\s+occurrences?\s+of\s+(?:the\s+(?:old\s*)?text\b|old\s*text\b|edits\s*\[\s*\d+\s*\])/i;
 const NON_UNIQUE_TEXT = /\b(?:old\s*text|the\s+(?:old\s+)?text)\s+(?:must\s+be\s+unique|is\s+not\s+unique)\b/i;
