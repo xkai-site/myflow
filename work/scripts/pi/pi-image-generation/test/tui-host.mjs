@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { writeFile, rm } from 'node:fs/promises';
+import { imageFixtures } from './image-fixtures.mjs';
+import { writeFile, rm, readdir } from 'node:fs/promises';
 import { runLifecycleHostChecks } from './lifecycle-host.mjs';
 
 export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes,t}) {
@@ -137,7 +138,54 @@ export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes,t}) {
      }
      component.dispose();
     })}},model,'generate');
-    assert.equal(index,actions.length);assert.deepEqual(result,{size:'1536x1024',quality:'max',complexity:'low'});
+    assert.equal(index,actions.length);assert.deepEqual(result,{size:'1536x1024',quality:'max',complexity:'low',outputFormat:'png',background:'auto'});
+   }
+   initTheme('dark',false);
+  });
+
+  await t.test('native output/background controls filter both selection orders, preserve values and Escape at all widths',async()=>{
+   const {selectParameters,parameterItems,policyLabel}=await jiti.import('../src/tui-options.ts');
+   for(const appearance of ['dark','light'])for(const task of ['generate','edit'])for(const jpegFirst of [true,false]) {
+    initTheme(appearance,false);
+    const model=config.models.find(m=>m.key==='openai-flare-26');
+    const actions=jpegFirst
+     ?['outputFormat','jpeg','background','opaque','background',undefined,'submit']
+     :['background','transparent','outputFormat','webp','outputFormat',undefined,'submit'];
+    let index=0;
+    const values={size:'auto',quality:'auto',complexity:'high',outputFormat:'png',background:'auto'};
+    const result=await selectParameters({ui:{select:async(title,labels)=>new Promise(resolve=>{
+     const action=actions[index++];
+     const menu=title.endsWith(' - 参数');
+     if(menu) {
+      assert.equal(labels[0],task==='edit'?'开始编辑':'开始生成');
+      assert.deepEqual(labels,parameterItems(model,task,values).map(o=>o.name));
+     }
+     const key=title==='背景'?'background':'outputFormat';
+     if(!menu&&values.outputFormat==='jpeg')assert.ok(!labels.includes(policyLabel(model.background,'transparent')));
+     if(!menu&&values.background==='transparent')assert.ok(!labels.includes(policyLabel(model.outputFormat,'jpeg')));
+     const target=action===undefined?undefined:menu?parameterItems(model,task,values).find(o=>o.key===action).name:policyLabel(model[key],action);
+     const component=new ExtensionSelectorComponent(title,labels,resolve,()=>resolve(undefined));
+     for(const width of [24,40,80,120]) {
+      const lines=component.render(width);assert.ok(lines.every(line=>visibleWidth(line)<=width));
+      assert.doesNotMatch(lines.map(stripTerminalSequences).join(''),/[·•]/);
+     }
+     if(target===undefined)component.handleInput('\x1b');
+     else {
+      const at=labels.indexOf(target);assert.ok(at>=0,target);
+      for(let n=0;n<at;n++)component.handleInput('\x1b[B');
+      if(!menu)values[key]=action;
+      component.handleInput('\r');
+     }
+     component.dispose();
+    })}},model,task);
+    assert.equal(index,actions.length);assert.deepEqual(result,values);
+    assert.equal(result.outputFormat,jpegFirst?'jpeg':'webp');assert.equal(result.background,jpegFirst?'opaque':'transparent');
+   }
+   for(const model of config.models) {
+    const values={size:model.size.generate.default};
+    const items=parameterItems(model,'generate',values);
+    assert.equal(items.some(o=>o.key==='outputFormat'),!!model.outputFormat);
+    assert.equal(items.some(o=>o.key==='background'),!!model.background);
    }
    initTheme('dark',false);
   });
@@ -153,6 +201,8 @@ export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes,t}) {
      if(model.provider==='openai') {
       assert.equal(body.complexity,model.complexity?.default);
       assert.equal(body.quality,model.quality.default);
+      assert.equal(body.background,model.background?.default??'auto');
+      assert.equal(body.output_format,undefined);
       assert.equal(!!body.images,edit);
       if(edit)assert.equal(body.images.length,16);
       return Response.json({data:[{b64_json:bytes.toString('base64')}]});
@@ -195,6 +245,104 @@ export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes,t}) {
   const restrictedCommand=resolveImageCommand({prompt:'offline',help:false},restrictedModel,1,restricted);
   await assert.rejects(generateAndSave(restricted,restrictedCommand,[{mimeType:'image/png',data:bytes.toString('base64')}],dir,
    async()=>assert.fail('Oversized data URL resolved credentials'),new AbortController().signal),/data URL.*character limit/);
+
+  await t.test('TUI output choices reach generation/edit through SDK, save real formats and reload previews',async()=>{
+   const {readGeneratedImage}=await jiti.import('../src/image-files.ts');
+   try {
+   for(const model of config.models.filter(m=>m.outputFormat))for(const edit of [false,true])for(const [format,fixture] of Object.entries(imageFixtures)) {
+    let requests=0,menu=0;
+    globalThis.fetch=async(url,init)=>{
+     requests++;const body=JSON.parse(init.body);
+     assert.equal(body.model,model.id);assert.ok(String(url).endsWith(edit?'/edits':'/generations'));
+     assert.equal(body.output_format,format==='png'?undefined:format);
+     assert.equal(body.background,format==='jpeg'?'opaque':'transparent');
+     return Response.json({output_format:format,data:[{b64_json:fixture.data}]});
+    };
+    const h=await harness({modelKey:model.key,edit,choose:(title,labels)=>{
+     if(title==='图片任务')return labels[edit?1:0];
+     if(title==='图片模型')return itemOptions(config.models.filter(m=>m.provider==='openai'),'openai-flare-26').find(o=>o.item.key===model.key).label;
+     if(title.endsWith(' - 参数'))return labels[++menu===1?labels.findIndex(l=>l.startsWith('输出格式：')):menu===2?labels.findIndex(l=>l.startsWith('背景：')):0];
+     if(title==='输出格式')return labels.find(l=>l===(format==='png'?'PNG（默认）':format==='jpeg'?'JPEG':'WebP'));
+     if(title==='背景')return labels.find(l=>l===(format==='jpeg'?'不透明':'透明'));
+     assert.fail(title);
+    }});
+    // TUI still treats option-looking prefill as prompt, not RPC flags.
+    await h.handler('--format=jpeg 是完整提示词',h.ctx);
+    assert.equal(requests,1);assert.equal(h.entries.length,1,JSON.stringify(h.notices));
+    const entry=JSON.parse(JSON.stringify(h.entries[0].data));
+    assert.equal(entry.prompt,'--format=jpeg 是完整提示词');
+    assert.equal(entry.mimeType,fixture.mimeType);assert.equal(path.extname(entry.path),`.${fixture.extension}`);
+    assert.deepEqual(await readGeneratedImage(entry.path,entry.mimeType),{data:fixture.data,mimeType:fixture.mimeType});
+    for(const appearance of ['dark','light'])for(const images of [null,'iterm2','kitty']) {
+     initTheme(appearance,false);setCapabilities({images,trueColor:true,hyperlinks:true});
+     const result=createResultView(entry,themeModule.theme,model.name);
+     for(const width of [24,40,80,120]) {
+      const lines=result.render(width);
+      // OSC 1337 carries base64, not printable columns; visibleWidth is a text-only helper.
+      assert.ok(lines.every(l=>l.includes('\x1b]1337;File=')||l.includes('\x1b_G')||visibleWidth(l)<=width),`${format}/${images}/${width}`);
+      if(images==='iterm2') {
+       const columns=Number(lines.join('').match(/;width=(\d+);/)[1]);
+       assert.ok(columns>0&&columns<=Math.min(width-2,72)); // height cap can reduce width
+      }
+      const plain=lines.map(stripTerminalSequences).join('');
+      assert.ok(plain.includes(pathToFileURL(entry.path).href));assert.doesNotMatch(plain,/图片预览不可用/);
+      if(images==='iterm2')assert.ok(lines.join('').includes(fixture.data));
+      else if(!images)assert.match(plain,/当前终端不支持图片预览/);
+      else if(format==='png')assert.match(lines.join(''),/\x1b_G/);
+      else if(!lines.join('').includes('\x1b_G')) {
+       assert.match(plain,/\[Image:/); // native fallback truncates long filename before MIME at narrow widths
+       assert.ok(result.render(1000).map(stripTerminalSequences).join('').includes(fixture.mimeType));
+      }
+      result.invalidate();
+     }
+    }
+   }
+   } finally {setCapabilities({images:null,trueColor:true,hyperlinks:true});initTheme('dark',false)}
+  });
+
+  await t.test('invalid output parameters fail before RPC credential lookup, direct runtime auth and HTTP',async()=>{
+   const model=config.models.find(m=>m.key==='openai-flare-26');
+   const valid=resolveImageCommand({prompt:'offline',help:false},model,0,config);
+   globalThis.fetch=async()=>assert.fail('Invalid parameters fetched');
+   for(const values of [{outputFormat:'jpeg',background:'transparent'},{outputFormat:'gif'},{background:'white'}]) {
+    await assert.rejects(generateAndSave(config,{...valid,...values},[],dir,async()=>assert.fail('Invalid output resolved auth'),new AbortController().signal),/--format|--background/);
+   }
+   for(const text of ['openai-flare-26 --format jpeg --background transparent cat','wan --format png cat','wan-pro --background auto cat','openai --format jpeg cat']) {
+    const h=await harness({auth:async()=>assert.fail('Invalid RPC output resolved auth')});
+    h.ctx.modelRegistry.getProvider=()=>assert.fail('Invalid explicit RPC output looked up account');
+    await h.handler(text,{...h.ctx,mode:'rpc'});
+    assert.equal(h.entries.length,0);assert.equal(h.notices.at(-1).type,'error');
+    assert.match(h.notices.at(-1).text,/not supported|transparent.*jpeg/);
+   }
+   const provider=config.providers.find(p=>p.id==='openai');
+   const {createRuntimeImagesModels}=await jiti.import('../src/runtime.ts');
+   const models=createRuntimeImagesModels(config,provider,'https://chatgpt.com/backend-api/codex');
+   const runtimeModel=models.getModelOfType('image',provider.id,model.id);
+   const invalid=await models.generateImages(runtimeModel,{input:[{type:'text',text:'offline'}]},{apiKey:token,metadata:{size:'auto',outputFormat:'jpeg',background:'transparent'}});
+   assert.equal(invalid.stopReason,'error');assert.match(invalid.errorMessage,/transparent.*jpeg/);
+   const malformed=await models.generateImages(runtimeModel,{input:[{type:'text',text:'offline'}]},{apiKey:token,metadata:{size:'auto',outputFormat:42}});
+   assert.equal(malformed.stopReason,'error');assert.match(malformed.errorMessage,/--format/);
+  });
+
+  await t.test('RPC format options keep notification/path protocol, while mismatches publish no entries or retries',async()=>{
+   for(const [format,fixture] of Object.entries(imageFixtures)) {
+    let calls=0;
+    globalThis.fetch=async(_url,init)=>{
+     calls++;const body=JSON.parse(init.body);assert.equal(body.output_format,format==='png'?undefined:format);
+     assert.equal(body.background,'opaque');return Response.json({data:[{b64_json:fixture.data}]});
+    };
+    const h=await harness();await h.handler(`openai-flare-26 --format=${format} --background opaque -- RPC 图片`,{...h.ctx,mode:'rpc'});
+    assert.equal(calls,1);assert.equal(h.entries.length,1,JSON.stringify(h.notices));
+    assert.equal(h.entries[0].data.mimeType,fixture.mimeType);assert.equal(path.extname(h.entries[0].data.path),`.${fixture.extension}`);
+    assert.match(h.notices.at(-1).text,/^Saved 1 image\(s\):/);assert.ok(h.notices.at(-1).text.includes(h.entries[0].data.path));
+   }
+   const outputDirectory=path.join(dir,'.pi','generated-images');
+   const filesBefore=(await readdir(outputDirectory)).sort();
+   let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({data:[{b64_json:imageFixtures.png.data}]})};
+   const mismatch=await harness();await mismatch.handler('openai-flare-26 --format jpeg cat',{...mismatch.ctx,mode:'rpc'});
+   assert.equal(calls,1);assert.equal(mismatch.entries.length,0);assert.match(mismatch.notices.at(-1).text,/returned png instead of requested jpeg/);
+   assert.deepEqual((await readdir(outputDirectory)).sort(),filesBefore);
+  });
 
   // Multi-account selection still maps to the selected provider; cancelling sends nothing.
   globalThis.fetch=async()=>assert.fail('A cancelled UI sent a request');

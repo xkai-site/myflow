@@ -7,6 +7,8 @@ export interface ParsedImageCommand {
 	size?: string;
 	quality?: string;
 	complexity?: string;
+	background?: string;
+	outputFormat?: string;
 	help: boolean;
 }
 
@@ -31,6 +33,9 @@ export interface ImageTransportOptions {
 	size: string;
 	quality?: string;
 	complexity?: string;
+	background?: string;
+	outputFormat?: string;
+	modelConfig?: ImageModelConfig;
 	headers?: Record<string, string | null>;
 	signal?: AbortSignal;
 	fetch?: typeof globalThis.fetch;

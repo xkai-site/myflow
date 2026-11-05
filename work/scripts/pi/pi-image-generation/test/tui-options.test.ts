@@ -60,10 +60,14 @@ test("parameter menu uses defaults in one confirmation, with model-supported con
 		assert.deepEqual(result, { size: selected.size.generate.default,
 			...(selected.quality ? { quality: selected.quality.default } : {}),
 			...(selected.complexity ? { complexity: selected.complexity.default } : {}),
+			...(selected.outputFormat ? { outputFormat: selected.outputFormat.default } : {}),
+			...(selected.background ? { background: selected.background.default } : {}),
 		});
 		const options = parameterItems(selected, "generate", result!);
 		assert.equal(options.some((o) => o.key === "quality"), !!selected.quality);
 		assert.equal(options.some((o) => o.key === "complexity"), !!selected.complexity);
+		assert.equal(options.some((o) => o.key === "outputFormat"), !!selected.outputFormat);
+		assert.equal(options.some((o) => o.key === "background"), !!selected.background);
 		assert.ok(options.slice(1).every((o) => o.name.includes("默认")));
 	}
 	assert.equal(policyLabel(model.size.generate, "1024x1024"), "正方形 (1024x1024)");
@@ -85,7 +89,7 @@ test("parameter changes persist, Escape returns from picker and main Escape canc
 		return labels.find((label) => label === policyLabel(policy, action));
 	} } }, model, "generate");
 	assert.equal(index, actions.length);
-	assert.deepEqual(result, { size: "1536x1024", quality: "max", complexity: "low" });
+	assert.deepEqual(result, { size: "1536x1024", quality: "max", complexity: "low", outputFormat: "png", background: "auto" });
 	assert.equal(await selectParameters({ ui: { select: async () => undefined } }, model, "generate"), undefined);
 });
 

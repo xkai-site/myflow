@@ -1,4 +1,4 @@
-import { assertModelEnabled, normalizeModelSize, sizeForTask, type ImageConfig, type ImageModelConfig } from "./model-config.ts";
+import { assertModelEnabled, normalizeImageOutput, normalizeModelSize, sizeForTask, type ImageConfig, type ImageModelConfig } from "./model-config.ts";
 import type { ParsedImageCommand, ResolvedImageCommand } from "./types.ts";
 
 interface Token {
@@ -19,6 +19,8 @@ export function parseImageCommand(text: string, config: ImageConfig): ParsedImag
 	let size: string | undefined;
 	let quality: string | undefined;
 	let complexity: string | undefined;
+	let outputFormat: string | undefined;
+	let background: string | undefined;
 	let help = false;
 	const prompt: string[] = [];
 	let parseOptions = true;
@@ -55,13 +57,27 @@ export function parseImageCommand(text: string, config: ImageConfig): ParsedImag
 			complexity = value;
 			continue;
 		}
+		if (parseOptions && (token === "--format" || token.startsWith("--format="))) {
+			if (outputFormat !== undefined) throw new Error("--format must not be repeated");
+			const value = token === "--format" ? tokens[++index]?.value : token.slice("--format=".length);
+			if (!value || value.startsWith("--")) throw new Error("--format requires a value");
+			outputFormat = value;
+			continue;
+		}
+		if (parseOptions && (token === "--background" || token.startsWith("--background="))) {
+			if (background !== undefined) throw new Error("--background must not be repeated");
+			const value = token === "--background" ? tokens[++index]?.value : token.slice("--background=".length);
+			if (!value || value.startsWith("--")) throw new Error("--background requires a value");
+			background = value;
+			continue;
+		}
 		if (parseOptions && token.startsWith("--")) {
 			throw new Error("Unknown /image option; use /image --help");
 		}
 		prompt.push(token);
 	}
 
-	return { modelKey, prompt: prompt.join(" ").trim(), size, quality, complexity, help };
+	return { modelKey, prompt: prompt.join(" ").trim(), size, quality, complexity, outputFormat, background, help };
 }
 
 export function resolveImageCommand(
@@ -92,7 +108,7 @@ export function resolveImageCommand(
 		throw new Error("Complexity must be one of the configured model options");
 	}
 	return { ...command, modelKey: model.key, provider: providerConfig.id, model: model.id, modelConfig: model, providerConfig,
-		size: normalizeModelSize(sizeForTask(model, task), command.size), quality, complexity };
+		size: normalizeModelSize(sizeForTask(model, task), command.size), quality, complexity, ...normalizeImageOutput(model, command) };
 }
 
 export function inferModelForSingleAccount(config: ImageConfig, availableProviderIds: readonly string[]): ImageModelConfig | undefined {
@@ -105,11 +121,13 @@ export function usageText(config?: ImageConfig): string {
 	return [
 		"交互：/image 或 /image <prompt>（整段文本预填提示词，不解析 RPC 选项）",
 		"流程：任务 → 提示词 → 账户 → 模型 → 参数；单账户或单模型自动选择。",
-		"参数菜单默认开始生成，需要时再调整尺寸、画质和复杂度；仅显示模型支持的选项。",
+		"参数菜单默认开始生成，需要时再调整尺寸、画质、复杂度、输出格式和背景；仅显示模型支持的选项。",
 		"编辑任务需填写参考图路径，每行一个；Escape 取消，参数选项内 Escape 返回菜单。",
 		"OpenAI 参考图限制按 Platform JSON 编辑接口配置，含 data URL 前缀与 Base64 编码开销；张数和大小见 models.jsonc，并非 Codex 通道实测上限。",
 		"账户：/image --settings（秘密输入仅支持 TUI，不要将 Key 写入命令）",
-		"非交互/RPC：/image [model-key] [--size VALUE] [--quality VALUE] [--complexity VALUE] [--] <prompt>",
+		"非交互/RPC：/image [model-key] [--size VALUE] [--quality VALUE] [--complexity VALUE] [--format VALUE] [--background VALUE] [--] <prompt>",
+		"支持时可选 --format png|jpeg|webp（默认 png）、--background auto|opaque|transparent（默认 auto）；transparent 与 jpeg 不兼容。新参数不可重复，支持 --option=value。",
+		"格式按真实字节校验，与请求或服务端声明不符则不保存、不重试。透明背景是请求意图，不代表已验证存在透明像素。Codex 新参数尚未在线验证。",
 		"只有一个已配置图片账户时可省略 model-key，使用该账户默认模型。",
 		"提示词以模型 key 或选项开头时，先写 --。标准 RPC 仅支持生成，不处理图片附件。",
 		...(config ? [

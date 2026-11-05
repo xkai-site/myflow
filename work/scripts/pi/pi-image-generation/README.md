@@ -21,7 +21,7 @@ pi install .
 
 TUI 会打开向导：生成/编辑 → 提示词 → 账户 → 模型 → 参数 → 执行。编辑任务在选定模型后询问参考图路径。单个可选账户或模型自动选择，模型列表展示“名称 - 定位”，账户默认模型排在首项并标注“默认”。
 
-参数菜单展示当前尺寸、画质，以及模型支持时的复杂度；默认选中“开始生成”或“开始编辑”，直接 Enter 即使用默认值。需要修改时选择对应参数，修改后返回菜单并保留已选值。Escape 在参数选项中返回菜单，在其他步骤取消本次操作。加载时可取消；加载界面立即关闭，实际执行仍需安全结算，不能重复提交。请求发送前的认证等待支持取消，即使认证 Promise 不响应也不会继续发送图片请求；已经发送的请求、响应读取和文件操作则保留忙碌保护，直到实际结算，`/reload` 也不能绕过此保护。
+参数菜单展示当前尺寸、画质，以及模型支持时的复杂度、输出格式和背景；默认选中“开始生成”或“开始编辑”，直接 Enter 即使用默认值。需要修改时选择对应参数，修改后返回菜单并保留已选值。透明背景时格式列表不提供 JPEG，JPEG 格式时背景列表不提供透明，两种选择顺序均不会静默改写其他已选值。Escape 在参数选项中返回菜单，在其他步骤取消本次操作。加载时可取消；加载界面立即关闭，实际执行仍需安全结算，不能重复提交。请求发送前的认证等待支持取消，即使认证 Promise 不响应也不会继续发送图片请求；已经发送的请求、响应读取和文件操作则保留忙碌保护，直到实际结算，`/reload` 也不能绕过此保护。
 
 成功后会话条目显示保存路径、原图链接和可用时的预览，通知仅显示保存数量。界面使用 Pi 原生选择器、编辑器、主题颜色和键盘操作，支持中英混排及窄窗口自动换行。
 
@@ -64,7 +64,7 @@ OpenAI 设置页还可刷新账户状态、查看认证说明与凭据路径。P
 非交互完整文本语法：
 
 ```text
-/image [model-key] [--size VALUE|--size=VALUE] [--quality VALUE|--quality=VALUE] [--complexity VALUE|--complexity=VALUE] [--] <prompt>
+/image [model-key] [--size VALUE|--size=VALUE] [--quality VALUE|--quality=VALUE] [--complexity VALUE|--complexity=VALUE] [--format VALUE|--format=VALUE] [--background VALUE|--background=VALUE] [--] <prompt>
 ```
 
 | 参数 | 规则 |
@@ -73,10 +73,12 @@ OpenAI 设置页还可刷新账户状态、查看认证说明与凭据路径。P
 | `--size` | 省略用所选模型/任务默认尺寸；值及限制见下节 |
 | `--quality` | OpenAI 支持，省略为 `auto`；Wan 不接受此参数 |
 | `--complexity` | 仅 2.6 两款支持 `low`、`medium`、`high`，省略为 `high`；2.5、旧 `openai` 与 Wan 拒绝此参数 |
+| `--format` | 2.6/2.5 两款分别支持 `png`（默认）、`jpeg`、`webp`；旧 `openai` 与 Wan 拒绝显式参数 |
+| `--background` | 2.6/2.5 两款分别支持 `auto`（默认）、`opaque`、`transparent`；透明仅可搭配 PNG/WebP，JPEG + 透明在认证/请求前拒绝；旧 `openai` 与 Wan 拒绝显式参数 |
 | `--` | 停止解析后续选项；提示词首词像模型 key/选项时用它消歧，例如 `/image -- wan is a word`（仅一个账户时） |
 | `<prompt>` | 必填，支持单/双引号；词间空白合并。单引号外的反斜杠用作转义，未闭合引号/转义会报错 |
 
-即使提示词已开始，后面的 `--size` 等仍会被解析，除非先写 `--`。未知 `--选项` 会报错。
+即使提示词已开始，后面的 `--size` 等仍会被解析，除非先写 `--`。未知 `--选项` 会报错。`--format` 和 `--background` 缺值、重复或值不在当前模型配置中均报错；已有尺寸、画质、复杂度参数的语义不变。省略新参数保留自动背景和 PNG 输出。
 
 参考图编辑通过 TUI 向导选择，每行输入一个参考图文件路径，可拖入、加引号或写 `@path`；相对路径以 Pi 当前项目为基准，至少一张。命令文本解析器只处理上表列出的生成参数。
 
@@ -110,6 +112,22 @@ OpenAI 设置页还可刷新账户状态、查看认证说明与凭据路径。P
 
 复杂度控制模型在渲染前的布局规划，画质控制渲染细节。复杂构图可保留 `high`；简单局部编辑可对比较低复杂度。提高复杂度可能增加等待时间，也可能引入额外改动，不代表总能得到更好结果。参数依据 [2.6 官方提示指南](https://developers.openai.com/api/docs/guides/image-prompting)与[图像生成指南](https://developers.openai.com/api/docs/guides/image-generation)，不是从其他 API 或旧型号推断。
 
+### 输出格式与背景
+
+| 模型 | 输出格式 | 背景 |
+| --- | --- | --- |
+| GPT Image 2.6 Sunburst / Flare | PNG（默认）、JPEG、WebP | 自动（默认）、不透明、透明 |
+| GPT Image 2.5 Sunburst / Flare | 同上 | 同上 |
+| 旧 `openai` / Wan 两款 | 不提供新选项，保持原行为 | 不提供新选项，保持原行为 |
+
+背景与格式采用独立的可选 ChoicePolicy：`outputFormat`、`background`。旧配置省略字段仍正常加载；选项值限定为上述枚举，默认值必须在选项内，JPEG + 透明不能作为默认组合。未配置的选项不展示，显式传入即拒绝，不根据模型名称判断能力，也不从 `inputImages.mimeTypes` 推断输出格式。Wan 适配器不接受这两个能力配置，不会发送 OpenAI 参数。
+
+生成与编辑共用约束，分别映射到请求体 `background` 和 `output_format`。为保持原请求策略，自动背景仍发送 `background: "auto"`；PNG 使用服务端默认值，省略 `output_format`（包括显式选 PNG），JPEG/WebP 才发送该字段。未暴露 `output_compression`，使用服务端默认压缩策略。不添加格式转换依赖，也不会自动将 JPEG 改成 PNG 或把透明改成不透明。
+
+**能力依据与验证边界：** [生成接口](https://developers.openai.com/api/reference/resources/images/methods/generate)、[编辑接口](https://developers.openai.com/api/reference/resources/images/methods/edit)、[提示指南](https://developers.openai.com/api/docs/guides/image-prompting)和[生成指南](https://developers.openai.com/api/docs/guides/image-generation)确认参数语义；[2.6 Sunburst](https://developers.openai.com/api/docs/models/gpt-image-2.6-sunburst)与[2.6 Flare](https://developers.openai.com/api/docs/models/gpt-image-2.6-flare)支持两个图片端点，提示指南明确两款支持透明背景。2.5 的生成/编辑参考同样明确支持透明背景与 PNG/WebP。旧 `gpt-image-2` 的透明能力在文档中仍标为 preview，因此本轮不扩展其配置。
+
+当前本地 Codex 适配器将 JSON 发往既有 `/images/generations` 和 `/images/edits`，由 Pi SDK 的 `ImagesOptions.metadata` 贯通配置参数，没有改 OAuth、Header、路由或 Provider。**新增参数在 Codex 通道及实际账户上尚未在线验证**，Platform 文档不是 Codex 协议保证。能力清单仅允许上述四款尝试这些参数；服务端可能拒绝或忽略，忽略格式时会触发下文的格式不一致错误，不做隐式回退或重试。离线 Mock 仅证明本地序列化、校验与保存行为，不是在线生图验收。
+
 所有模型支持生成和参考图编辑（调用入口限制见上节），每次请求一张，无批量数量参数、mask 或多轮连续编辑。本插件不提供 SVG、GIF、markup-guided editing 或流式部分图片输出。
 
 常用命令：
@@ -126,6 +144,9 @@ RPC 的 `message` 示例（TUI 中整段参数只会预填提示词，不按这�
 ```text
 /image openai-flare-26 --quality medium --complexity low -- 一只水彩橘猫
 /image openai-sunburst-26 --size 1536x864 --quality high --complexity high -- 设计一张海报
+/image openai-flare-26 --format png --background transparent -- 一枚透明背景的极简图标
+/image openai-sunburst-26 --format=webp --background=transparent -- 一张透明背景的产品素材
+/image openai-flare-26 --format jpeg --background opaque -- 阳光下的海边风景
 /image openai-sunburst --quality xhigh -- 保留上代精细生成工作流
 /image wan-pro --size 4K -- 一幅山水画
 ```
@@ -143,7 +164,7 @@ OpenAI 参考图数量和编码后长度按 [Platform JSON Images Edit 接口](h
 
 插件的认证和请求仍走 Codex 后端；按 Platform 文档配置不保证 Codex 通道或具体账户接受同等大小的请求。这里未新增自动重试、拆分请求或其他上传协议；服务端拒绝时仍显示原始原因。Wan 的限制不变。
 
-常用配置字段：`providers[].auth` 指定认证来源，`defaultModel` 指向该账户启用的模型 key；`models[].key/id/provider` 定义选择词、上游 ID 和所属账户；`description` 是可选的单行模型定位，直接显示在 TUI，不参与 key 解析；`tasks`、`prompt`、`inputImages`、`size.generate/edit`、`quality`、`complexity` 定义限制及参数选项。`inputImages.maxBytes` 限制原始文件字节，新增的可选 `inputImages.maxDataUrlLength` 限制包含前缀的编码后长度，旧配置省略时不增加此项校验。省略 `size.edit` 继承生成规则；未配置 `quality` 或 `complexity` 时，不展示或发送对应参数。
+常用配置字段：`providers[].auth` 指定认证来源，`defaultModel` 指向该账户启用的模型 key；`models[].key/id/provider` 定义选择词、上游 ID 和所属账户；`description` 是可选的单行模型定位，直接显示在 TUI，不参与 key 解析；`tasks`、`prompt`、`inputImages`、`size.generate/edit`、`quality`、`complexity`、`outputFormat`、`background` 定义限制及参数选项。`inputImages.maxBytes` 限制原始文件字节，新增的可选 `inputImages.maxDataUrlLength` 限制包含前缀的编码后长度，旧配置省略时不增加此项校验。省略 `size.edit` 继承生成规则；未配置 `quality` 或 `complexity` 时，不展示或发送对应参数。
 将模型 `enabled` 设为 `false` 后，不进入向导/运行时，显式选择也会在发送前拒绝，不会当提示词交给默认模型。不要禁用仍被 `defaultModel` 引用的模型。
 配置支持注释和尾逗号；缺失、未知字段或无效默认值会报错，不回退旧清单。修复后 `/reload`。不要填真实 Key、token、凭据路径或任意主机；新协议/字段仍需代码支持。
 
@@ -165,8 +186,12 @@ OpenAI 参考图数量和编码后长度按 [Platform JSON Images Edit 接口](h
 
 ## 输出、安全与失败恢复
 
-图片保存于 **Pi 当前项目** `.pi/generated-images/`，不是插件目录；文件名含时间、账户、模型和随机后缀，扩展名随实际图片格式。无自定义输出参数，单张输出上限 32 MiB。不会自动打开图片或生成 HTML 页。
-TUI 会话显示路径、原图链接及可用时的终端预览。支持链接的终端可 Ctrl+点击，否则复制路径/URL 手动打开；文件移动或删除后链接失效。RPC 客户端需自行读取 Pi 所在机器上的文件，`file:///` 不是公网下载地址。
+图片保存于 **Pi 当前项目** `.pi/generated-images/`，不是插件目录；文件名含时间、账户、模型和随机后缀，扩展名随实际图片格式。无自定义输出路径参数，单张输出上限 32 MiB。不会自动打开图片或生成 HTML 页。
+OpenAI `b64_json` 先经过现有 Base64、字节上限与文件签名校验，再依据实际字节确定 MIME，允许 PNG/JPEG/WebP。请求格式、响应 `output_format` 声明（如有）、逐图 `mime_type` 声明（如有）与真实格式分别校验。**任一不一致即报错，不保存本次图片、不自动重试**；例如请求 JPEG 实际返回 PNG，不会把 PNG 写入 `.jpg` 或伪造 MIME。整批响应校验通过后才进入保存。错误只包含已校验的格式名称，不包含 token、提示词或原始响应。Wan 维持原来的真实签名及 MIME 检查。
+
+**透明度边界：** 透明来自真实 Alpha 信息，不是棋盘格图案、白底或扩展名。本轮增加轻量的 PNG IHDR/tRNS、WebP VP8X/VP8L/VP8 容器 Alpha 信息检查；透明请求若明确返回无 Alpha 通道则拒绝保存。这不是逐像素解码：有 Alpha 通道仍可能所有像素完全不透明，截断或无法判断的容器返回未知，不据此声称透明成功。当前依赖没有通用 PNG/WebP 像素解码器，不引入大型运行时依赖；实际输出是否存在透明像素仍需用户在支持 Alpha 的图像工具中检查。测试样本的透明像素已在离线制备/复核时通过真实解码确认，但不能推广为服务端输出保证。
+
+TUI 会话显示路径、原图链接及可用时的终端预览。预览继续将实际 MIME 交给 Pi 原生 Image 组件：iTerm2 可接收原格式，Kitty 对非 PNG 依赖宿主已有 transcoder，没有时使用原生文本降级并保留原图链接，不在插件内转换或改写保存文件。支持链接的终端可 Ctrl+点击，否则复制路径/URL 手动打开；文件移动或删除后链接失效。RPC 客户端需自行读取 Pi 所在机器上的文件，`file:///` 不是公网下载地址。
 
 **请求会消耗额度/可能计费，插件不会自动重试。** 超时、断连、主动取消、下载或保存失败时，上游可能已经生成并计费；先检查本地结果、服务端额度/结果，再决定是否重发。插件不提供服务端任务查询或恢复下载命令。
 
@@ -175,7 +200,8 @@ TUI 会话显示路径、原图链接及可用时的终端预览。支持链接�
 | 没有账户 / HTTP 401 | 打开 `/image --settings`；OpenAI 选择登录 / 重新认证，回车执行预填的 `/login openai-codex`；千问更新 Key，不盲目切换账户 |
 | HTTP 403 / 429 | 核对账号权限、模型支持、额度和限流；本地启用不等于上游授权 |
 | `fetch failed` / 超时 / 断连 / 5xx | 按通知区分生成、编辑、下载及发送/读取阶段，检查启动 Pi 的网络/代理环境；不能仅凭外层错误断定模型或 Key 无效 |
-| 配置/输入校验失败 | 修复 models.jsonc 后 `/reload`；核对模型 key、尺寸、画质、复杂度及参考图限制 |
+| 配置/输入校验失败 | 修复 models.jsonc 后 `/reload`；核对模型 key、尺寸、画质、复杂度、格式/背景组合及参考图限制 |
+| 返回格式不一致 / 透明请求返回无 Alpha 通道 | 本次不保存、不自动重试。检查 Codex 通道及账户支持情况、服务端结果与额度，再决定是否手动重发；不能通过修改后缀或 MIME 修复 |
 | 保存失败 | 检查项目目录权限、空间及 `.pi`/输出目录是否为符号链接，不要立即重新生成 |
 | 取消后提示底层操作尚未结束 | 不重复提交，不通过 `/reload` 绕过。底层若恢复，会丢弃迟到结果并自动解除保护；若始终不结算，请退出 Pi 终止本地执行，确认服务端任务/额度状态后再重启并自行决定是否重发 |
 
@@ -191,7 +217,7 @@ npm test
 npm run test:host
 ```
 
-测试使用 Node.js ≥22.19.0，先在本插件目录执行 `npm ci --ignore-scripts` 准备锁文件声明的依赖。`npm test` 覆盖配置、命令、凭据、文件、网络诊断，以及 `test/sdk.test.mjs` 中的 SDK 定位回归；`test:host` 通过真实 SDK 和模拟上下文检查全部启用模型的生成/编辑、默认账户路由、参数传递、设置、取消、重复提交与迟到结果；还直接驱动原生选择器和编辑器的方向键、Enter、Escape、焦点，在 24/40/80/120 列检查中英混排、浅深主题、历史记录、原图链接与预览降级。测试不调用付费 API。生命周期专项还覆盖认证永久挂起、请求/响应体永久挂起（隔离子进程）、跨 reload 忙碌保护、迟到成功/失败、再次提交及保存阶段取消回滚；宿主脚本使用 Node 测试运行器输出实际统计。可用 `PI_IMAGE_TEST_REVERSE_MODELS=1` 重跑单元测试与宿主测试，在内存中倒置模型目录以检查非排序断言，生产清单不会被改写。
+测试使用 Node.js ≥22.19.0，先在本插件目录执行 `npm ci --ignore-scripts` 准备锁文件声明的依赖。`npm test` 覆盖配置、命令、凭据、文件、网络诊断，以及 `test/sdk.test.mjs` 中的 SDK 定位回归；`test:host` 通过真实 SDK 和模拟上下文检查全部启用模型的生成/编辑、默认账户路由、参数传递、设置、取消、重复提交与迟到结果；还直接驱动原生选择器和编辑器的方向键、Enter、Escape、焦点，在 24/40/80/120 列检查中英混排、浅深主题、历史记录、原图链接与预览降级。测试不调用付费 API。新增覆盖所有格式/背景合法组合、双向依赖过滤、生成/编辑参数贯通、真实 PNG/JPEG/WebP 字节保存与历史重载、请求/声明/实际格式不符、无 Alpha 容器、大小/Base64/签名限制、各格式取消清理，以及 TUI 原生预览和降级。真实 2×2 样本在 `test/image-fixtures.mjs`，由 Pillow 离线编码，测试和运行时均不依赖 Pillow。生命周期专项还覆盖认证永久挂起、请求/响应体永久挂起（隔离子进程）、跨 reload 忙碌保护、迟到成功/失败、再次提交及保存阶段取消回滚；宿主脚本使用 Node 测试运行器输出实际统计。可用 `PI_IMAGE_TEST_REVERSE_MODELS=1` 重跑单元测试与宿主测试，在内存中倒置模型目录以检查非排序断言，生产清单不会被改写。
 
 宿主测试需要完整的 Pi SDK 及其依赖。`test/sdk.mjs` 按命令行第二个参数 → `PI_SDK` → 本插件可解析的包 → Pi 托管安装 → PATH 定位 SDK。参数可为 `dist/index.js` 的绝对路径或 `file://` URL；其它安装方式可用 PowerShell 的 `$env:PI_SDK` 指定实际入口。测试与辅助文件全部位于本插件的 `test/`，复制本插件目录后即可独立准备依赖并运行。
 

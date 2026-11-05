@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { sizeForTask, type ChoicePolicy, type ImageModelConfig, type ImageTask } from "./model-config.ts";
+import { normalizeImageOutput, sizeForTask, type ChoicePolicy, type ImageModelConfig, type ImageTask } from "./model-config.ts";
 
 type SelectionContext = { ui: Pick<ExtensionContext["ui"], "select"> };
 export interface NamedItem { key: string; name: string; description?: string }
@@ -36,13 +36,15 @@ export async function selectPolicy(ctx: SelectionContext, title: string, policy:
 	return (await selectItem(ctx, title, options.map((option) => ({ key: option.value, name: policyLabel(policy, option.value) }))))?.key;
 }
 
-export interface ImageParameters { size: string; quality?: string; complexity?: string }
+export interface ImageParameters { size: string; quality?: string; complexity?: string; outputFormat?: string; background?: string }
 type ParameterKey = keyof ImageParameters;
 export function parameterPolicies(model: ImageModelConfig, task: ImageTask): { key: ParameterKey; name: string; policy: ChoicePolicy }[] {
 	return [
 		{ key: "size" as const, name: "尺寸", policy: sizeForTask(model, task) },
 		...(model.quality ? [{ key: "quality" as const, name: "画质", policy: model.quality }] : []),
 		...(model.complexity ? [{ key: "complexity" as const, name: "复杂度", policy: model.complexity }] : []),
+		...(model.outputFormat ? [{ key: "outputFormat" as const, name: "输出格式", policy: model.outputFormat }] : []),
+		...(model.background ? [{ key: "background" as const, name: "背景", policy: model.background }] : []),
 	];
 }
 
@@ -60,9 +62,18 @@ export async function selectParameters(ctx: SelectionContext, model: ImageModelC
 	while (true) {
 		const action = await selectItem(ctx, `${model.name} - 参数`, parameterItems(model, task, values));
 		if (!action) return undefined;
-		if (action.key === "submit") return values;
+		if (action.key === "submit") {
+			normalizeImageOutput(model, values);
+			return values;
+		}
 		const selected = policies.find(({ key }) => key === action.key)!;
-		const value = await selectPolicy(ctx, selected.name, selected.policy, values[selected.key]);
+		// Filter in either selection order using exactly the command layer's rules.
+		const policy = selected.key === "outputFormat" || selected.key === "background"
+			? { ...selected.policy, options: selected.policy.options.filter((option) => {
+				try { normalizeImageOutput(model, { ...values, [selected.key]: option.value }); return true; }
+				catch { return false; }
+			}) } : selected.policy;
+		const value = await selectPolicy(ctx, selected.name, policy, values[selected.key]);
 		// Escape from a parameter picker returns here without losing previous values.
 		if (value !== undefined) values[selected.key] = value;
 	}

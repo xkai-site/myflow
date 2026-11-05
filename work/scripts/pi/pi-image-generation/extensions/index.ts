@@ -3,7 +3,7 @@ import { BorderedLoader, getAgentDir, type ExtensionAPI, type ExtensionContext }
 import { inferModelForSingleAccount, isImageCommand, parseImageCommand, resolveImageCommand, usageText } from "../src/command.ts";
 import { loadInputImages, parseReferenceImagePaths, validateInputImages } from "../src/image-files.ts";
 import { sanitizeError } from "../src/http.ts";
-import { readImageConfig, type ImageConfig, type ImageModelConfig, type ImageProviderConfig } from "../src/model-config.ts";
+import { readImageConfig, type ImageConfig, type ImageProviderConfig } from "../src/model-config.ts";
 import { generateAndSave } from "../src/runtime.ts";
 import { formatImageLink } from "../src/preview-link.ts";
 import { getAccountStatus, resolveImageAuth } from "../src/credentials.ts";
@@ -97,13 +97,14 @@ async function runImageWizard(pi: ExtensionAPI, args: string, ctx: ExtensionCont
 async function runRawImageRequest(pi: ExtensionAPI, text: string, images: readonly ImageContent[], ctx: ExtensionContext, config: ImageConfig, agentDir: string): Promise<void> {
 	const parsed = parseImageCommand(text, config);
 	if (parsed.help || !parsed.prompt) { ctx.ui.notify(usageText(config), parsed.help ? "info" : "warning"); return; }
+	let model = parsed.modelKey ? config.models.find((m) => m.key === parsed.modelKey) : undefined;
+	// Explicit selectors can fail parameter validation even before account-status lookup.
+	let command = model ? resolveImageCommand(parsed, model, images.length, config) : undefined;
 	const available = await getAvailableProviders(ctx, config, agentDir);
-	let model: ImageModelConfig | undefined;
-	if (parsed.modelKey) model = config.models.find((m) => m.key === parsed.modelKey);
-	else model = inferModelForSingleAccount(config, available.map((p) => p.id));
+	if (!model) model = inferModelForSingleAccount(config, available.map((p) => p.id));
 	if (!model) throw new Error(available.length ? "Multiple image accounts configured; specify a model key from /image --help" : "No image account configured");
 	if (!available.some((p) => p.id === model.provider)) throw new Error("Selected image account is not configured");
-	const command = resolveImageCommand(parsed, model, images.length, config);
+	command ??= resolveImageCommand(parsed, model, images.length, config);
 	validateInputImages(images, model.inputImages);
 	await runImageGeneration(pi, command, images, ctx, config, agentDir);
 }

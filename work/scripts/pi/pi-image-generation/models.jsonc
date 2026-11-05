@@ -84,6 +84,9 @@
       // https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst
       "key": "openai-sunburst", "id": "gpt-image-2.5-sunburst", "name": "GPT Image 2.5 Sunburst", "provider": "openai",
       "description": "上代精细生成与编辑",
+      // Platform generation/edit semantics; Codex channel acceptance is not online-verified.
+      "outputFormat": { "default": "png", "options": [{ "value": "png", "label": "PNG" }, { "value": "jpeg", "label": "JPEG" }, { "value": "webp", "label": "WebP" }] },
+      "background": { "default": "auto", "options": [{ "value": "auto", "label": "自动" }, { "value": "opaque", "label": "不透明" }, { "value": "transparent", "label": "透明" }] },
       "enabled": true,
       "tasks": ["generate", "edit"],
       "prompt": { "maxChars": 32000 },
@@ -116,6 +119,9 @@
       // https://developers.openai.com/api/docs/models/gpt-image-2.5-flare
       "key": "openai-flare", "id": "gpt-image-2.5-flare", "name": "GPT Image 2.5 Flare", "provider": "openai",
       "description": "上代快速生成",
+      // Platform generation/edit semantics; Codex channel acceptance is not online-verified.
+      "outputFormat": { "default": "png", "options": [{ "value": "png", "label": "PNG" }, { "value": "jpeg", "label": "JPEG" }, { "value": "webp", "label": "WebP" }] },
+      "background": { "default": "auto", "options": [{ "value": "auto", "label": "自动" }, { "value": "opaque", "label": "不透明" }, { "value": "transparent", "label": "透明" }] },
       "enabled": true,
       "tasks": ["generate", "edit"],
       "prompt": { "maxChars": 32000 },
@@ -149,6 +155,10 @@
       // 2.6 confirms multiples of 16 and ratio <= 3; pixel/edge caps retain the documented 2/2.5 range pending 2.6-specific confirmation.
       "key": "openai-sunburst-26", "id": "gpt-image-2.6-sunburst", "name": "GPT Image 2.6 Sunburst", "provider": "openai",
       "description": "精细创作与精确编辑",
+      // https://developers.openai.com/api/docs/guides/image-prompting
+      // Platform generation/edit semantics; Codex channel acceptance is not online-verified.
+      "outputFormat": { "default": "png", "options": [{ "value": "png", "label": "PNG" }, { "value": "jpeg", "label": "JPEG" }, { "value": "webp", "label": "WebP" }] },
+      "background": { "default": "auto", "options": [{ "value": "auto", "label": "自动" }, { "value": "opaque", "label": "不透明" }, { "value": "transparent", "label": "透明" }] },
       "enabled": true,
       "tasks": ["generate", "edit"],
       "prompt": { "maxChars": 32000 },
@@ -190,6 +200,9 @@
       // Same Platform JSON input limits; pixel/edge caps await 2.6-specific confirmation.
       "key": "openai-flare-26", "id": "gpt-image-2.6-flare", "name": "GPT Image 2.6 Flare", "provider": "openai",
       "description": "快速生成与日常迭代",
+      // Platform generation/edit semantics; Codex channel acceptance is not online-verified.
+      "outputFormat": { "default": "png", "options": [{ "value": "png", "label": "PNG" }, { "value": "jpeg", "label": "JPEG" }, { "value": "webp", "label": "WebP" }] },
+      "background": { "default": "auto", "options": [{ "value": "auto", "label": "自动" }, { "value": "opaque", "label": "不透明" }, { "value": "transparent", "label": "透明" }] },
       "enabled": true,
       "tasks": ["generate", "edit"],
       "prompt": { "maxChars": 32000 },

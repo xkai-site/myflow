@@ -27,6 +27,8 @@ export interface ImageModelConfig {
 	enabled?: boolean;
 	description?: string;
 	complexity?: ChoicePolicy;
+	background?: ChoicePolicy;
+	outputFormat?: ChoicePolicy;
 	prompt: { maxChars: number };
 	inputImages: ImageLimits;
 	size: { generate: SizePolicy; edit?: SizePolicy };
@@ -116,7 +118,7 @@ export function validateImageConfig(raw: unknown): ImageConfig {
 	});
 	const models = array(root.models, "models").map((item, i): ImageModelConfig => {
 		const p = `models[${i}]`;
-		const v = record(item, p, ["key", "id", "name", "provider", "tasks", "prompt", "inputImages", "size", "quality", "enabled", "description", "complexity"]);
+		const v = record(item, p, ["key", "id", "name", "provider", "tasks", "prompt", "inputImages", "size", "quality", "enabled", "description", "complexity", "background", "outputFormat"]);
 		const tasks = array(v.tasks, `${p}.tasks`).map((task): ImageTask => {
 			if (task !== "generate" && task !== "edit") fail(`${p}.tasks`, "only generate and edit are supported");
 			return task;
@@ -148,6 +150,15 @@ export function validateImageConfig(raw: unknown): ImageConfig {
 		if (sizes.edit !== undefined) model.size.edit = sizePolicy(sizes.edit, `${p}.size.edit`);
 		if (v.quality !== undefined) model.quality = choices(v.quality, `${p}.quality`);
 		if (v.complexity !== undefined) model.complexity = choices(v.complexity, `${p}.complexity`);
+		for (const key of ["background", "outputFormat"] as const) {
+			if (v[key] === undefined) continue;
+			const policy = choices(v[key], `${p}.${key}`);
+			const allowed = key === "background" ? ["auto", "opaque", "transparent"] : ["png", "jpeg", "webp"];
+			if (policy.options.some((option) => !allowed.includes(option.value))) fail(`${p}.${key}.options`, "unsupported value");
+			model[key] = policy;
+		}
+		try { normalizeImageOutput(model); }
+		catch { fail(`${p}.background/outputFormat`, "incompatible defaults: transparent background cannot use jpeg output format"); }
 		if (v.description !== undefined) {
 			model.description = string(v.description, `${p}.description`);
 			if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029·•]/u.test(model.description)) fail(`${p}.description`, "must be a single line without controls or middle-dot separators");
@@ -162,11 +173,34 @@ export function validateImageConfig(raw: unknown): ImageConfig {
 		if (!provider) fail("models.provider", "unknown provider reference");
 		if (provider.adapter === "ali-wan-images" && model.quality) fail("models.quality", "this adapter does not send quality");
 		if (provider.adapter === "ali-wan-images" && model.complexity) fail("models.complexity", "this adapter does not send complexity");
+		if (provider.adapter === "ali-wan-images" && (model.background || model.outputFormat)) fail("models.background/outputFormat", "this adapter does not send background or output_format");
 	}
 	for (const provider of providers) {
 		if (!models.some((m) => m.key === provider.defaultModel && m.provider === provider.id && m.enabled !== false)) fail("providers.defaultModel", "must reference an enabled model owned by this provider");
 	}
 	return { version: 1, providers, models };
+}
+
+/** Shared by command resolution, native parameter pickers and request/runtime guards. */
+export interface ImageOutputOptions { background?: string; outputFormat?: string }
+export function assertImageOutputCombination(values: ImageOutputOptions): void {
+	if (values.background === "transparent" && (values.outputFormat ?? "png") === "jpeg") {
+		throw new Error("--background transparent is incompatible with --format jpeg; use png or webp");
+	}
+}
+export function normalizeImageOutput(model: Pick<ImageModelConfig, "background" | "outputFormat">, values: ImageOutputOptions = {}): ImageOutputOptions {
+	const result: ImageOutputOptions = {};
+	for (const [key, flag] of [["background", "--background"], ["outputFormat", "--format"]] as const) {
+		const policy = model[key];
+		if (!policy && values[key] !== undefined) throw new Error(`${flag} is not supported by this model`);
+		const value = values[key] ?? policy?.default;
+		if (value !== undefined) {
+			if (!policy?.options.some((option) => option.value === value)) throw new Error(`${flag} must be one of the configured model options: ${policy?.options.map((o) => o.value).join(", ")}`);
+			result[key] = value;
+		}
+	}
+	assertImageOutputCombination(result);
+	return result;
 }
 
 export function assertModelEnabled(model: ImageModelConfig): void {

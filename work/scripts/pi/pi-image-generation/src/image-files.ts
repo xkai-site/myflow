@@ -122,6 +122,36 @@ export function detectImage(bytes: Uint8Array): Omit<DecodedImage, "bytes"> | un
 	return undefined;
 }
 
+/** Container metadata only, NOT a decoded-pixel transparency test. Unknown/truncated => undefined. */
+export function imageAlphaChannel(image: DecodedImage): boolean | undefined {
+	const bytes = image.bytes;
+	if (image.mimeType === "image/jpeg" || image.mimeType === "image/bmp") return false;
+	if (image.mimeType === "image/png") {
+		if (bytes.length < 33 || ascii(bytes, 12, 16) !== "IHDR" || bytes.readUInt32BE(8) !== 13) return undefined;
+		const colorType = bytes[25];
+		if (colorType === 4 || colorType === 6) return true;
+		if (![0, 2, 3].includes(colorType)) return undefined;
+		for (let offset = 33; offset + 12 <= bytes.length;) {
+			const length = bytes.readUInt32BE(offset);
+			if (length > bytes.length - offset - 12) return undefined;
+			const type = ascii(bytes, offset + 4, offset + 8);
+			if (type === "tRNS" && length > 0) return true;
+			if (type === "IEND" && length === 0) return false;
+			offset += length + 12;
+		}
+	}
+	if (image.mimeType === "image/webp") {
+		if (bytes.length < 20 || bytes.readUInt32LE(4) + 8 !== bytes.length) return undefined;
+		const type = ascii(bytes, 12, 16);
+		const length = bytes.readUInt32LE(16);
+		if (length > bytes.length - 20) return undefined;
+		if (type === "VP8X" && length === 10) return (bytes[20] & 0x10) !== 0;
+		if (type === "VP8L" && length >= 5 && bytes[20] === 0x2f) return (bytes[24] & 0x10) !== 0;
+		if (type === "VP8 " && length >= 10) return false;
+	}
+	return undefined;
+}
+
 export async function saveGeneratedImages(
 	cwd: string,
 	provider: string,

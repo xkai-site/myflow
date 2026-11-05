@@ -8,7 +8,7 @@ import { generateOpenAICodexImages } from "./openai-codex-images.ts";
 import { saveGeneratedImages, validateInputImages } from "./image-files.ts";
 import { sanitizeError } from "./http.ts";
 import { createDiagnosticWriter, type DiagnosticWriter } from "./diagnostics.ts";
-import { assertModelEnabled, type ImageConfig, type ImageProviderConfig } from "./model-config.ts";
+import { assertModelEnabled, normalizeImageOutput, type ImageConfig, type ImageModelConfig, type ImageProviderConfig } from "./model-config.ts";
 import type { GenerationOutcome, ImageTransportOptions, ImageTransportResult, ResolvedImageCommand } from "./types.ts";
 
 export interface RequestAuth { apiKey: string; baseUrl: string; headers?: Record<string, string | null> }
@@ -33,7 +33,7 @@ export function createRuntimeImagesModels(config: ImageConfig, provider: ImagePr
 		})),
 		images: {
 			[provider.adapter]: {
-				generateImages: (model, context, options) => generateWithTransport(TRANSPORTS[provider.adapter], model, context, options, onDiagnostic),
+				generateImages: (model, context, options) => generateWithTransport(TRANSPORTS[provider.adapter], model, context, options, config.models.find((item) => item.provider === model.provider && item.id === model.id)!, onDiagnostic),
 			},
 		},
 	}));
@@ -50,6 +50,7 @@ export async function generateAndSave(
 	fetch?: typeof globalThis.fetch,
 ): Promise<GenerationOutcome> {
 	assertModelEnabled(command.modelConfig);
+	const imageOutput = normalizeImageOutput(command.modelConfig, command);
 	validateInputImages(inputImages, command.modelConfig.inputImages);
 	const auth = await resolveAuthUnlessAborted(resolveAuth, signal);
 	signal.throwIfAborted();
@@ -61,7 +62,7 @@ export async function generateAndSave(
 			input: [{ type: "text", text: command.prompt }, ...inputImages],
 		}, {
 			apiKey: auth.apiKey, headers: auth.headers, signal, fetch,
-			metadata: { size: command.size, quality: command.quality, complexity: command.complexity },
+			metadata: { size: command.size, quality: command.quality, complexity: command.complexity, ...imageOutput },
 		});
 		signal.throwIfAborted();
 		if (result.stopReason !== "stop") throw new Error(result.errorMessage ?? `Image generation ${result.stopReason}`);
@@ -97,7 +98,7 @@ async function resolveAuthUnlessAborted(resolveAuth: () => Promise<RequestAuth>,
 }
 
 async function generateWithTransport(
-	transport: Transport, model: ImageModel<ImageApi>, context: ImagesContext, options?: ImagesOptions, onDiagnostic?: DiagnosticWriter,
+	transport: Transport, model: ImageModel<ImageApi>, context: ImagesContext, options: ImagesOptions | undefined, modelConfig: ImageModelConfig, onDiagnostic?: DiagnosticWriter,
 ): Promise<AssistantImages> {
 	const output: AssistantImages = { api: model.api, provider: model.provider, model: model.id, output: [], stopReason: "stop", timestamp: Date.now() };
 	try {
@@ -106,12 +107,17 @@ async function generateWithTransport(
 		if (typeof size !== "string") throw new Error("Image size must be resolved from model configuration");
 		const quality = options.metadata?.quality;
 		const complexity = options.metadata?.complexity;
+		const imageOutput = normalizeImageOutput(modelConfig, {
+			background: metadataString(options.metadata?.background, "--background"),
+			outputFormat: metadataString(options.metadata?.outputFormat, "--format"),
+		});
 		const result = await transport({
 			apiKey: options.apiKey, baseUrl: model.baseUrl, model: model.id,
 			prompt: context.input.filter((block): block is TextContent => block.type === "text").map((block) => block.text).join("\n").trim(),
 			images: context.input.filter((block): block is ImageContent => block.type === "image"),
 			size, quality: typeof quality === "string" ? quality : undefined,
 			complexity: typeof complexity === "string" ? complexity : undefined,
+			modelConfig, ...imageOutput,
 			headers: options.headers, signal: options.signal, fetch: options.fetch, onDiagnostic,
 		});
 		output.output.push(...result.texts.map((text) => ({ type: "text" as const, text })), ...result.images.map((image) => ({ type: "image" as const, ...image })));
@@ -121,4 +127,9 @@ async function generateWithTransport(
 		output.errorMessage = sanitizeError(error instanceof Error ? error.message : "Image generation failed", options?.apiKey ? [options.apiKey] : []);
 	}
 	return output;
+}
+
+function metadataString(value: unknown, flag: string): string | undefined {
+	if (value !== undefined && typeof value !== "string") throw new Error(`${flag} must be a configured string value`);
+	return value as string | undefined;
 }
