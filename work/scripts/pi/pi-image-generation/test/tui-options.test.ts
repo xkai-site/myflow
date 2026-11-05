@@ -1,16 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readImageConfig } from "../src/model-config.ts";
+import { readTestConfig } from "./config-helpers.ts";
 import { itemOptions, parameterItems, policyLabel, selectItem, selectParameters, selectPolicy } from "../src/tui-options.ts";
 
-const config = await readImageConfig();
+const config = await readTestConfig();
 const model = config.models.find((m) => m.key === "openai-flare-26")!;
 
 test("model labels show configuration positioning and map actual choices to stable keys", async () => {
-	const models = config.models.filter((m) => m.provider === "openai");
+	const models = config.models;
 	const options = itemOptions(models, "openai-flare-26");
+	// These positions intentionally verify default-first presentation, not catalog ordering.
 	assert.equal(options[0].item.key, "openai-flare-26");
 	assert.equal(options[0].label, "GPT Image 2.6 Flare - 快速生成与日常迭代（默认）");
+	for (const item of models) {
+		assert.ok(item.description, `${item.key} needs positioning`);
+		assert.ok(options.find((option) => option.item.key === item.key)!.label.startsWith(`${item.name} - ${item.description}`));
+	}
+	assert.equal(itemOptions(models.filter((item) => item.provider === "qwen"), "wan")[0].label, "Wan 2.7 Image - 基础生图与参考图编辑（默认）");
 	for (const target of models) {
 		for (const description of [target.description, "修改后的定位说明"]) {
 			const items = models.map((item) => item.key === target.key ? { ...item, description } : item);

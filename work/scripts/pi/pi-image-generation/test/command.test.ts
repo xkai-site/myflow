@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { inferModelForSingleAccount, parseImageCommand, resolveImageCommand, usageText } from "../src/command.ts";
-import { readImageConfig, validateImageConfig } from "../src/model-config.ts";
+import { validateImageConfig } from "../src/model-config.ts";
 import { validateInputImages } from "../src/image-files.ts";
 import { buildOpenAICodexRequest } from "../src/openai-codex-images.ts";
 import { buildAliWanRequest } from "../src/ali-wan-images.ts";
 
-const config = await readImageConfig();
+import { getModel, getProvider, readTestConfig } from "./config-helpers.ts";
+
+const config = await readTestConfig();
 const key = `header.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "synthetic-account" } })).toString("base64url")}.signature`;
 const png = { data: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).toString("base64"), mimeType: "image/png" };
 
@@ -49,13 +51,13 @@ test("GPT Image 2.5 commands serialize generation/edit parameters from the actua
 	}
 	for (const quality of ["xhigh", "max"]) {
 		const parsed = parseImageCommand(`/image openai --quality ${quality} cat`, config);
-		assert.throws(() => resolveImageCommand(parsed, config.models[0], 0, config), /quality/i);
+		assert.throws(() => resolveImageCommand(parsed, getModel(config, "openai"), 0, config), /quality/i);
 	}
 });
 
 test("disabled models are recognized as selectors but rejected, never silently sent as default-model prompts", () => {
 	const fixture = structuredClone(config);
-	const model = { ...structuredClone(fixture.models[0]), key: "disabled-test-model", id: "disabled-test-id", name: "Disabled test model", enabled: false };
+	const model = { ...structuredClone(getModel(fixture, "openai")), key: "disabled-test-model", id: "disabled-test-id", name: "Disabled test model", enabled: false };
 	fixture.models.push(model);
 	const validated = validateImageConfig(fixture);
 	const parsed = parseImageCommand(`/image ${model.key} cat`, validated);
@@ -112,24 +114,24 @@ test("help describes the wizard, positioning, configured defaults and RPC comple
 });
 
 test("direct OpenAI adapter preserves the default quality", () => {
-	const legacy = config.models[0];
+	const legacy = getModel(config, "openai");
 	const request = buildOpenAICodexRequest({ apiKey: key, baseUrl: "https://chatgpt.com/backend-api", model: legacy.id, size: "auto", images: [], prompt: "cat" });
 	assert.equal(request.body.quality, "auto");
 });
 
 test("config-only model upgrade/addition changes parsing, request and validation", () => {
 	const changed = structuredClone(config);
-	const model = changed.models[0];
+	const model = getModel(changed, "openai");
 	model.key = "future"; model.id = "future-image-id"; model.name = "Future Image";
 	model.prompt.maxChars = 10; model.inputImages.maximum = 1; model.inputImages.maxBytes = 8;
 	model.quality!.options.push({ value: "ultra", label: "Ultra" }); model.quality!.default = "ultra";
 	model.size.generate.default = "1024x1024";
-	changed.providers[0].defaultModel = "future";
+	getProvider(changed, "openai").defaultModel = "future";
 	changed.models.push({ ...structuredClone(model), key: "future-2", id: "future-image-id-2", name: "Second Future" });
 	const validated = validateImageConfig(changed);
 	assert.match(usageText(validated), /Second Future/);
 	const parsed = parseImageCommand("/image future cat", validated);
-	const command = resolveImageCommand(parsed, validated.models[0], 1, validated);
+	const command = resolveImageCommand(parsed, getModel(validated, "future"), 1, validated);
 	assert.equal(command.quality, "ultra");
 	assert.equal(command.size, "1024x1024");
 	const request = buildOpenAICodexRequest({ ...command, apiKey: key, baseUrl: "https://chatgpt.com/backend-api/codex", images: [png] });
@@ -144,12 +146,12 @@ test("config-only model upgrade/addition changes parsing, request and validation
 });
 
 test("task, quality, prompt, reference and CLI validation", () => {
-	const wan = config.models[1];
+	const wan = getModel(config, "wan");
 	const parsed = parseImageCommand("/image wan --size=2K cat", config);
 	assert.throws(() => resolveImageCommand({ ...parsed, quality: "high" }, wan, 0, config), /not supported/);
 	assert.throws(() => resolveImageCommand(parsed, wan, 10, config), /at most 9/);
 	assert.throws(() => resolveImageCommand(parsed, { ...wan, tasks: ["generate"] }, 1, config), /does not support edit/);
-	assert.throws(() => resolveImageCommand({ ...parsed, size: "4K" }, config.models[2], 1, config));
+	assert.throws(() => resolveImageCommand({ ...parsed, size: "4K" }, getModel(config, "wan-pro"), 1, config));
 	assert.throws(() => parseImageCommand("/image --quality", config), /requires/);
 	assert.throws(() => parseImageCommand("/image --api-key=never-echo", config), (error: Error) => !error.message.includes("never-echo"));
 	assert.throws(() => parseImageCommand('/image "unclosed', config), /unterminated/);

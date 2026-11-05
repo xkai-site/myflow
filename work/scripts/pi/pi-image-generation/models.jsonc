@@ -47,6 +47,7 @@
     },
     {
       "key": "wan", "id": "wan2.7-image", "name": "Wan 2.7 Image", "provider": "qwen",
+      "description": "基础生图与参考图编辑",
       "tasks": ["generate", "edit"],
       "prompt": { "maxChars": 5000 },
       "inputImages": { "maximum": 9, "maxBytes": 20971520, "mimeTypes": ["image/png", "image/jpeg", "image/webp", "image/bmp"] },
@@ -60,6 +61,7 @@
     },
     {
       "key": "wan-pro", "id": "wan2.7-image-pro", "name": "Wan 2.7 Image Pro", "provider": "qwen",
+      "description": "4K 生图，编辑最高 2K",
       "tasks": ["generate", "edit"],
       "prompt": { "maxChars": 5000 },
       "inputImages": { "maximum": 9, "maxBytes": 20971520, "mimeTypes": ["image/png", "image/jpeg", "image/webp", "image/bmp"] },

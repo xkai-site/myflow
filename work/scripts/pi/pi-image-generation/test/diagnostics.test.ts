@@ -67,6 +67,27 @@ test("HTTP errors preserve status and header/payload request IDs, including HTML
 	}
 });
 
+test("late success from abort-ignoring fetch/body is cancelled without success diagnostics or retry", async () => {
+	for (const phase of ["fetch", "body"]) {
+		const controller = new AbortController();
+		const records: ImageRequestDiagnostic[] = [];
+		let calls = 0;
+		await assert.rejects(requestImageJson(endpoint, { method: "POST", signal: controller.signal }, 4096, {
+			operation: "generate",
+			fetch: async () => {
+				calls++;
+				const response = Response.json({ data: [] });
+				if (phase === "fetch") controller.abort();
+				else response.arrayBuffer = async () => { controller.abort(); return new TextEncoder().encode('{"data":[]}').buffer; };
+				return response;
+			},
+			onDiagnostic: async (record) => { records.push(record); return "unexpected.json"; },
+		}), (error: Error) => error.name === "AbortError");
+		assert.equal(calls, 1);
+		assert.deepEqual(records, []);
+	}
+});
+
 test("body-read failures remain distinguishable from connection failures", async () => {
 	let record: ImageRequestDiagnostic | undefined;
 	await assert.rejects(requestImageJson(endpoint, {}, 4096, {

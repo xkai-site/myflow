@@ -1,14 +1,10 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { writeFile, readdir } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
+import { writeFile, rm } from 'node:fs/promises';
+import { runLifecycleHostChecks } from './lifecycle-host.mjs';
 
-const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return {promise,resolve}; };
-const until = async (predicate) => {
- for(let i=0;i<2000;i++){if(predicate())return;await new Promise(setImmediate);}
- assert.fail('Expected offline UI event did not arrive');
-};
-
-export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes}) {
+export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes,t}) {
  const {default:extension}=await jiti.import('../extensions/index.ts');
  const {itemOptions,selectItem}=await jiti.import('../src/tui-options.ts');
  const {createResultView}=await jiti.import('../src/result-view.ts');
@@ -67,24 +63,31 @@ export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes}) {
   // Use actual host components and keyboard handling, not a string-only mock.
   const models=config.models.filter(m=>m.provider==='openai');
   const options=itemOptions(models,config.providers.find(p=>p.id==='openai').defaultModel);
-  for(const appearance of ['dark','light']) {
-   initTheme(appearance,false);
-   let selected,cancelled=0;
-   const component=new ExtensionSelectorComponent('图片模型',options.map(o=>o.label),value=>{selected=value},()=>cancelled++);
-   for(const width of [24,40,80,120]) {
-    const lines=component.render(width);
-    assert.ok(lines.every(line=>visibleWidth(line)<=width));
-    const joined=lines.map(stripTerminalSequences).join('\n').replace(/\s/g,'');
-    for(const option of options)assert.ok(joined.includes(option.label.replace(/\s/g,'')));
-    assert.ok(lines.join('').includes(themeModule.theme.fg('accent','→ ')));
+  await t.test('native model selectors: both accounts, complete positioning, keyboard, widths and themes',async()=>{
+   for(const appearance of ['dark','light'])for(const provider of config.providers) {
+    initTheme(appearance,false);
+    const choices=itemOptions(config.models.filter(m=>m.provider===provider.id),provider.defaultModel);
+    // Positions here deliberately verify default-first presentation and arrow-key movement.
+    assert.equal(choices[0].item.key,provider.defaultModel);
+    assert.equal(choices.filter(o=>o.label.includes('（默认）')).length,1);
+    let selected,cancelled=0;
+    const component=new ExtensionSelectorComponent('图片模型',choices.map(o=>o.label),value=>{selected=value},()=>cancelled++);
+    for(const width of [24,40,80,120]) {
+     const lines=component.render(width);
+     assert.ok(lines.every(line=>visibleWidth(line)<=width));
+     const joined=lines.map(stripTerminalSequences).join('\n').replace(/\s/g,'');
+     for(const option of choices){assert.ok(option.item.description);assert.ok(joined.includes(option.label.replace(/\s/g,'')))}
+     assert.doesNotMatch(joined,/[·•]/);
+     assert.ok(lines.join('').includes(themeModule.theme.fg('accent','→ ')));
+    }
+    component.handleInput('\x1b[B');component.handleInput('\r');
+    assert.equal(selected,choices[1].label);
+    component.handleInput('\x1b[A');component.handleInput('\r');
+    assert.equal(selected,choices[0].label);
+    component.handleInput('\x1b');assert.equal(cancelled,1);
+    component.dispose();
    }
-   component.handleInput('\x1b[B');component.handleInput('\r');
-   assert.equal(selected,options[1].label);
-   component.handleInput('\x1b[A');component.handleInput('\r');
-   assert.equal(selected,options[0].label);
-   component.handleInput('\x1b');assert.equal(cancelled,1);
-   component.dispose();
-  }
+  });
   initTheme('dark',false);
   let submitted,cancelled=0;
   const editor=new ExtensionEditorComponent(display,keybindings,'图片提示词','中文 cat',value=>{submitted=value},()=>cancelled++);
@@ -107,6 +110,34 @@ export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes}) {
    })}},'图片模型',models,'openai-flare-26');
    assert.equal(selected.key,options[index].item.key);
   }
+
+  await t.test('native parameter menus preserve keyboard edits/defaults and nested Escape in both themes',async()=>{
+   const {selectParameters,parameterItems,policyLabel}=await jiti.import('../src/tui-options.ts');
+   const model=config.models.find(m=>m.key==='openai-flare-26');
+   for(const appearance of ['dark','light']) {
+    initTheme(appearance,false);
+    const actions=['size','1536x1024','quality','max','complexity','low','quality',undefined,'submit'];
+    let index=0;
+    const result=await selectParameters({ui:{select:async(title,labels)=>new Promise(resolve=>{
+     const action=actions[index++];
+     const values={size:index>2?'1536x1024':'auto',quality:index>4?'max':'auto',complexity:index>6?'low':'high'};
+     const target=action===undefined?undefined:title.endsWith(' - 参数')
+      ?parameterItems(model,'generate',values).find(o=>o.key===action).name
+      :policyLabel(title==='尺寸'?model.size.generate:title==='画质'?model.quality:model.complexity,action);
+     const component=new ExtensionSelectorComponent(title,labels,resolve,()=>resolve(undefined));
+     for(const width of [24,40,80,120])assert.ok(component.render(width).every(line=>visibleWidth(line)<=width));
+     if(target===undefined)component.handleInput('\x1b');
+     else {
+      const selected=labels.indexOf(target);assert.ok(selected>=0,target);
+      for(let n=0;n<selected;n++)component.handleInput('\x1b[B');
+      component.handleInput('\r');
+     }
+     component.dispose();
+    })}},model,'generate');
+    assert.equal(index,actions.length);assert.deepEqual(result,{size:'1536x1024',quality:'max',complexity:'low'});
+   }
+   initTheme('dark',false);
+  });
 
   // All real catalog models complete TUI generation and reference editing, offline.
   for(const model of config.models.filter(m=>m.enabled!==false))for(const edit of [false,true]) {
@@ -164,7 +195,7 @@ export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes}) {
 
   // Multi-account selection still maps to the selected provider; cancelling sends nothing.
   globalThis.fetch=async()=>assert.fail('A cancelled UI sent a request');
-  const multi=await harness({providers:['openai','qwen'],choose:(title,labels)=>title==='图片任务'?labels[0]:title==='图片账户'?labels.find(l=>l===config.providers[1].name):undefined});
+  const multi=await harness({providers:['openai','qwen'],choose:(title,labels)=>title==='图片任务'?labels[0]:title==='图片账户'?labels.find(l=>l===config.providers.find(p=>p.id==='qwen').name):undefined});
   await multi.handler('',multi.ctx);
   assert.equal(multi.questions.filter(q=>q.title==='图片账户').length,1);
   assert.ok(multi.questions.find(q=>q.title==='图片模型').options.every(o=>o.startsWith('Wan')));
@@ -194,47 +225,23 @@ export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes}) {
   const settings=await harness();await settings.handler('--settings',settings.ctx);
   assert.equal(settings.questions[0].title,'图片账户设置');
   assert.equal(settings.editors.length,0);
+  await t.test('account settings use the native selector and Escape without credentials or network',async()=>{
+   const h=await harness({providers:['openai','qwen'],auth:async()=>assert.fail('Settings resolved credentials'),choose:(title,labels)=>new Promise(resolve=>{
+    assert.equal(title,'图片账户设置');assert.doesNotMatch(labels.join(''),/[·•]/);
+    for(const appearance of ['dark','light']) {
+     initTheme(appearance,false);
+     const component=new ExtensionSelectorComponent(title,labels,resolve,()=>resolve(undefined));
+     for(const width of [24,40,80,120])assert.ok(component.render(width).every(line=>visibleWidth(line)<=width));
+     component.handleInput('\x1b');component.dispose();
+    }
+   })});
+   await h.handler('--settings',h.ctx);assert.equal(h.entries.length,0);assert.equal(h.editors.length,0);
+   initTheme('dark',false);
+  });
   const notIdle=await harness();await notIdle.handler('',{...notIdle.ctx,isIdle:()=>false});
   assert.equal(notIdle.notices[0].type,'warning');assert.equal(notIdle.questions.length,0);
 
-  // Abort closes the loader, keeps the busy lock until auth settles, and ignores late work.
-  const authGate=deferred();let authStarted=false,loader,doneCount=0;
-  const cancel=await harness({auth:async()=>{authStarted=true;return authGate.promise},custom:factory=>new Promise(resolve=>{
-   loader=factory(display,dark,keybindings,value=>{doneCount++;loader.dispose();resolve(value)});
-  })});
-  const first=cancel.handler('',cancel.ctx);
-  await until(()=>authStarted&&loader);
-  for(const width of [24,40,80,120]) {
-   const lines=loader.render(width);assert.ok(lines.every(line=>visibleWidth(line)<=width));
-   assert.ok(lines.map(stripTerminalSequences).join('\n').replace(/\s/g,'').includes('正在生成：GPTImage2.6Flare'));
-   loader.invalidate();assert.ok(loader.render(width).length>0);
-  }
-  const questionCount=cancel.questions.length;
-  await cancel.handler('',cancel.ctx);
-  assert.equal(cancel.notices.at(-1).type,'warning');
-  assert.equal(cancel.questions.length,questionCount);
-  loader.handleInput('\x1b');
-  await until(()=>cancel.notices.some(n=>n.text==='已取消图片生成'));
-  assert.equal(loader.signal.aborted,true);
-  await cancel.handler('',cancel.ctx);assert.equal(cancel.notices.at(-1).type,'warning');
-  authGate.resolve({auth:{apiKey:token}});await first;
-  assert.equal(cancel.entries.length,0);assert.equal(doneCount,1);
-  await cancel.handler('--help',cancel.ctx);assert.equal(cancel.notices.at(-1).type,'info');
-
-  // Abort after fetch starts; even an abort-ignoring fetch cannot publish/save a late result.
-  const responseGate=deferred();let sent=false,fetchSignal;
-  globalThis.fetch=async(_url,request)=>{sent=true;fetchSignal=request.signal;return responseGate.promise};
-  const late=await harness({custom:factory=>new Promise(resolve=>{
-   loader=factory(display,dark,keybindings,value=>{doneCount++;loader.dispose();resolve(value)});
-  })});
-  doneCount=0;const lateRequest=late.handler('',late.ctx);await until(()=>sent);
-  loader.handleInput('\x1b');await until(()=>late.notices.length>0);
-  assert.equal(fetchSignal.aborted,true);
-  await late.handler('',late.ctx);assert.equal(late.notices.at(-1).type,'warning');
-  const filesBefore=(await readdir(path.join(dir,'.pi','generated-images'))).sort();
-  responseGate.resolve(Response.json({data:[{b64_json:bytes.toString('base64')}]}));await lateRequest;
-  assert.equal(late.entries.length,0);assert.equal(doneCount,1);
-  assert.deepEqual((await readdir(path.join(dir,'.pi','generated-images'))).sort(),filesBefore);
+  await runLifecycleHostChecks({t,harness,jiti,sdk,dir,token,bytes,display,dark,keybindings});
 
   // Errors are shown once, without credentials/prompt leaks or automatic retries.
   let failedCalls=0;
@@ -267,7 +274,32 @@ export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes}) {
   const changed=view.render(120).join('\n');assert.ok(changed.includes(light.fg('success','图片已生成')));
   assert.equal(changed.split('\n').map(line=>stripTerminalSequences(line).trimEnd()).join('').split(entry.path).length-1,1);
   assert.match(changed,/当前终端不支持图片预览/);
-  console.log('TUI host checks passed: native keyboard/focus, CJK wrapping at 24/40/80/120 columns, dark/light themes, all models generate/edit, account routing, wizard cancellation, busy/abort/late-result guards, RPC syntax and result refresh.');
+  await t.test('historical result paths, fallback and Kitty preview render in both themes and all widths',async()=>{
+   const previewPath=path.join(dir,'.pi','generated-images','历史图片 空格 # 预览测试.png');
+   const validPng=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jh9kAAAAASUVORK5CYII=','base64');
+   const corruptPath=path.join(dir,'.pi','generated-images','损坏的历史图片.png');
+   const missingPath=path.join(dir,'.pi','generated-images','已删除的历史图片.png');
+   await writeFile(previewPath,validPng);await writeFile(corruptPath,'invalid image');
+   try {
+    for(const appearance of ['dark','light'])for(const images of [null,'kitty'])for(const filePath of [previewPath,corruptPath,missingPath]) {
+     initTheme(appearance,false);setCapabilities({images,trueColor:true,hyperlinks:true});
+     const historical=JSON.parse(JSON.stringify({...entry,path:filePath}));
+     const result=createResultView(historical,themeModule.theme,'GPT Image 2.6 Flare');
+     for(const width of [24,40,80,120]) {
+      const lines=result.render(width);assert.ok(lines.every(line=>visibleWidth(line)<=width));
+      const plain=lines.map(line=>stripTerminalSequences(line).trimEnd()).join('');
+      // Soft wrapping can consume a separator space; the encoded URL must still round-trip exactly.
+      assert.ok(plain.replace(/\s/g,'').includes(filePath.replace(/\s/g,'')));
+      assert.ok(plain.includes(pathToFileURL(filePath).href));assert.doesNotMatch(plain,/[·•]/);
+      if(filePath!==previewPath)assert.match(plain,/图片预览不可用/);
+      else if(images)assert.match(lines.join(''),/\x1b_G/);
+      else assert.match(plain,/当前终端不支持图片预览/);
+      result.invalidate();
+     }
+    }
+   } finally {await rm(previewPath);await rm(corruptPath);setCapabilities({images:null,trueColor:true,hyperlinks:true});initTheme('dark',false)}
+  });
+  console.log('TUI host checks executed (results above): native keyboard/focus, CJK wrapping at 24/40/80/120 columns, dark/light themes, all models generate/edit, account routing, wizard cancellation, busy/abort/late-result guards, RPC syntax and result refresh.');
  } finally {
   globalThis.fetch=originalFetch;
   setCapabilities(capabilities);

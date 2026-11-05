@@ -3,11 +3,11 @@ import test from 'node:test';
 import { mkdtemp, rm, writeFile, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { readImageConfig } from '../src/model-config.ts';
+import { getProvider, readTestConfig } from './config-helpers.ts';
 import { saveImageKey, deleteImageKey, readSavedKey, getCredentialPath, resolveImageAuth, getAccountStatus, requireImageEndpoint } from '../src/credentials.ts';
 import { SecretInputState } from '../src/secret-input.ts';
 import { sanitizeError } from '../src/http.ts';
-const config = await readImageConfig();
+const config = await readTestConfig();
 
 test('saved Key persists, overrides fallback without mixing headers, deletion restores fallback', async () => {
  const dir = await mkdtemp(path.join(tmpdir(), 'image-auth-'));
@@ -18,7 +18,7 @@ test('saved Key persists, overrides fallback without mixing headers, deletion re
   getProviderAuth: async () => { calls++; return {auth:{apiKey:'legacy-key',headers:{'x-test':'legacy'}}}; }
  };
  try {
-  const provider = config.providers[1];
+  const provider = getProvider(config,'qwen');
   assert.equal((await resolveImageAuth(provider,dir,registry,{})).apiKey,'legacy-key');
   await saveImageKey(dir,provider.id,'saved-key');
   assert.equal(await readSavedKey(dir,provider.id),'saved-key');
@@ -41,8 +41,8 @@ test('OpenAI resolves fresh each request and never creates image credential file
  const dir=await mkdtemp(path.join(tmpdir(),'image-oauth-')); let count=0;
  const registry={getProvider:()=>({baseUrl:'https://chatgpt.com/backend-api'}),getProviderAuthStatus:()=>({configured:true}),getProviderAuth:async()=>({auth:{apiKey:`token-${++count}`}})};
  try {
-  assert.equal((await resolveImageAuth(config.providers[0],dir,registry,{})).apiKey,'token-1');
-  assert.equal((await resolveImageAuth(config.providers[0],dir,registry,{})).apiKey,'token-2');
+  assert.equal((await resolveImageAuth(getProvider(config,'openai'),dir,registry,{})).apiKey,'token-1');
+  assert.equal((await resolveImageAuth(getProvider(config,'openai'),dir,registry,{})).apiKey,'token-2');
   assert.deepEqual(await readdir(dir),[]);
  }finally{await rm(dir,{recursive:true,force:true});}
 });

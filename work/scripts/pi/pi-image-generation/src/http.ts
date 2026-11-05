@@ -36,6 +36,8 @@ async function imageHttpRequest<T>(
 		response = await network.run(() => (options.fetch ?? globalThis.fetch)(url, init));
 		network.mark("fetch-response-headers");
 		const result = await consume(response);
+		// Do not report a late, abort-ignoring response as successful or continue to saving.
+		init.signal?.throwIfAborted();
 		network.mark("response-consumed");
 		network.stop();
 		if (options.onDiagnostic) {

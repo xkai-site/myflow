@@ -51,7 +51,7 @@ export async function generateAndSave(
 ): Promise<GenerationOutcome> {
 	assertModelEnabled(command.modelConfig);
 	validateInputImages(inputImages, command.modelConfig.inputImages);
-	const auth = await resolveAuth();
+	const auth = await resolveAuthUnlessAborted(resolveAuth, signal);
 	signal.throwIfAborted();
 	try {
 		const models = createRuntimeImagesModels(config, command.providerConfig, auth.baseUrl, createDiagnosticWriter(cwd));
@@ -63,6 +63,7 @@ export async function generateAndSave(
 			apiKey: auth.apiKey, headers: auth.headers, signal, fetch,
 			metadata: { size: command.size, quality: command.quality, complexity: command.complexity },
 		});
+		signal.throwIfAborted();
 		if (result.stopReason !== "stop") throw new Error(result.errorMessage ?? `Image generation ${result.stopReason}`);
 		const images = result.output.filter((block): block is ImageContent => block.type === "image");
 		const texts = result.output.filter((block): block is TextContent => block.type === "text").map((block) => block.text);
@@ -74,6 +75,24 @@ export async function generateAndSave(
 		};
 	} catch (error) {
 		throw new Error(sanitizeError(error instanceof Error ? error.message : "Image generation failed", [auth.apiKey]));
+	}
+}
+
+/** Only detach credential waiting: no image request has started, and late auth cannot resume this pipeline. */
+async function resolveAuthUnlessAborted(resolveAuth: () => Promise<RequestAuth>, signal: AbortSignal): Promise<RequestAuth> {
+	signal.throwIfAborted();
+	let onAbort!: () => void;
+	const aborted = new Promise<never>((_resolve, reject) => {
+		onAbort = () => reject(signal.reason);
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+	try {
+		return await Promise.race([
+			Promise.resolve().then(() => { signal.throwIfAborted(); return resolveAuth(); }),
+			aborted,
+		]);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
 	}
 }
 

@@ -5,12 +5,14 @@ import path from "node:path";
 import test from "node:test";
 import { resolveImageCommand } from "../src/command.ts";
 import { inputImageDataUrl, loadInputImages, validateInputImages } from "../src/image-files.ts";
-import { readImageConfig, validateImageConfig } from "../src/model-config.ts";
+import { validateImageConfig } from "../src/model-config.ts";
 import { buildOpenAICodexRequest } from "../src/openai-codex-images.ts";
 
-const config = await readImageConfig();
+import { getModel, readTestConfig } from "./config-helpers.ts";
+
+const config = await readTestConfig();
 const models = config.models.filter((model) => config.providers.find((provider) => provider.id === model.provider)?.adapter === "openai-codex-images");
-const limits = models[0].inputImages;
+const limits = getModel(config, "openai").inputImages;
 const pngBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const png = { data: pngBytes.toString("base64"), mimeType: "image/png" };
 const apiKey = `header.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "synthetic-account" } })).toString("base64url")}.signature`;
@@ -84,7 +86,7 @@ test("encoded-length configuration is optional, validated strictly, and leaves W
 	assert.doesNotThrow(() => validateImageConfig(legacy));
 	for (const value of [0, -1, 1.5, "20971520", null, 104857601]) {
 		const next: any = structuredClone(config);
-		next.models[0].inputImages.maxDataUrlLength = value;
+		getModel(next, "openai").inputImages.maxDataUrlLength = value;
 		assert.throws(() => validateImageConfig(next), /maxDataUrlLength/);
 	}
 	for (const key of ["wan", "wan-pro"]) {

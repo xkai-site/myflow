@@ -5,7 +5,9 @@ import path from "node:path";
 import test from "node:test";
 import { normalizeModelSize, parseImageConfig, readImageConfig, sizeForTask, validateImageConfig } from "../src/model-config.ts";
 
-const config = await readImageConfig();
+import { getModel, getProvider, readTestConfig } from "./config-helpers.ts";
+
+const config = await readTestConfig();
 
 test("shipped config preserves current models and defaults", () => {
 	const legacy = ["openai", "wan", "wan-pro"].map((key) => config.models.find((m) => m.key === key)!);
@@ -33,8 +35,8 @@ test("GPT Image 2.5 models are enabled with configured quality and dimension rul
 		assert.equal(model.provider, "openai");
 		assert.notEqual(model.enabled, false);
 		assert.deepEqual(model.tasks, ["generate", "edit"]);
-		assert.deepEqual(model.prompt, config.models[0].prompt);
-		assert.deepEqual(model.inputImages, config.models[0].inputImages);
+		assert.deepEqual(model.prompt, getModel(config, "openai").prompt);
+		assert.deepEqual(model.inputImages, getModel(config, "openai").inputImages);
 		assert.equal(model.quality?.default, "auto");
 		assert.deepEqual(model.quality?.options.map((o) => o.value), ["auto", "low", "medium", "high", "xhigh", "max"]);
 		for (const task of model.tasks) {
@@ -50,6 +52,23 @@ test("GPT Image 2.5 models are enabled with configured quality and dimension rul
 	}
 });
 
+test("Wan positioning matches existing generation/edit capabilities without performance claims", () => {
+	for (const [key, id, description, generateSizes] of [
+		["wan", "wan2.7-image", "基础生图与参考图编辑", ["1K", "2K"]],
+		["wan-pro", "wan2.7-image-pro", "4K 生图，编辑最高 2K", ["1K", "2K", "4K"]],
+	] as const) {
+		const model = getModel(config, key);
+		assert.equal(model.id, id);
+		assert.equal(model.description, description);
+		assert.doesNotMatch(model.description!, /[·•]/);
+		assert.deepEqual(model.tasks, ["generate", "edit"]);
+		assert.deepEqual(model.size.generate.options.map((option) => option.value), generateSizes);
+		assert.deepEqual(sizeForTask(model, "edit").options.map((option) => option.value), ["1K", "2K"]);
+		assert.equal(model.quality, undefined);
+		assert.equal(model.complexity, undefined);
+	}
+});
+
 test("either GPT Image 2.5 model can be configured as the OpenAI default", () => {
 	for (const key of ["openai-sunburst", "openai-flare"]) {
 		const next = structuredClone(config);
@@ -59,7 +78,7 @@ test("either GPT Image 2.5 model can be configured as the OpenAI default", () =>
 });
 
 test("dimension boundaries and edit-specific policies", () => {
-	const [openai, wan, pro] = config.models;
+	const [openai, wan, pro] = ["openai", "wan", "wan-pro"].map((key) => getModel(config, key));
 	assert.equal(normalizeModelSize(sizeForTask(openai, "edit"), "1024x1024"), "1024x1024");
 	assert.throws(() => normalizeModelSize(openai.size.generate, "1000x1000"), /constraints/);
 	assert.throws(() => normalizeModelSize(openai.size.generate, "16x16"), /constraints/);
@@ -81,17 +100,16 @@ test("JSONC permits comments/trailing commas, rejects duplicate properties and s
 test("schema rejects unknown fields, duplicate models, bad auth/defaults/references/ranges", () => {
 	const mutations = [
 		(c: any) => { c.apiKey = "never-echo-me"; },
-		(c: any) => { c.models.push(c.models[0]); },
-		(c: any) => { c.models[0].provider = "missing"; },
-		(c: any) => { c.providers[0].defaultModel = "missing"; },
-
-		(c: any) => { c.models.find((m: any) => m.key === c.providers[0].defaultModel).enabled = false; },
-		(c: any) => { c.models[0].enabled = "false"; },
-		(c: any) => { c.providers[0].auth.providerId = "other-oauth"; },
-		(c: any) => { c.models[0].quality.default = "missing"; },
-		(c: any) => { c.models[0].size.generate.custom.maxPixels = 1; },
-		(c: any) => { c.models[0].inputImages.mimeTypes = ["image/svg+xml"]; },
-		(c: any) => { c.models[1].quality = c.models[0].quality; },
+		(c: any) => { c.models.push(getModel(c, "openai")); },
+		(c: any) => { getModel(c, "openai").provider = "missing"; },
+		(c: any) => { getProvider(c, "openai").defaultModel = "missing"; },
+		(c: any) => { getModel(c, getProvider(c, "openai").defaultModel).enabled = false; },
+		(c: any) => { getModel(c, "openai").enabled = "false"; },
+		(c: any) => { getProvider(c, "openai").auth.providerId = "other-oauth"; },
+		(c: any) => { getModel(c, "openai").quality.default = "missing"; },
+		(c: any) => { getModel(c, "openai").size.generate.custom.maxPixels = 1; },
+		(c: any) => { getModel(c, "openai").inputImages.mimeTypes = ["image/svg+xml"]; },
+		(c: any) => { getModel(c, "wan").quality = getModel(c, "openai").quality; },
 	];
 	for (const mutate of mutations) {
 		const next = structuredClone(config); mutate(next);
@@ -136,14 +154,14 @@ test("optional positioning/complexity schema stays strict and backwards compatib
 	assert.doesNotThrow(() => validateImageConfig(legacy));
 	for (const description of ["", "  ", "a\nb", "a\rb", "a\tb", "a\u001bb", "a·b", "a•b", "a\u2028b", 42]) {
 		const next: any = structuredClone(config);
-		next.models[0].description = description;
+		getModel(next, "openai").description = description;
 		assert.throws(() => validateImageConfig(next), /description/);
 	}
 	for (const mutate of [
-		(c: any) => { c.models.at(-1).complexity.default = "missing"; },
-		(c: any) => { c.models.at(-1).complexity.extra = true; },
-		(c: any) => { c.models.at(-1).complexity.options.push({ value: "high", label: "Duplicate" }); },
-		(c: any) => { c.models.find((m: any) => m.key === "wan").complexity = c.models.at(-1).complexity; },
+		(c: any) => { getModel(c, "openai-flare-26").complexity.default = "missing"; },
+		(c: any) => { getModel(c, "openai-flare-26").complexity.extra = true; },
+		(c: any) => { getModel(c, "openai-flare-26").complexity.options.push({ value: "high", label: "Duplicate" }); },
+		(c: any) => { getModel(c, "wan").complexity = getModel(c, "openai-flare-26").complexity; },
 	]) {
 		const next = structuredClone(config); mutate(next);
 		assert.throws(() => validateImageConfig(next), /complexity/);
@@ -159,9 +177,9 @@ test("single config file reload A -> B -> invalid -> repaired -> missing", async
 	try {
 		await writeFile(file, JSON.stringify(config));
 		assert.deepEqual(await readImageConfig(file), config);
-		const next = structuredClone(config); next.models[0].id = "future-image"; next.models[0].name = "Future";
+		const next = structuredClone(config); getModel(next, "openai").id = "future-image"; getModel(next, "openai").name = "Future";
 		await writeFile(file, JSON.stringify(next));
-		assert.equal((await readImageConfig(file)).models[0].id, "future-image");
+		assert.equal(getModel(await readImageConfig(file), "openai").id, "future-image");
 		await writeFile(file, "{broken}");
 		await assert.rejects(readImageConfig(file), /Fix it, then \/reload/);
 		await writeFile(file, JSON.stringify(next));

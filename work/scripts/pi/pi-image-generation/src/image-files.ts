@@ -129,6 +129,7 @@ export async function saveGeneratedImages(
 	images: readonly GeneratedImage[],
 	signal?: AbortSignal,
 ): Promise<SavedImage[]> {
+	signal?.throwIfAborted();
 	if (images.length === 0) throw new Error("Provider returned no images");
 	const outputDirectory = path.resolve(cwd, ".pi", "generated-images");
 	await ensureSafeOutputDirectory(cwd, outputDirectory);
@@ -144,7 +145,7 @@ export async function saveGeneratedImages(
 			const finalPath = path.join(outputDirectory, filename);
 			const temporaryPath = path.join(outputDirectory, `.${filename}.${randomUUID()}.tmp`);
 			try {
-				await writeFile(temporaryPath, decoded.bytes, { flag: "wx" });
+				await writeFile(temporaryPath, decoded.bytes, { flag: "wx", signal });
 				signal?.throwIfAborted();
 				await rename(temporaryPath, finalPath);
 			} catch (error) {
@@ -152,6 +153,8 @@ export async function saveGeneratedImages(
 				throw error;
 			}
 			saved.push({ path: finalPath, mimeType: decoded.mimeType, bytes: decoded.bytes.length });
+			// Cancellation can arrive while rename is in flight, including on the last image.
+			signal?.throwIfAborted();
 		}
 		return saved;
 	} catch (error) {

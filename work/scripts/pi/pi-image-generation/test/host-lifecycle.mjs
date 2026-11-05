@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import test from 'node:test';
 import { createRequire } from 'node:module';
 import { resolveSdkUrl, siblingEntry } from './sdk.mjs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -13,16 +14,17 @@ const jiti = createJiti(import.meta.url, { moduleCache:false, fsCache:false, ali
  '@earendil-works/pi-ai':siblingEntry(sdk,'@earendil-works/pi-ai'),
  '@earendil-works/pi-tui':siblingEntry(sdk,'@earendil-works/pi-tui'),
 }});
+await test('installed Pi SDK offline integration and acceptance checks', async (t) => {
 const dir=await mkdtemp(path.join(tmpdir(),'image-host-'));
 process.env.PI_CODING_AGENT_DIR=dir;
 const originalFetch=globalThis.fetch;
 globalThis.fetch=async()=>{throw new Error('Unexpected network request');};
 try {
- const {readImageConfig}=await jiti.import('../src/model-config.ts');
+ const {readTestConfig}=await jiti.import('./config-helpers.ts');
  const {resolveImageCommand}=await jiti.import('../src/command.ts');
  const {itemOptions}=await jiti.import('../src/tui-options.ts');
  const {generateAndSave,createRuntimeImagesModels}=await jiti.import('../src/runtime.ts');
- const config=await readImageConfig();
+ const config=await readTestConfig();
  // Exercise the actual enabled catalog; do not force model flags to make tests pass.
  const enabledModels=config.models.filter(model=>model.enabled!==false);
  const bytes=Buffer.from([137,80,78,71,13,10,26,10]);
@@ -280,6 +282,7 @@ try {
  assert.equal(await readFile(legacyGalleryPath,'utf8'),legacyHtml);
  for(const entry of generatedEntries)assert.deepEqual(await readFile(entry.path),bytes);
  const {runTuiHostChecks}=await import('./tui-host.mjs');
- await runTuiHostChecks({jiti,sdk,dir,config,token,bytes});
- console.log('Host-backed offline checks passed: mocked generation/edit, safe transport diagnostics/logs through SDK and RPC, direct original links without HTML writes, historical entries/reload, preview failure, styled OSC 8 targets, wrapping, theme refresh, per-image TUI link deduplication and RPC/unsupported-terminal fallback.');
+ await runTuiHostChecks({jiti,sdk,dir,config,token,bytes,t});
+ console.log('Host-backed offline checks executed (see test runner summary): mocked generation/edit, safe transport diagnostics/logs through SDK and RPC, direct original links without HTML writes, historical entries/reload, preview failure, styled OSC 8 targets, wrapping, theme refresh, per-image TUI link deduplication and RPC/unsupported-terminal fallback.');
 }finally{globalThis.fetch=originalFetch;await rm(dir,{recursive:true,force:true});}
+});

@@ -13,13 +13,16 @@ import { createResultView } from "../src/result-view.ts";
 import type { GeneratedImageEntryData, GenerationOutcome, ResolvedImageCommand } from "../src/types.ts";
 
 const ENTRY_TYPE = "pi-image-generation";
+// A reload must not bypass a still-running request. No timer may release this execution lock.
+const TASK_STATE_KEY = Symbol.for("pi-image-generation.task-state");
+const processScope = globalThis as typeof globalThis & { [TASK_STATE_KEY]?: { busy: boolean; cancelling: boolean } };
+const taskState = processScope[TASK_STATE_KEY] ??= { busy: false, cancelling: false };
 export default async function imageGenerationExtension(pi: ExtensionAPI) {
 	const agentDir = getAgentDir();
 	let config: ImageConfig | undefined;
 	let configError: string | undefined;
 	try { config = await readImageConfig(); }
 	catch (error) { configError = (error as Error).message; }
-	let busy = false;
 
 	pi.registerEntryRenderer<GeneratedImageEntryData>(ENTRY_TYPE, (entry, _options, theme) => {
 		const data = entry.data;
@@ -28,19 +31,21 @@ export default async function imageGenerationExtension(pi: ExtensionAPI) {
 	});
 
 	async function handle(args: string, images: readonly ImageContent[], ctx: ExtensionContext, wizard: boolean): Promise<void> {
-		if (busy || !ctx.isIdle()) {
-			ctx.ui.notify("当前操作尚未结束，请稍后再使用 /image", "warning");
+		if (taskState.busy || !ctx.isIdle()) {
+			ctx.ui.notify(taskState.cancelling
+				? "取消后的底层操作尚未结束。为避免重复请求，暂不能生成；若长期无响应，请退出 Pi，确认服务端状态后重启。/reload 不会解除此保护。"
+				: "当前操作尚未结束，请稍后再使用 /image", "warning");
 			return;
 		}
-		busy = true;
+		taskState.busy = true;
 		try {
 			if (["--help", "-h"].includes(args.trim())) { ctx.ui.notify(usageText(config), "info"); return; }
 			if (args.trim() === "--settings") { await runAccountSettings(ctx, config, agentDir); return; }
 			if (!config) throw new Error(configError ?? "Image config is unavailable; fix models.jsonc and /reload");
 			if (wizard) await runImageWizard(pi, args, ctx, config, agentDir);
 			else await runRawImageRequest(pi, `/image ${args}`.trimEnd(), images, ctx, config, agentDir);
-		} catch (error) { ctx.ui.notify(sanitizeError((error as Error).message), "error"); }
-		finally { busy = false; }
+		} catch (error) { ctx.ui.notify(sanitizeError(error instanceof Error ? error.message : "图片生成失败"), "error"); }
+		finally { taskState.cancelling = false; taskState.busy = false; }
 	}
 	pi.registerCommand("image", {
 		description: "生成或编辑图片，使用 --settings 管理账户",
@@ -111,31 +116,44 @@ async function runImageGeneration(pi: ExtensionAPI, command: ResolvedImageComman
 		return;
 	}
 	let pending: Promise<void> | undefined;
-	const result = await ctx.ui.custom<GenerationOutcome | { error: string } | null>((tui, theme, _keybindings, done) => {
-		const loader = new BorderedLoader(tui, theme, `${images.length ? "正在编辑" : "正在生成"}：${command.modelConfig.name}`);
-		let settled = false;
-		const finish = (value: GenerationOutcome | { error: string } | null) => {
-			if (settled) return;
-			settled = true; done(value);
-		};
-		loader.onAbort = () => finish(null);
-		pending = generate(loader.signal).then((outcome) => {
-			if (loader.signal.aborted) finish(null);
-			else finish(outcome);
-		}).catch((error: unknown) => {
-			if (loader.signal.aborted) finish(null);
-			else finish({ error: sanitizeError((error as Error).message) });
+	let settled = false;
+	const teardown = new AbortController();
+	try {
+		const result = await ctx.ui.custom<GenerationOutcome | { error: string } | null>((tui, theme, _keybindings, done) => {
+			const loader = new BorderedLoader(tui, theme, `${images.length ? "正在编辑" : "正在生成"}：${command.modelConfig.name}`);
+			const signal = AbortSignal.any([loader.signal, teardown.signal]);
+			const finish = (value: GenerationOutcome | { error: string } | null) => {
+				if (settled) return;
+				settled = true; done(value);
+			};
+			loader.onAbort = () => {
+				if (settled) return;
+				taskState.cancelling = true;
+				finish(null);
+			};
+			pending = generate(signal).then((outcome) => {
+				if (signal.aborted) finish(null);
+				else finish(outcome);
+			}).catch((error: unknown) => {
+				if (signal.aborted) finish(null);
+				else finish({ error: sanitizeError(error instanceof Error ? error.message : "图片生成失败") });
+			});
+			return loader;
 		});
-		return loader;
-	});
-	if (!result) {
-		notifyCancelled(ctx);
-		// Close the UI immediately, but retain the caller's busy lock until abort settles.
+		if (!result) {
+			ctx.ui.notify("已取消图片生成，正在等待底层操作结束；期间不会接受新任务。", "info");
+			return;
+		}
+		if ("error" in result) throw new Error(result.error);
+		await publishOutcome(pi, ctx, result);
+	} finally {
+		// UI completion/teardown is not execution completion, including a rejected custom UI.
+		// Never release the caller's lock while HTTP/filesystem work can still run.
+		if (!settled && pending) taskState.cancelling = true;
+		settled = true;
+		teardown.abort();
 		await pending;
-		return;
 	}
-	if ("error" in result) throw new Error(result.error);
-	await publishOutcome(pi, ctx, result);
 }
 
 async function getAvailableProviders(ctx: ExtensionContext, config: ImageConfig, agentDir: string): Promise<ImageProviderConfig[]> {
