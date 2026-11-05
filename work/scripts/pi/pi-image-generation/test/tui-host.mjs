@@ -6,6 +6,7 @@ import { writeFile, rm, readdir } from 'node:fs/promises';
 import { runLifecycleHostChecks } from './lifecycle-host.mjs';
 import { runNativeHostChecks } from './native-host.mjs';
 import { runAdvancedHostChecks } from './advanced-host.mjs';
+import { runHistorySecurityHostChecks } from './history-security-host.mjs';
 
 export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes,t}) {
  const {default:extension}=await jiti.import('../extensions/index.ts');
@@ -478,6 +479,7 @@ export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes,t}) {
   await runNativeHostChecks({t,harness,jiti,sdk,dir,token,config,themeModule});
   await runAdvancedHostChecks({t,harness,jiti,sdk,dir,token,config,themeModule,display,dark,keybindings});
   await runLifecycleHostChecks({t,harness,jiti,sdk,dir,token,bytes,display,dark,keybindings});
+  await runHistorySecurityHostChecks({t,jiti,sdk,dir,themeModule});
 
   // Errors are shown once, without credentials/prompt leaks or automatic retries.
   let failedCalls=0;
@@ -526,10 +528,15 @@ export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes,t}) {
       const plain=lines.map(line=>stripTerminalSequences(line).trimEnd()).join('');
       // Soft wrapping can consume a separator space; the encoded URL must still round-trip exactly.
       assert.ok(plain.replace(/\s/g,'').includes(filePath.replace(/\s/g,'')));
-      assert.ok(plain.includes(pathToFileURL(filePath).href));assert.doesNotMatch(plain,/[·•]/);
-      if(filePath!==previewPath)assert.match(plain,/图片预览不可用/);
-      else if(images)assert.match(lines.join(''),/\x1b_G/);
-      else assert.match(plain,/当前终端不支持图片预览/);
+      assert.doesNotMatch(plain,/[·•]/);
+      if(filePath!==previewPath) {
+       assert.match(plain,/图片预览不可用/);
+       assert.ok(!plain.includes(pathToFileURL(filePath).href));assert.doesNotMatch(lines.join(''),/\x1b\]8;/);
+      } else {
+       assert.ok(plain.includes(pathToFileURL(filePath).href));
+       if(images)assert.match(lines.join(''),/\x1b_G/);
+       else assert.match(plain,/当前终端不支持图片预览/);
+      }
       result.invalidate();
      }
     }

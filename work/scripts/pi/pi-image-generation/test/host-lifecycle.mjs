@@ -189,13 +189,14 @@ try {
  assert.match(notices.at(-1),/Saved 1 image/);
  assert.ok(notices.at(-1).includes(imageUrl));
  assert.deepEqual(await readFile(generatedEntries[0].path),bytes);
- // Missing/corrupt terminal previews retain the direct link without crashing the renderer.
+ // Missing/corrupt histories retain plain paths, not opening links.
  const corruptPath=path.join(outputDir,'corrupt.png');
  await writeFile(corruptPath,'not an image');
  for(const filePath of [path.join(outputDir,'missing.png'),corruptPath]){
   const rendered=renderer({data:{...generatedEntries[0],path:filePath}},{},theme).render(1000).join('\n');
   assert.match(rendered,/图片预览不可用/);
-  assert.ok(rendered.includes(pathToFileURL(filePath).href));
+  assert.ok(rendered.includes(filePath));
+  assert.ok(!rendered.includes(pathToFileURL(filePath).href));assert.doesNotMatch(rendered,/\x1b\]8;/);
  }
  await rm(corruptPath);
  for(const filePath of [undefined,'.pi/generated-images/relative.png',path.join(dir,'outside.png')]){

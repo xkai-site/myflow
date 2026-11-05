@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import sharp from "sharp";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -159,6 +160,21 @@ test("Markup adapter succeeds once with mock raster response; disabled/invalid o
   assert.equal(attempts,1);
  }
  assert.throws(()=>buildOpenAICodexRequest(options(model,{markupPath:"overlay.png"})),/runtime/);
+});
+
+test("Markup online-acceptance fixtures are non-sensitive 1024-square PNGs with an independent transparent left outline",async()=>{
+ const source=await readFile(new URL('./fixtures/codex-acceptance-original.png',import.meta.url));
+ const layer=await readFile(new URL('./fixtures/codex-acceptance-markup.png',import.meta.url));
+ assert.equal(createHash('sha256').update(source).digest('hex'),'db39e85282b51566923d08a099eb360b7a7b7da0126200fa0d650aab023f7e01');
+ assert.equal(createHash('sha256').update(layer).digest('hex'),'344bce2e1fb0696295c2a049f4f4ea06b1ccde52fbf920afd5d8fe39367635c1');
+ for(const bytes of [source,layer]){const m=await sharp(bytes).metadata();assert.equal(m.width,1024);assert.equal(m.height,1024);assert.equal(m.format,'png');}
+ const pixels=await sharp(layer).ensureAlpha().raw().toBuffer();
+ const at=(x:number,y:number,c:number)=>pixels[(y*1024+x)*4+c];
+ assert.equal(at(456,512,0),255);assert.equal(at(456,512,3),255);
+ assert.equal(at(320,512,3),0);assert.equal(at(704,512,3),0);assert.equal(at(0,0,3),0);
+ const pair=await prepareMarkupEdit(enabled().model,[f.image(source)],f.image(layer));
+ assert.notEqual(pair.images[0].data,pair.markup.data);
+ assert.deepEqual(await sharp(Buffer.from(pair.images[0].data,'base64')).raw().toBuffer(),await sharp(source).raw().toBuffer());
 });
 
 test("Markup optional TUI path can be selected, cancelled or removed without extra default steps",async()=>{
