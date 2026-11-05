@@ -5,11 +5,12 @@ import {
 } from "@earendil-works/pi-ai";
 import { generateAliWanImages } from "./ali-wan-images.ts";
 import { generateOpenAICodexImages } from "./openai-codex-images.ts";
-import { saveGeneratedImages, validateInputImages } from "./image-files.ts";
+import { loadInputImages, saveGeneratedImages, validateInputImages } from "./image-files.ts";
+import { loadMarkupImage, prepareMarkupEdit } from "./markup.ts";
 import { sanitizeError } from "./http.ts";
 import { createDiagnosticWriter, type DiagnosticWriter } from "./diagnostics.ts";
-import { assertModelEnabled, normalizeImageOutput, type ImageConfig, type ImageModelConfig, type ImageProviderConfig } from "./model-config.ts";
-import type { GenerationOutcome, ImageTransportOptions, ImageTransportResult, ResolvedImageCommand } from "./types.ts";
+import { assertModelEnabled, assertNoUnimplementedNativeOptions, normalizeImageOutput, normalizeModelSize, normalizeNativeOutput, sizeForOutput, type ImageConfig, type ImageModelConfig, type ImageProviderConfig } from "./model-config.ts";
+import type { GenerationOutcome, ImageTransportOptions, ImageTransportResult, InputImage, ResolvedImageCommand } from "./types.ts";
 
 export interface RequestAuth { apiKey: string; baseUrl: string; headers?: Record<string, string | null> }
 type Transport = (options: ImageTransportOptions) => Promise<ImageTransportResult>;
@@ -50,29 +51,56 @@ export async function generateAndSave(
 	fetch?: typeof globalThis.fetch,
 ): Promise<GenerationOutcome> {
 	assertModelEnabled(command.modelConfig);
-	const imageOutput = normalizeImageOutput(command.modelConfig, command);
+	signal.throwIfAborted();
+	if (inputImages.length && command.referencePaths?.length) throw new Error("Do not combine image attachments with --image paths");
+	const task = inputImages.length || command.referencePaths?.length ? "edit" : "generate";
+	const imageOutput = normalizeNativeOutput(command.modelConfig, command, task);
+	const fileOnly = imageOutput.outputFormat === "gif" || imageOutput.outputFormat === "svg";
+	const hasMarkup = command.markup !== undefined || command.markupPath !== undefined;
+	if (fileOnly || hasMarkup) {
+		if (command.providerConfig.adapter !== "openai-codex-images" || command.model !== command.modelConfig.id || command.provider !== command.modelConfig.provider) throw new Error("Native image model/provider configuration mismatch");
+		normalizeModelSize(sizeForOutput(command.modelConfig, task, imageOutput.outputFormat), command.size);
+	}
+	if (command.referencePaths?.length) inputImages = (await loadInputImages(cwd, command.referencePaths, command.modelConfig.inputImages)).map(image => ({ type: "image", ...image }));
 	validateInputImages(inputImages, command.modelConfig.inputImages);
+	let markup = command.markup;
+	let transportImages: readonly InputImage[] = inputImages;
+	if (hasMarkup) {
+		markup ??= await loadMarkupImage(cwd, command.markupPath!, signal);
+		const prepared = await prepareMarkupEdit(command.modelConfig, inputImages, markup, signal);
+		transportImages = prepared.images;
+		markup = prepared.markup;
+	}
+	signal.throwIfAborted();
 	const auth = await resolveAuthUnlessAborted(resolveAuth, signal);
 	signal.throwIfAborted();
 	try {
-		const models = createRuntimeImagesModels(config, command.providerConfig, auth.baseUrl, createDiagnosticWriter(cwd));
-		const model = models.getModelOfType("image", command.provider, command.model);
-		if (!model) throw new Error("Image model is not registered");
-		const result = await models.generateImages(model, {
-			input: [{ type: "text", text: command.prompt }, ...inputImages],
-		}, {
-			apiKey: auth.apiKey, headers: auth.headers, signal, fetch,
-			metadata: { size: command.size, quality: command.quality, complexity: command.complexity, ...imageOutput },
-		});
+		let result: ImageTransportResult;
+		if (fileOnly || hasMarkup) {
+			// Files and independent overlay data must not pass through static SDK ImageContent.
+			const { markupPath: _path, referencePaths: _references, ...transportCommand } = command;
+			result = await TRANSPORTS[command.providerConfig.adapter]({ ...transportCommand, ...imageOutput, ...auth, images: transportImages, markup,
+				signal, fetch, onDiagnostic: createDiagnosticWriter(cwd) });
+		} else {
+			const models = createRuntimeImagesModels(config, command.providerConfig, auth.baseUrl, createDiagnosticWriter(cwd));
+			const model = models.getModelOfType("image", command.provider, command.model);
+			if (!model) throw new Error("Image model is not registered");
+			const response = await models.generateImages(model, {
+				input: [{ type: "text", text: command.prompt }, ...inputImages],
+			}, {
+				apiKey: auth.apiKey, headers: auth.headers, signal, fetch,
+				metadata: { size: command.size, quality: command.quality, complexity: command.complexity, ...imageOutput },
+			});
+			if (response.stopReason !== "stop") throw new Error(response.errorMessage ?? `Image generation ${response.stopReason}`);
+			result = { images: response.output.filter((block): block is ImageContent => block.type === "image"),
+				texts: response.output.filter((block): block is TextContent => block.type === "text").map((block) => block.text) };
+		}
 		signal.throwIfAborted();
-		if (result.stopReason !== "stop") throw new Error(result.errorMessage ?? `Image generation ${result.stopReason}`);
-		const images = result.output.filter((block): block is ImageContent => block.type === "image");
-		const texts = result.output.filter((block): block is TextContent => block.type === "text").map((block) => block.text);
-		const saved = await saveGeneratedImages(cwd, command.provider, command.model, images, signal);
+		const saved = await saveGeneratedImages(cwd, command.provider, command.model, result.images, signal);
 		const createdAt = Date.now();
 		return {
 			entries: saved.map((image) => ({ ...image, provider: command.provider, model: command.model, prompt: command.prompt, createdAt })),
-			texts,
+			texts: result.texts,
 		};
 	} catch (error) {
 		throw new Error(sanitizeError(error instanceof Error ? error.message : "Image generation failed", [auth.apiKey]));
@@ -103,6 +131,9 @@ async function generateWithTransport(
 	const output: AssistantImages = { api: model.api, provider: model.provider, model: model.id, output: [], stopReason: "stop", timestamp: Date.now() };
 	try {
 		if (!options?.apiKey) throw new Error("No credential for image provider");
+		assertNoUnimplementedNativeOptions(options.metadata ?? {});
+		if (options.metadata?.outputFormat === "gif" || options.metadata?.frameCount !== undefined || options.metadata?.frameDurationMs !== undefined) throw new Error("GIF is a file-only output; use generateAndSave, not Pi ImageContent");
+		if (options.metadata?.outputFormat === "svg") throw new Error("SVG is a file-only output; use generateAndSave, not Pi ImageContent");
 		const size = options.metadata?.size;
 		if (typeof size !== "string") throw new Error("Image size must be resolved from model configuration");
 		const quality = options.metadata?.quality;

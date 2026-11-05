@@ -3,6 +3,8 @@ import { lstat, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/pro
 import path from "node:path";
 import type { GeneratedImage, InputImage, SavedImage } from "./types.ts";
 import type { ImageLimits } from "./model-config.ts";
+import { validateAnimatedGif } from "./gif.ts";
+import { SVG_MAX_BYTES, validateStaticSvg } from "./svg.ts";
 const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 const ALLOWED_INPUT_MIME = new Set(["image/png", "image/jpeg", "image/webp", "image/bmp"]);
 
@@ -92,6 +94,25 @@ export function decodeGeneratedImage(image: GeneratedImage): DecodedImage {
 	return decoded;
 }
 
+/** File-only vectors/animations never enter the raster input or SDK decoder. */
+export function decodeGeneratedArtifact(image: GeneratedImage): { bytes: Buffer; mimeType: string; extension: string; kind?: "animation" | "vector" } {
+	const bytes = decodePayload(image.data, normalizeMimeType(image.mimeType) === "image/svg+xml" ? SVG_MAX_BYTES : MAX_OUTPUT_BYTES);
+	if (bytes.subarray(0, 6).toString("latin1") === "GIF87a" || bytes.subarray(0, 6).toString("latin1") === "GIF89a") {
+		if (image.mimeType && normalizeMimeType(image.mimeType) !== "image/gif") throw new Error("Generated image MIME type does not match its file signature");
+		validateAnimatedGif(bytes);
+		return { bytes, mimeType: "image/gif", extension: "gif", kind: "animation" };
+	}
+	const detected = detectImage(bytes);
+	if (!detected) {
+		try { validateStaticSvg(bytes); }
+		catch (error) { throw new Error(`Unsupported file signature or invalid SVG: ${(error as Error).message}`); }
+		if (image.mimeType && normalizeMimeType(image.mimeType) !== "image/svg+xml") throw new Error("Generated image MIME type does not match SVG XML");
+		return { bytes, mimeType: "image/svg+xml", extension: "svg", kind: "vector" };
+	}
+	if (image.mimeType && normalizeMimeType(image.mimeType) !== detected.mimeType) throw new Error("Generated image MIME type does not match its file signature");
+	return { bytes, ...detected };
+}
+
 export function detectImage(bytes: Uint8Array): Omit<DecodedImage, "bytes"> | undefined {
 	if (
 		bytes.length >= 8 &&
@@ -123,7 +144,7 @@ export function detectImage(bytes: Uint8Array): Omit<DecodedImage, "bytes"> | un
 }
 
 /** Container metadata only, NOT a decoded-pixel transparency test. Unknown/truncated => undefined. */
-export function imageAlphaChannel(image: DecodedImage): boolean | undefined {
+export function imageAlphaChannel(image: Pick<DecodedImage, "bytes" | "mimeType">): boolean | undefined {
 	const bytes = image.bytes;
 	if (image.mimeType === "image/jpeg" || image.mimeType === "image/bmp") return false;
 	if (image.mimeType === "image/png") {
@@ -168,7 +189,7 @@ export async function saveGeneratedImages(
 	try {
 		for (const image of images) {
 			signal?.throwIfAborted();
-			const decoded = decodeGeneratedImage(image);
+			const decoded = decodeGeneratedArtifact(image);
 			const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 			const suffix = randomUUID().slice(0, 8);
 			const filename = `${timestamp}-${safeSlug(provider)}-${safeSlug(model)}-${suffix}.${decoded.extension}`;
@@ -182,7 +203,7 @@ export async function saveGeneratedImages(
 				await rm(temporaryPath, { force: true }).catch(() => undefined);
 				throw error;
 			}
-			saved.push({ path: finalPath, mimeType: decoded.mimeType, bytes: decoded.bytes.length });
+			saved.push({ path: finalPath, mimeType: decoded.mimeType, bytes: decoded.bytes.length, ...(decoded.kind ? { kind: decoded.kind } : {}) });
 			// Cancellation can arrive while rename is in flight, including on the last image.
 			signal?.throwIfAborted();
 		}
@@ -209,12 +230,17 @@ export function isGeneratedImagePath(filePath: string): boolean {
 		path.basename(path.dirname(path.dirname(normalized))).toLowerCase() === ".pi";
 }
 
-function decodeImage(data: string, maxBytes: number): DecodedImage {
+function decodePayload(data: string, maxBytes: number): Buffer {
 	if (data.length > Math.ceil(maxBytes / 3) * 4) throw new Error("Image payload exceeds the size limit");
 	if (!isCanonicalBase64(data)) throw new Error("Image payload is not valid base64");
 	const bytes = Buffer.from(data, "base64");
 	if (bytes.length === 0) throw new Error("Image payload is empty");
 	if (bytes.length > maxBytes) throw new Error(`Image exceeds the ${maxBytes} byte limit`);
+	return bytes;
+}
+
+function decodeImage(data: string, maxBytes: number): DecodedImage {
+	const bytes = decodePayload(data, maxBytes);
 	const detected = detectImage(bytes);
 	if (!detected) throw new Error("Image payload has an unsupported file signature");
 	return { bytes, ...detected };

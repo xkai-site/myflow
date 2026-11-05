@@ -1,5 +1,6 @@
 import { open } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { GIF_MAX_PIXELS } from "./gif.ts";
 import { getNodeValue, parseTree, type Node as JsonNode, type ParseError } from "jsonc-parser";
 
 export type ImageAdapter = "openai-codex-images" | "ali-wan-images";
@@ -22,6 +23,14 @@ export type ImageAuth =
 export interface ImageProviderConfig {
 	id: string; name: string; adapter: ImageAdapter; auth: ImageAuth; defaultModel: string;
 }
+export interface IntegerPolicy { default: number; min: number; max: number }
+/** Local implementation/opt-in is not proof of backend acceptance. Streaming stays closed. */
+export interface NativeCapabilities {
+	svg?: { codex: "unverified"; enabled?: boolean };
+	markup?: { codex: "unverified"; enabled?: boolean };
+	streaming?: { codex: "unverified"; enabled?: false };
+	gif?: { codex: "unverified"; enabled: boolean; frameCount: IntegerPolicy; frameDurationMs: IntegerPolicy; size: SizePolicy };
+}
 export interface ImageModelConfig {
 	key: string; id: string; name: string; provider: string; tasks: ImageTask[];
 	enabled?: boolean;
@@ -29,6 +38,7 @@ export interface ImageModelConfig {
 	complexity?: ChoicePolicy;
 	background?: ChoicePolicy;
 	outputFormat?: ChoicePolicy;
+	nativeCapabilities?: NativeCapabilities;
 	prompt: { maxChars: number };
 	inputImages: ImageLimits;
 	size: { generate: SizePolicy; edit?: SizePolicy };
@@ -118,7 +128,7 @@ export function validateImageConfig(raw: unknown): ImageConfig {
 	});
 	const models = array(root.models, "models").map((item, i): ImageModelConfig => {
 		const p = `models[${i}]`;
-		const v = record(item, p, ["key", "id", "name", "provider", "tasks", "prompt", "inputImages", "size", "quality", "enabled", "description", "complexity", "background", "outputFormat"]);
+		const v = record(item, p, ["key", "id", "name", "provider", "tasks", "prompt", "inputImages", "size", "quality", "enabled", "description", "complexity", "background", "outputFormat", "nativeCapabilities"]);
 		const tasks = array(v.tasks, `${p}.tasks`).map((task): ImageTask => {
 			if (task !== "generate" && task !== "edit") fail(`${p}.tasks`, "only generate and edit are supported");
 			return task;
@@ -157,6 +167,7 @@ export function validateImageConfig(raw: unknown): ImageConfig {
 			if (policy.options.some((option) => !allowed.includes(option.value))) fail(`${p}.${key}.options`, "unsupported value");
 			model[key] = policy;
 		}
+		if (v.nativeCapabilities !== undefined) model.nativeCapabilities = nativeCapabilities(v.nativeCapabilities, `${p}.nativeCapabilities`);
 		try { normalizeImageOutput(model); }
 		catch { fail(`${p}.background/outputFormat`, "incompatible defaults: transparent background cannot use jpeg output format"); }
 		if (v.description !== undefined) {
@@ -171,6 +182,9 @@ export function validateImageConfig(raw: unknown): ImageConfig {
 	for (const model of models) {
 		const provider = providers.find((p) => p.id === model.provider);
 		if (!provider) fail("models.provider", "unknown provider reference");
+		if (model.nativeCapabilities && provider.adapter !== "openai-codex-images") fail("models.nativeCapabilities", "requires the Codex adapter");
+		for (const capability of ["gif", "svg"] as const) if (model.nativeCapabilities?.[capability]?.enabled && (!model.tasks.includes("generate") || !model.outputFormat)) fail(`models.nativeCapabilities.${capability}`, "requires generation and outputFormat");
+		if (model.nativeCapabilities?.markup?.enabled && !model.tasks.includes("edit")) fail("models.nativeCapabilities.markup", "requires editing");
 		if (provider.adapter === "ali-wan-images" && model.quality) fail("models.quality", "this adapter does not send quality");
 		if (provider.adapter === "ali-wan-images" && model.complexity) fail("models.complexity", "this adapter does not send complexity");
 		if (provider.adapter === "ali-wan-images" && (model.background || model.outputFormat)) fail("models.background/outputFormat", "this adapter does not send background or output_format");
@@ -184,14 +198,27 @@ export function validateImageConfig(raw: unknown): ImageConfig {
 /** Shared by command resolution, native parameter pickers and request/runtime guards. */
 export interface ImageOutputOptions { background?: string; outputFormat?: string }
 export function assertImageOutputCombination(values: ImageOutputOptions): void {
+	if (values.background === "transparent" && values.outputFormat === "gif") throw new Error("--background transparent is not enabled for GIF; use auto or opaque");
 	if (values.background === "transparent" && (values.outputFormat ?? "png") === "jpeg") {
 		throw new Error("--background transparent is incompatible with --format jpeg; use png or webp");
 	}
 }
-export function normalizeImageOutput(model: Pick<ImageModelConfig, "background" | "outputFormat">, values: ImageOutputOptions = {}): ImageOutputOptions {
+export function outputFormatForTask(model: Pick<ImageModelConfig, "outputFormat" | "nativeCapabilities">, task: ImageTask): ChoicePolicy | undefined {
+	const policy = model.outputFormat;
+	if (!policy || task !== "generate") return policy;
+	return { ...policy, options: [...policy.options,
+		...(model.nativeCapabilities?.gif?.enabled ? [{ value: "gif", label: "GIF（实验性，Codex 未在线验证）" }] : []),
+		...(model.nativeCapabilities?.svg?.enabled ? [{ value: "svg", label: "SVG（实验性，Codex 未在线验证）" }] : []),
+	] };
+}
+export function normalizeImageOutput(model: Pick<ImageModelConfig, "background" | "outputFormat" | "nativeCapabilities">, values: ImageOutputOptions = {}, task: ImageTask = "generate"): ImageOutputOptions {
 	const result: ImageOutputOptions = {};
 	for (const [key, flag] of [["background", "--background"], ["outputFormat", "--format"]] as const) {
-		const policy = model[key];
+		const policy = key === "outputFormat" ? outputFormatForTask(model, task) : model[key];
+		if (key === "outputFormat" && values[key] === "svg" && !policy?.options.some((o) => o.value === "svg")) throw new Error("--format svg is disabled or unavailable for editing; Codex SVG support is not online-verified (see models.jsonc)");
+		if (key === "outputFormat" && values[key] === "gif" && !policy?.options.some((o) => o.value === "gif")) {
+			throw new Error("--format gif is disabled or unavailable for editing; Codex GIF support is not online-verified (see models.jsonc)");
+		}
 		if (!policy && values[key] !== undefined) throw new Error(`${flag} is not supported by this model`);
 		const value = values[key] ?? policy?.default;
 		if (value !== undefined) {
@@ -201,6 +228,42 @@ export function normalizeImageOutput(model: Pick<ImageModelConfig, "background" 
 	}
 	assertImageOutputCombination(result);
 	return result;
+}
+
+/** These fields must never be silently dropped by a runtime/adapter or mistaken for ordinary references. */
+export function assertNoUnimplementedNativeOptions(values: object, allowMarkup = false): void {
+	for (const key of [...(allowMarkup ? [] : ["markup", "markupPath"]), "stream", "partialImages", "partial_images", "svg", "output_compression", "outputCompression", "prompt_rewriter", "promptRewriter", "mask", "frame_count", "frame_duration_ms"]) {
+		if (Object.hasOwn(values, key) && (values as Record<string, unknown>)[key] !== undefined) {
+			throw new Error(`${key} is not enabled: native capability is unverified or not implemented; no request sent`);
+		}
+	}
+}
+export interface NativeOutputOptions extends ImageOutputOptions { frameCount?: number; frameDurationMs?: number; markup?: unknown; markupPath?: string }
+export function normalizeNativeOutput(model: ImageModelConfig, values: NativeOutputOptions, task: ImageTask): NativeOutputOptions {
+	assertNoUnimplementedNativeOptions(values, true);
+	const result: NativeOutputOptions = normalizeImageOutput(model, values, task);
+	if (values.markup !== undefined || values.markupPath !== undefined) {
+		if (!model.nativeCapabilities?.markup?.enabled || task !== "edit") throw new Error("Markup is not enabled for editing by this model");
+		if (values.markup !== undefined && values.markupPath !== undefined) throw new Error("Specify only one markup input");
+		if (values.markupPath !== undefined && (typeof values.markupPath !== "string" || !values.markupPath.trim())) throw new Error("Markup path must not be empty");
+		if (result.outputFormat === "svg" || result.outputFormat === "gif") throw new Error("Markup requires raster edit output");
+	}
+	if (result.outputFormat !== "gif") {
+		if (values.frameCount !== undefined || values.frameDurationMs !== undefined) throw new Error("GIF frame controls require --format gif");
+		return result;
+	}
+	const gif = model.nativeCapabilities!.gif!;
+	for (const key of ["frameCount", "frameDurationMs"] as const) {
+		const policy = gif[key];
+		const value = values[key] ?? policy.default;
+		if (!Number.isSafeInteger(value) || value < policy.min || value > policy.max) throw new Error(`${key} must be an integer from ${policy.min} to ${policy.max}`);
+		result[key] = value;
+	}
+	return result;
+}
+export function sizeForOutput(model: ImageModelConfig, task: ImageTask, outputFormat?: string): SizePolicy {
+	return outputFormat === "gif" && task === "generate" && model.nativeCapabilities?.gif?.enabled
+		? model.nativeCapabilities.gif.size : sizeForTask(model, task);
 }
 
 export function assertModelEnabled(model: ImageModelConfig): void {
@@ -232,6 +295,44 @@ export function normalizeModelSize(policy: SizePolicy, value = policy.default): 
 		pixels < rules.minPixels || pixels > rules.maxPixels || Math.max(width, height) / Math.min(width, height) > rules.maxRatio ||
 		(rules.maxSide !== undefined && Math.max(width, height) > rules.maxSide)) throw new Error("Dimensions exceed the configured model size constraints");
 	return `${width}${rules.separator}${height}`;
+}
+
+function nativeCapabilities(value: unknown, p: string): NativeCapabilities {
+	const raw = record(value, p, ["svg", "gif", "markup", "streaming"]);
+	const result: NativeCapabilities = {};
+	for (const key of ["svg", "gif", "markup", "streaming"] as const) {
+		if (raw[key] === undefined) continue;
+		const v = record(raw[key], `${p}.${key}`, key === "gif" ? ["codex", "enabled", "frameCount", "frameDurationMs", "size"] : ["codex", "enabled"]);
+		if (v.codex !== "unverified") fail(`${p}.${key}.codex`, "must be unverified; config cannot certify backend acceptance");
+		if (key !== "gif") {
+			if (v.enabled !== undefined && typeof v.enabled !== "boolean") fail(`${p}.${key}.enabled`, "must be a boolean");
+			if (key === "streaming" && v.enabled === true) fail(`${p}.streaming.enabled`, "production streaming is not enabled; independent offline adapter only");
+			if (key === "streaming") result.streaming = { codex: "unverified", enabled: false };
+			else result[key] = { codex: "unverified", enabled: v.enabled === true };
+			continue;
+		}
+		if (typeof v.enabled !== "boolean") fail(`${p}.gif.enabled`, "must be a boolean");
+		const range = (value: unknown, name: string, min: number, max: number): IntegerPolicy => {
+			const r = record(value, name, ["default", "min", "max"]);
+			const lower = integer(r.min, `${name}.min`, min, max);
+			const upper = integer(r.max, `${name}.max`, lower, max);
+			return { min: lower, max: upper, default: integer(r.default, `${name}.default`, lower, upper) };
+		};
+		const size = sizePolicy(v.size, `${p}.gif.size`);
+		// No evidenced model-wide pixel budget. Keep an explicit local allowlist, not raster size inheritance.
+		if (size.custom) fail(`${p}.gif.size`, "custom sizes await confirmed GIF pixel/edge budgets");
+		for (const option of size.options) {
+			const match = /^(\d+)x(\d+)$/.exec(option.value);
+			const width = Number(match?.[1]), height = Number(match?.[2]);
+			if (option.value !== "auto" && (![width, height].every((side) => Number.isSafeInteger(side) && side >= 16 && side <= 65535 && side % 16 === 0) || width * height > GIF_MAX_PIXELS)) {
+				fail(`${p}.gif.size`, "dimensions must be safe multiples of 16 within GIF container and local pixel limits");
+			}
+		}
+		result.gif = { codex: "unverified", enabled: v.enabled, size,
+			frameCount: range(v.frameCount, `${p}.gif.frameCount`, 2, 16),
+			frameDurationMs: range(v.frameDurationMs, `${p}.gif.frameDurationMs`, 20, 2000) };
+	}
+	return result;
 }
 
 function choices(value: unknown, p: string, extra: string[] = []): ChoicePolicy {

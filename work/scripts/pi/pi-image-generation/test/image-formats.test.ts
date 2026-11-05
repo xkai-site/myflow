@@ -13,6 +13,7 @@ const model = getModel(config,"openai-flare-26");
 const apiKey = `header.${Buffer.from(JSON.stringify({"https://api.openai.com/auth":{chatgpt_account_id:"test-account"}})).toString("base64url")}.signature`;
 const baseUrl = "https://chatgpt.com/backend-api/codex";
 const options = {apiKey,baseUrl,model:model.id,modelConfig:model,prompt:"PRIVATE_PROMPT",images:[],size:"auto"};
+const animationFixture = { data: (await readFile(new URL('./fixtures/native-two-frame.gif', import.meta.url))).toString('base64'), mimeType: 'image/gif' };
 
 test("real PNG/JPEG/WebP signatures, MIME, extensions, saves and history reads agree", async () => {
  const dir = await mkdtemp(path.join(tmpdir(),"image-formats-"));
@@ -89,7 +90,7 @@ for (const phase of ["before-rename","after-rename"]) test(`format outputs cance
  const dir = await mkdtemp(path.join(tmpdir(),"formats-cancel-"));
  const output = path.join(dir,".pi","generated-images");
  try {
-  for (const fixture of Object.values(imageFixtures)) {
+  for (const fixture of [...Object.values(imageFixtures), animationFixture]) {
    const controller = new AbortController();
    const original = controller.signal.throwIfAborted.bind(controller.signal);
    const mock = t.mock.method(controller.signal,"throwIfAborted",()=>{

@@ -1,3 +1,4 @@
+import { assertNoUnimplementedNativeOptions } from "./model-config.ts";
 import { detectImage } from "./image-files.ts";
 import { requireImageEndpoint } from "./credentials.ts";
 import { downloadImage, mergeHeaders, requestImageJson } from "./http.ts";
@@ -13,6 +14,9 @@ export interface AliWanRequest {
 }
 
 export function buildAliWanRequest(options: ImageTransportOptions): AliWanRequest {
+	assertNoUnimplementedNativeOptions(options);
+	if (options.outputFormat === "gif" || options.frameCount !== undefined || options.frameDurationMs !== undefined) throw new Error("GIF is not supported by this adapter");
+	if (options.outputFormat === "svg") throw new Error("SVG is not supported by this adapter");
 	const content: Array<Record<string, string>> = options.images.map((image) => ({
 		image: `data:${image.mimeType};base64,${image.data}`,
 	}));

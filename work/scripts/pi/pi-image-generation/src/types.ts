@@ -9,6 +9,12 @@ export interface ParsedImageCommand {
 	complexity?: string;
 	background?: string;
 	outputFormat?: string;
+	frameCount?: number;
+	frameDurationMs?: number;
+	/** Optional local paths for RPC editing; overlay is never a reference image. */
+	referencePaths?: string[];
+	markupPath?: string;
+	markup?: InputImage;
 	help: boolean;
 }
 
@@ -35,13 +41,16 @@ export interface ImageTransportOptions {
 	complexity?: string;
 	background?: string;
 	outputFormat?: string;
+	frameCount?: number;
+	frameDurationMs?: number;
+	markup?: InputImage;
 	modelConfig?: ImageModelConfig;
 	headers?: Record<string, string | null>;
 	signal?: AbortSignal;
 	fetch?: typeof globalThis.fetch;
 	onDiagnostic?: DiagnosticWriter;
 }
-export interface SavedImage { path: string; mimeType: string; bytes: number }
+export interface SavedImage { path: string; mimeType: string; bytes: number; kind?: "animation" | "vector" }
 export interface GeneratedImageEntryData {
 	provider: string;
 	model: string;
@@ -50,5 +59,7 @@ export interface GeneratedImageEntryData {
 	mimeType: string;
 	bytes: number;
 	createdAt: number;
+	/** Optional for backward-compatible histories; GIF/SVG are file-only outputs. */
+	kind?: "animation" | "vector";
 }
 export interface GenerationOutcome { entries: GeneratedImageEntryData[]; texts: string[] }

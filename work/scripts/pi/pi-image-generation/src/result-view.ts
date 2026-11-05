@@ -1,4 +1,6 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
+import { validateAnimatedGif } from "./gif.ts";
+import { validateStaticSvg } from "./svg.ts";
 import path from "node:path";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Container, getCapabilities, Image, Spacer, Text } from "@earendil-works/pi-tui";
@@ -18,11 +20,22 @@ export function createResultView(data: GeneratedImageEntryData | undefined, them
 		container.addChild(text(() => theme.fg("error", "图片记录的保存路径无效")));
 		return container;
 	}
-	container.addChild(text(() => theme.fg("success", "图片已生成") + "\n" + theme.fg("muted", modelName ?? data.model)));
+	container.addChild(text(() => theme.fg("success", data.mimeType === "image/gif" ? "动画文件已生成" : "图片已生成") + "\n" + theme.fg("muted", modelName ?? data.model)));
 	container.addChild(text(() => `保存路径：${data.path}`));
 	container.addChild(text(() => theme.fg("dim", "打开原图：Ctrl+点击链接，或复制 URL") + `\n${formatImageLink(data.path, theme)}`));
 	try {
+		if (statSync(data.path).size > 32 * 1024 * 1024) throw new Error("stored image exceeds preview size limit");
 		const bytes = readFileSync(data.path);
+		if (data.mimeType === "image/svg+xml") {
+			validateStaticSvg(bytes);
+			container.addChild(text(() => theme.fg("dim", "SVG 矢量文件：已通过静态 XML 白名单校验；终端不渲染，请手动打开原文件")));
+			return container;
+		}
+		if (data.mimeType === "image/gif") {
+			const gif = validateAnimatedGif(bytes);
+			container.addChild(text(() => theme.fg("dim", `GIF 动画：${gif.frames} 帧，${gif.width}x${gif.height}；终端不播放动画，请手动打开原文件`)));
+			return container;
+		}
 		const detected = detectImage(bytes);
 		if (!detected || detected.mimeType !== data.mimeType) throw new Error("stored image format mismatch");
 		const preview = new Image(bytes.toString("base64"), detected.mimeType,

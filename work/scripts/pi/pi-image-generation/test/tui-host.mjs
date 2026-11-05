@@ -4,6 +4,8 @@ import { pathToFileURL } from 'node:url';
 import { imageFixtures } from './image-fixtures.mjs';
 import { writeFile, rm, readdir } from 'node:fs/promises';
 import { runLifecycleHostChecks } from './lifecycle-host.mjs';
+import { runNativeHostChecks } from './native-host.mjs';
+import { runAdvancedHostChecks } from './advanced-host.mjs';
 
 export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes,t}) {
  const {default:extension}=await jiti.import('../extensions/index.ts');
@@ -26,10 +28,10 @@ export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes,t}) {
  const light=themeModule.getThemeByName('light');
  assert.ok(light);
 
- async function harness({modelKey='openai-flare-26',edit=false,providers=['openai'],choose,editor,custom,auth,draft='',confirm}={}) {
+ async function harness({modelKey='openai-flare-26',edit=false,providers=['openai'],choose,editor,custom,auth,draft='',confirm,extensionFactory=extension}={}) {
   let handler,input;
   const entries=[],notices=[],questions=[],editors=[],prefills=[];
-  await extension({registerEntryRenderer(){},registerCommand(_name,c){handler=c.handler},on(name,fn){if(name==='input')input=fn},appendEntry(type,data){entries.push({type,data})}});
+  await extensionFactory({registerEntryRenderer(){},registerCommand(_name,c){handler=c.handler},on(name,fn){if(name==='input')input=fn},appendEntry(type,data){entries.push({type,data})}});
   const ctx={mode:'tui',cwd:dir,isIdle:()=>true,modelRegistry:{
    getProvider(id){return id==='openai-codex'&&providers.includes('openai')?{baseUrl:'https://chatgpt.com/backend-api/codex'}:id==='qwen-token-plan-cn'&&providers.includes('qwen')?{baseUrl:'https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1'}:undefined},
    getProviderAuthStatus(){return {configured:true}},
@@ -473,6 +475,8 @@ export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes,t}) {
   const notIdle=await harness();await notIdle.handler('',{...notIdle.ctx,isIdle:()=>false});
   assert.equal(notIdle.notices[0].type,'warning');assert.equal(notIdle.questions.length,0);
 
+  await runNativeHostChecks({t,harness,jiti,sdk,dir,token,config,themeModule});
+  await runAdvancedHostChecks({t,harness,jiti,sdk,dir,token,config,themeModule,display,dark,keybindings});
   await runLifecycleHostChecks({t,harness,jiti,sdk,dir,token,bytes,display,dark,keybindings});
 
   // Errors are shown once, without credentials/prompt leaks or automatic retries.

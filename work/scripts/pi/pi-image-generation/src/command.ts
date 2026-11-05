@@ -1,4 +1,4 @@
-import { assertModelEnabled, normalizeImageOutput, normalizeModelSize, sizeForTask, type ImageConfig, type ImageModelConfig } from "./model-config.ts";
+import { assertModelEnabled, normalizeNativeOutput, normalizeModelSize, sizeForOutput, type ImageConfig, type ImageModelConfig } from "./model-config.ts";
 import type { ParsedImageCommand, ResolvedImageCommand } from "./types.ts";
 
 interface Token {
@@ -21,6 +21,9 @@ export function parseImageCommand(text: string, config: ImageConfig): ParsedImag
 	let complexity: string | undefined;
 	let outputFormat: string | undefined;
 	let background: string | undefined;
+	let markupPath: string | undefined;
+	const referencePaths: string[] = [];
+	const animation: { frameCount?: number; frameDurationMs?: number } = {};
 	let help = false;
 	const prompt: string[] = [];
 	let parseOptions = true;
@@ -71,13 +74,36 @@ export function parseImageCommand(text: string, config: ImageConfig): ParsedImag
 			background = value;
 			continue;
 		}
+		if (parseOptions && ["--frame-count", "--frame-duration-ms"].some((flag) => token === flag || token.startsWith(`${flag}=`))) {
+			const flag = token.split("=", 1)[0];
+			const key = flag === "--frame-count" ? "frameCount" : "frameDurationMs";
+			if (animation[key] !== undefined) throw new Error(`${flag} must not be repeated`);
+			const value = token === flag ? tokens[++index]?.value : token.slice(flag.length + 1);
+			if (!value || !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error(`${flag} requires an integer value`);
+			animation[key] = Number(value);
+			continue;
+		}
+		if (parseOptions && ["--markup", "--image"].some((flag) => token === flag || token.startsWith(`${flag}=`))) {
+			const flag = token.split("=", 1)[0];
+			const value = token === flag ? tokens[++index]?.value : token.slice(flag.length + 1);
+			if (!value?.trim() || value.startsWith("--")) throw new Error(`${flag} requires a file path`);
+			if (flag === "--markup") {
+				if (markupPath !== undefined) throw new Error("--markup must not be repeated");
+				markupPath = value;
+			} else {
+				if (referencePaths.length >= 100) throw new Error("Too many reference image paths");
+				referencePaths.push(value);
+			}
+			continue;
+		}
 		if (parseOptions && token.startsWith("--")) {
 			throw new Error("Unknown /image option; use /image --help");
 		}
 		prompt.push(token);
 	}
 
-	return { modelKey, prompt: prompt.join(" ").trim(), size, quality, complexity, outputFormat, background, help };
+	return { modelKey, prompt: prompt.join(" ").trim(), size, quality, complexity, outputFormat, background, ...animation,
+		...(referencePaths.length ? { referencePaths } : {}), ...(markupPath !== undefined ? { markupPath } : {}), help };
 }
 
 export function resolveImageCommand(
@@ -90,6 +116,8 @@ export function resolveImageCommand(
 	assertModelEnabled(model);
 	if (!command.prompt.trim()) throw new Error("Image prompt must not be empty");
 	if (command.prompt.length > model.prompt.maxChars) throw new Error(`Prompt exceeds ${model.prompt.maxChars} characters`);
+	if (imageCount && command.referencePaths?.length) throw new Error("Do not combine image attachments with --image paths");
+	imageCount += command.referencePaths?.length ?? 0;
 	if (!Number.isSafeInteger(imageCount) || imageCount < 0 || imageCount > model.inputImages.maximum) {
 		throw new Error(`Model accepts at most ${model.inputImages.maximum} reference images`);
 	}
@@ -107,8 +135,9 @@ export function resolveImageCommand(
 	if (complexity !== undefined && !model.complexity?.options.some((option) => option.value === complexity)) {
 		throw new Error("Complexity must be one of the configured model options");
 	}
+	const imageOutput = normalizeNativeOutput(model, command, task);
 	return { ...command, modelKey: model.key, provider: providerConfig.id, model: model.id, modelConfig: model, providerConfig,
-		size: normalizeModelSize(sizeForTask(model, task), command.size), quality, complexity, ...normalizeImageOutput(model, command) };
+		size: normalizeModelSize(sizeForOutput(model, task, imageOutput.outputFormat), command.size), quality, complexity, ...imageOutput };
 }
 
 export function inferModelForSingleAccount(config: ImageConfig, availableProviderIds: readonly string[]): ImageModelConfig | undefined {
@@ -125,11 +154,15 @@ export function usageText(config?: ImageConfig): string {
 		"编辑任务需填写参考图路径，每行一个；Escape 取消，参数选项内 Escape 返回菜单。",
 		"OpenAI 参考图限制按 Platform JSON 编辑接口配置，含 data URL 前缀与 Base64 编码开销；张数和大小见 models.jsonc，并非 Codex 通道实测上限。",
 		"账户：/image --settings（秘密输入仅支持 TUI，不要将 Key 写入命令）",
-		"非交互/RPC：/image [model-key] [--size VALUE] [--quality VALUE] [--complexity VALUE] [--format VALUE] [--background VALUE] [--] <prompt>",
+		"非交互/RPC：/image [model-key] [--size VALUE] [--quality VALUE] [--complexity VALUE] [--format VALUE] [--background VALUE] [--image PATH ...] [--markup PATH] [--] <prompt>",
 		"支持时可选 --format png|jpeg|webp（默认 png）、--background auto|opaque|transparent（默认 auto）；transparent 与 jpeg 不兼容。新参数不可重复，支持 --option=value。",
 		"格式按真实字节校验，与请求或服务端声明不符则不保存、不重试。透明背景是请求意图，不代表已验证存在透明像素。Codex 新参数尚未在线验证。",
+		"高级能力默认关闭，Codex 尚未在线验证。可按模型显式开启实验性 GIF、SVG 或 Markup；Streaming 只有独立离线适配器，不开放生产入口。",
+		"实验 SVG：--format svg，仅生成，安全静态 XML 校验后保存原文件，不支持编辑、流式、压缩或自选作者模型。",
+		"RPC 编辑：--image PATH 可重复，第一张是原图；实验 Markup：--markup PATH，独立透明 PNG，方向归一化后与原图同尺寸，不计入普通参考图。",
+		"实验 GIF：--format gif [--frame-count N] [--frame-duration-ms N]；默认 9 帧、200ms，范围见配置（保守 2～16 帧、20～2000ms），仅生成，不支持透明背景、流式或压缩参数。终端不播放动画。",
 		"只有一个已配置图片账户时可省略 model-key，使用该账户默认模型。",
-		"提示词以模型 key 或选项开头时，先写 --。标准 RPC 仅支持生成，不处理图片附件。",
+		"提示词以模型 key 或选项开头时，先写 --。标准 RPC 不处理图片附件，编辑请显式提供本地 --image 路径。Windows 路径请用正斜杠或单引号。",
 		...(config ? [
 			...config.providers.map((provider) => `默认模型：${provider.name} → ${provider.defaultModel}`),
 			...config.models.map((model) => `  ${model.key}: ${model.name}${model.description ? ` - ${model.description}` : ""}${model.enabled === false ? " [已禁用]" : ""}`),

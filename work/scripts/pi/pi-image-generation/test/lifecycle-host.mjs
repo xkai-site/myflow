@@ -12,7 +12,10 @@ const deferred = () => {
  return {promise,resolve,reject};
 };
 const until = async predicate => {
- for(let i=0;i<2000;i++){if(predicate())return;await new Promise(setImmediate)}
+ // A fixed number of setImmediate turns can expire in a few ms on Windows,
+ // before mocked HTTP diagnostic file writes finish. Bound wall time, not CPU speed.
+ const deadline=performance.now()+3000;
+ while(performance.now()<deadline){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,5))}
  assert.fail('Expected offline lifecycle event did not arrive');
 };
 const bounded = async promise => {
