@@ -80,7 +80,7 @@ export function formatRequestDiagnostic(diagnostic: ImageRequestDiagnostic): str
 	const operation = { generate: "生成请求", edit: "编辑请求", download: "图片下载" }[diagnostic.operation];
 	const codes = [...new Set(diagnostic.causes.map((cause) => cause.code).filter(Boolean))].slice(0, 3).join(", ");
 	const reason = diagnostic.causes.at(-1)?.message || diagnostic.causes[0]?.name || "Unknown error";
-	return `${operation}失败 · ${diagnostic.host} · ${diagnostic.phase === "connect" ? "等待响应头（连接/发送/服务端处理）" : "响应读取"}\n${diagnostic.status === undefined ? "未收到 HTTP 响应" : `HTTP ${diagnostic.status}`}${codes ? ` · ${codes}` : ""}\n${reason.slice(0, 180)}\n${diagnostic.hint}`;
+	return `${operation}失败 - ${diagnostic.host} - ${diagnostic.phase === "connect" ? "等待响应头（连接/发送/服务端处理）" : "响应读取"}\n${diagnostic.status === undefined ? "未收到 HTTP 响应" : `HTTP ${diagnostic.status}`}${codes ? ` - ${codes}` : ""}\n${reason.slice(0, 180)}\n${diagnostic.hint}`;
 }
 
 export function newDiagnosticId(): string { return randomUUID(); }

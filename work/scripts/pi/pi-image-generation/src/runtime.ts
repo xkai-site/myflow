@@ -61,7 +61,7 @@ export async function generateAndSave(
 			input: [{ type: "text", text: command.prompt }, ...inputImages],
 		}, {
 			apiKey: auth.apiKey, headers: auth.headers, signal, fetch,
-			metadata: { size: command.size, quality: command.quality },
+			metadata: { size: command.size, quality: command.quality, complexity: command.complexity },
 		});
 		if (result.stopReason !== "stop") throw new Error(result.errorMessage ?? `Image generation ${result.stopReason}`);
 		const images = result.output.filter((block): block is ImageContent => block.type === "image");
@@ -86,11 +86,13 @@ async function generateWithTransport(
 		const size = options.metadata?.size;
 		if (typeof size !== "string") throw new Error("Image size must be resolved from model configuration");
 		const quality = options.metadata?.quality;
+		const complexity = options.metadata?.complexity;
 		const result = await transport({
 			apiKey: options.apiKey, baseUrl: model.baseUrl, model: model.id,
 			prompt: context.input.filter((block): block is TextContent => block.type === "text").map((block) => block.text).join("\n").trim(),
 			images: context.input.filter((block): block is ImageContent => block.type === "image"),
 			size, quality: typeof quality === "string" ? quality : undefined,
+			complexity: typeof complexity === "string" ? complexity : undefined,
 			headers: options.headers, signal: options.signal, fetch: options.fetch, onDiagnostic,
 		});
 		output.output.push(...result.texts.map((text) => ({ type: "text" as const, text })), ...result.images.map((image) => ({ type: "image" as const, ...image })));

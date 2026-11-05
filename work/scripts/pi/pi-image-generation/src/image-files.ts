@@ -51,7 +51,7 @@ export async function loadInputImages(
 		if (!fileStats.isFile()) throw new Error(`Reference image ${index + 1} is not a file: ${filePath}`);
 		const maxBytes = limits.maxBytes;
 		if (fileStats.size > maxBytes) {
-			throw new Error(`Reference image ${index + 1} exceeds the ${Math.floor(maxBytes / 1024 / 1024)} MB limit`);
+			throw new Error(`Reference image ${index + 1} exceeds the ${maxBytes} byte limit`);
 		}
 		const bytes = await readFile(absolutePath);
 		const detected = detectImage(bytes);
@@ -69,11 +69,18 @@ export function validateInputImages(images: readonly InputImage[], limits: Image
 		if (!ALLOWED_INPUT_MIME.has(normalizeMimeType(image.mimeType)) || !limits.mimeTypes.includes(normalizeMimeType(image.mimeType))) {
 			throw new Error(`Reference image ${index + 1} has unsupported MIME type: ${image.mimeType}`);
 		}
+		if (limits.maxDataUrlLength !== undefined && `data:${image.mimeType};base64,`.length + image.data.length > limits.maxDataUrlLength) {
+			throw new Error(`Reference image ${index + 1} data URL exceeds the ${limits.maxDataUrlLength} character limit`);
+		}
 		const decoded = decodeImage(image.data, maxBytes);
 		if (normalizeMimeType(image.mimeType) !== decoded.mimeType) {
 			throw new Error(`Reference image ${index + 1} MIME type does not match its file signature`);
 		}
 	}
+}
+
+export function inputImageDataUrl(image: InputImage): string {
+	return `data:${image.mimeType};base64,${image.data}`;
 }
 
 export function decodeGeneratedImage(image: GeneratedImage): DecodedImage {
@@ -174,7 +181,7 @@ function decodeImage(data: string, maxBytes: number): DecodedImage {
 	if (!isCanonicalBase64(data)) throw new Error("Image payload is not valid base64");
 	const bytes = Buffer.from(data, "base64");
 	if (bytes.length === 0) throw new Error("Image payload is empty");
-	if (bytes.length > maxBytes) throw new Error(`Image exceeds the ${Math.floor(maxBytes / 1024 / 1024)} MB limit`);
+	if (bytes.length > maxBytes) throw new Error(`Image exceeds the ${maxBytes} byte limit`);
 	const detected = detectImage(bytes);
 	if (!detected) throw new Error("Image payload has an unsupported file signature");
 	return { bytes, ...detected };

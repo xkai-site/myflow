@@ -15,7 +15,7 @@ export interface DimensionRules {
 	multipleOf: number;
 }
 export interface SizePolicy extends ChoicePolicy { custom?: DimensionRules }
-export interface ImageLimits { maximum: number; maxBytes: number; mimeTypes: string[] }
+export interface ImageLimits { maximum: number; maxBytes: number; maxDataUrlLength?: number; mimeTypes: string[] }
 export type ImageAuth =
 	| { type: "provider"; providerId: "openai-codex" }
 	| { type: "api-key"; env: string; fallbackProviderId: "qwen-token-plan-cn" };
@@ -25,6 +25,8 @@ export interface ImageProviderConfig {
 export interface ImageModelConfig {
 	key: string; id: string; name: string; provider: string; tasks: ImageTask[];
 	enabled?: boolean;
+	description?: string;
+	complexity?: ChoicePolicy;
 	prompt: { maxChars: number };
 	inputImages: ImageLimits;
 	size: { generate: SizePolicy; edit?: SizePolicy };
@@ -114,14 +116,14 @@ export function validateImageConfig(raw: unknown): ImageConfig {
 	});
 	const models = array(root.models, "models").map((item, i): ImageModelConfig => {
 		const p = `models[${i}]`;
-		const v = record(item, p, ["key", "id", "name", "provider", "tasks", "prompt", "inputImages", "size", "quality", "enabled"]);
+		const v = record(item, p, ["key", "id", "name", "provider", "tasks", "prompt", "inputImages", "size", "quality", "enabled", "description", "complexity"]);
 		const tasks = array(v.tasks, `${p}.tasks`).map((task): ImageTask => {
 			if (task !== "generate" && task !== "edit") fail(`${p}.tasks`, "only generate and edit are supported");
 			return task;
 		});
 		unique(tasks, `${p}.tasks`);
 		const prompt = record(v.prompt, `${p}.prompt`, ["maxChars"]);
-		const input = record(v.inputImages, `${p}.inputImages`, ["maximum", "maxBytes", "mimeTypes"]);
+		const input = record(v.inputImages, `${p}.inputImages`, ["maximum", "maxBytes", "maxDataUrlLength", "mimeTypes"]);
 		const maximum = integer(input.maximum, `${p}.inputImages.maximum`, 0, 100);
 		if (tasks.includes("edit") && maximum < 1) fail(`${p}.inputImages.maximum`, "editing requires reference images");
 		const mimeTypes = array(input.mimeTypes, `${p}.inputImages.mimeTypes`).map((mime) => {
@@ -136,12 +138,20 @@ export function validateImageConfig(raw: unknown): ImageConfig {
 			inputImages: { maximum, maxBytes: integer(input.maxBytes, `${p}.inputImages.maxBytes`, 1, 100 * 1024 * 1024), mimeTypes },
 			size: { generate: sizePolicy(sizes.generate, `${p}.size.generate`) },
 		};
+		if (input.maxDataUrlLength !== undefined) {
+			model.inputImages.maxDataUrlLength = integer(input.maxDataUrlLength, `${p}.inputImages.maxDataUrlLength`, 1, 100 * 1024 * 1024);
+		}
 		if (v.enabled !== undefined) {
 			if (typeof v.enabled !== "boolean") fail(`${p}.enabled`, "must be a boolean");
 			model.enabled = v.enabled;
 		}
 		if (sizes.edit !== undefined) model.size.edit = sizePolicy(sizes.edit, `${p}.size.edit`);
 		if (v.quality !== undefined) model.quality = choices(v.quality, `${p}.quality`);
+		if (v.complexity !== undefined) model.complexity = choices(v.complexity, `${p}.complexity`);
+		if (v.description !== undefined) {
+			model.description = string(v.description, `${p}.description`);
+			if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029·•]/u.test(model.description)) fail(`${p}.description`, "must be a single line without controls or middle-dot separators");
+		}
 		return model;
 	});
 	unique(providers.map((p) => p.id), "providers.id");
@@ -151,6 +161,7 @@ export function validateImageConfig(raw: unknown): ImageConfig {
 		const provider = providers.find((p) => p.id === model.provider);
 		if (!provider) fail("models.provider", "unknown provider reference");
 		if (provider.adapter === "ali-wan-images" && model.quality) fail("models.quality", "this adapter does not send quality");
+		if (provider.adapter === "ali-wan-images" && model.complexity) fail("models.complexity", "this adapter does not send complexity");
 	}
 	for (const provider of providers) {
 		if (!models.some((m) => m.key === provider.defaultModel && m.provider === provider.id && m.enabled !== false)) fail("providers.defaultModel", "must reference an enabled model owned by this provider");

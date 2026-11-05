@@ -18,6 +18,7 @@ export function parseImageCommand(text: string, config: ImageConfig): ParsedImag
 	let modelKey: string | undefined;
 	let size: string | undefined;
 	let quality: string | undefined;
+	let complexity: string | undefined;
 	let help = false;
 	const prompt: string[] = [];
 	let parseOptions = true;
@@ -48,13 +49,19 @@ export function parseImageCommand(text: string, config: ImageConfig): ParsedImag
 			quality = value;
 			continue;
 		}
+		if (parseOptions && (token === "--complexity" || token.startsWith("--complexity="))) {
+			const value = token === "--complexity" ? tokens[++index]?.value : token.slice("--complexity=".length);
+			if (!value) throw new Error("--complexity requires a value");
+			complexity = value;
+			continue;
+		}
 		if (parseOptions && token.startsWith("--")) {
 			throw new Error("Unknown /image option; use /image --help");
 		}
 		prompt.push(token);
 	}
 
-	return { modelKey, prompt: prompt.join(" ").trim(), size, quality, help };
+	return { modelKey, prompt: prompt.join(" ").trim(), size, quality, complexity, help };
 }
 
 export function resolveImageCommand(
@@ -79,8 +86,13 @@ export function resolveImageCommand(
 	if (quality !== undefined && !model.quality?.options.some((option) => option.value === quality)) {
 		throw new Error("Quality must be one of the configured model options");
 	}
+	if (!model.complexity && command.complexity !== undefined) throw new Error("--complexity is not supported by this model");
+	const complexity = command.complexity ?? model.complexity?.default;
+	if (complexity !== undefined && !model.complexity?.options.some((option) => option.value === complexity)) {
+		throw new Error("Complexity must be one of the configured model options");
+	}
 	return { ...command, modelKey: model.key, provider: providerConfig.id, model: model.id, modelConfig: model, providerConfig,
-		size: normalizeModelSize(sizeForTask(model, task), command.size), quality };
+		size: normalizeModelSize(sizeForTask(model, task), command.size), quality, complexity };
 }
 
 export function inferModelForSingleAccount(config: ImageConfig, availableProviderIds: readonly string[]): ImageModelConfig | undefined {
@@ -91,13 +103,20 @@ export function inferModelForSingleAccount(config: ImageConfig, availableProvide
 
 export function usageText(config?: ImageConfig): string {
 	return [
-		"Interactive: /image — generate/edit or account settings",
-		"Accounts: /image --settings (TUI only; never put a Key in command arguments)",
-		"Non-interactive/RPC: /image [model-key] [--size VALUE] [--quality VALUE] <prompt>",
-		"Omit model-key only when one image account is configured; its default model is used.",
-		"Use -- before a prompt that starts with a model key or an option.",
-		...(config ? config.models.map((model) => `  ${model.key}: ${model.name} (${model.id})${model.enabled === false ? " [disabled]" : ""}`) : []),
-		"Models and options: models.jsonc next to the extension package; /reload after edits.",
+		"交互：/image 或 /image <prompt>（整段文本预填提示词，不解析 RPC 选项）",
+		"流程：任务 → 提示词 → 账户 → 模型 → 参数；单账户或单模型自动选择。",
+		"参数菜单默认开始生成，需要时再调整尺寸、画质和复杂度；仅显示模型支持的选项。",
+		"编辑任务需填写参考图路径，每行一个；Escape 取消，参数选项内 Escape 返回菜单。",
+		"OpenAI 参考图限制按 Platform JSON 编辑接口配置，含 data URL 前缀与 Base64 编码开销；张数和大小见 models.jsonc，并非 Codex 通道实测上限。",
+		"账户：/image --settings（秘密输入仅支持 TUI，不要将 Key 写入命令）",
+		"非交互/RPC：/image [model-key] [--size VALUE] [--quality VALUE] [--complexity VALUE] [--] <prompt>",
+		"只有一个已配置图片账户时可省略 model-key，使用该账户默认模型。",
+		"提示词以模型 key 或选项开头时，先写 --。标准 RPC 仅支持生成，不处理图片附件。",
+		...(config ? [
+			...config.providers.map((provider) => `默认模型：${provider.name} → ${provider.defaultModel}`),
+			...config.models.map((model) => `  ${model.key}: ${model.name}${model.description ? ` - ${model.description}` : ""}${model.enabled === false ? " [已禁用]" : ""}`),
+		] : []),
+		"参数值和输入限制见插件目录 models.jsonc；修改后执行 /reload。复杂度控制布局规划，画质控制渲染细节。",
 	].join("\n");
 }
 

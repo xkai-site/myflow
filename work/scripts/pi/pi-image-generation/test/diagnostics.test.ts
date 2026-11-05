@@ -25,6 +25,7 @@ test("network failures retain bounded cause/AggregateError chains, code, stage a
 			assert.ok(error.message.includes(code));
 			assert.match(error.message, /生成请求失败.*chatgpt.com/);
 			assert.match(error.message, /未收到 HTTP 响应/);
+			assert.doesNotMatch(error.message, /[·•]/);
 			assert.match(error.message, /\.pi\/image-generation-logs\/test.json/);
 			assert.ok(error.message.length < 800);
 			return true;

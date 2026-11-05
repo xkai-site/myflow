@@ -14,10 +14,10 @@ export class SecretInputState {
 	clear(): void { this.value = ""; this.pending = ""; this.paste = ""; this.pasting = false; this.error = undefined; }
 	backspace(): void { this.value = this.value.slice(0, -1); this.error = undefined; }
 	submit(): string | undefined {
-		if (this.receivingPaste) { this.error = "Wait for paste to finish, or Esc to cancel"; return undefined; }
+		if (this.receivingPaste) { this.error = "请等待粘贴完成，或按 Esc 取消"; return undefined; }
 		if (this.error) return undefined;
 		try { return validateKey(this.value); }
-		catch { this.error = "Enter a non-empty API Key without spaces"; return undefined; }
+		catch { this.error = "请输入不含空格的 API Key"; return undefined; }
 	}
 	feed(data: string): void {
 		this.pending += data;
@@ -43,7 +43,7 @@ export class SecretInputState {
 	private consume(text: string): void {
 		if (this.pasting) {
 			if (this.paste.length + text.length > MAX_KEY_CHARS + 16) {
-				this.error = "API Key is too long";
+				this.error = "API Key 过长";
 				// Keep the entire paste invalid rather than saving a truncated key.
 				this.paste = "\x00";
 			} else this.paste += text;
@@ -52,7 +52,7 @@ export class SecretInputState {
 	private add(text: string): void {
 		if (!text) return;
 		if (this.value.length + text.length > MAX_KEY_CHARS || /[^\x21-\x7e]/u.test(text)) {
-			this.error = "API Key input contains spaces/control characters or is too long";
+			this.error = "API Key 含空格或控制字符，或长度超限";
 			return;
 		}
 		this.error = undefined;
@@ -61,7 +61,7 @@ export class SecretInputState {
 }
 
 export async function promptSecret(ctx: ExtensionContext, title: string): Promise<string | undefined> {
-	if (ctx.mode !== "tui") throw new Error("API Key input requires TUI mode; use the configured environment variable otherwise");
+	if (ctx.mode !== "tui") throw new Error("API Key 输入仅支持 TUI；其他模式请使用配置的环境变量");
 	const { CURSOR_MARKER, decodeKittyPrintable, truncateToWidth } = await import("@earendil-works/pi-tui");
 	return ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
 		const state = new SecretInputState();
@@ -71,8 +71,8 @@ export async function promptSecret(ctx: ExtensionContext, title: string): Promis
 			render(width: number): string[] {
 				return [
 					truncateToWidth(theme.fg("accent", title), width),
-					truncateToWidth(`> ${state.entered ? "[secret entered]" : "[paste or type secret]"}${CURSOR_MARKER}`, width),
-					truncateToWidth(theme.fg(state.error ? "warning" : "dim", state.error ?? "Enter save • Esc cancel • input is never displayed"), width),
+					truncateToWidth(`> ${state.entered ? "[已输入 Key]" : "[粘贴或输入 Key]"}${CURSOR_MARKER}`, width),
+					truncateToWidth(theme.fg(state.error ? "warning" : "dim", state.error ?? "Enter 保存，Esc 取消，输入不回显"), width),
 				];
 			},
 			invalidate() {},

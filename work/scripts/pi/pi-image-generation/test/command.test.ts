@@ -20,7 +20,7 @@ test("legacy command selectors and current request defaults", () => {
 		assert.equal(request.body.model, model.id);
 		assert.equal(command.size, model.size.generate.default);
 	}
-	assert.equal(inferModelForSingleAccount(config, ["openai"])?.key, "openai");
+	assert.equal(inferModelForSingleAccount(config, ["openai"])?.key, "openai-flare-26");
 	assert.equal(inferModelForSingleAccount(config, ["qwen"])?.key, "wan");
 	assert.equal(inferModelForSingleAccount(config, ["openai", "qwen"]), undefined);
 	assert.equal(parseImageCommand("/image -- wan is a word", config).modelKey, undefined);
@@ -62,7 +62,53 @@ test("disabled models are recognized as selectors but rejected, never silently s
 	assert.equal(parsed.modelKey, model.key);
 	assert.equal(parsed.prompt, "cat");
 	assert.throws(() => resolveImageCommand(parsed, model, 0, validated), /disabled/);
-	assert.match(usageText(validated).split("\n").find((line) => line.includes(model.key))!, /disabled/);
+	assert.match(usageText(validated).split("\n").find((line) => line.includes(model.key))!, /已禁用/);
+});
+
+test("GPT Image 2.6 complexity defaults and explicit values reach both request endpoints", () => {
+	for (const selector of ["openai-sunburst-26", "openai-flare-26"]) {
+		const model = config.models.find((m) => m.key === selector)!;
+		for (const complexity of [undefined, "low", "medium", "high"]) {
+			for (const quality of ["auto", "low", "medium", "high", "xhigh", "max"]) {
+				for (const images of [[], [png]]) {
+					const text = `/image ${selector} --size 1536x864 --quality=${quality}${complexity ? ` --complexity ${complexity}` : ""} cat`;
+					const parsed = parseImageCommand(text, config);
+					const command = resolveImageCommand(parsed, model, images.length, config);
+					const request = buildOpenAICodexRequest({ ...command, apiKey: key, baseUrl: "https://chatgpt.com/backend-api/codex", images });
+					assert.equal(request.body.model, model.id);
+					assert.equal(request.body.complexity, complexity ?? "high");
+					assert.equal(request.body.quality, quality);
+					assert.equal(request.body.size, "1536x864");
+					assert.equal(request.url.endsWith(images.length ? "/edits" : "/generations"), true);
+				}
+			}
+		}
+		assert.equal(parseImageCommand(`/image ${selector} --complexity=low cat`, config).complexity, "low");
+		assert.throws(() => resolveImageCommand({ prompt: "cat", help: false, complexity: "max" }, model, 0, config), /Complexity/);
+	}
+	for (const model of config.models.filter((m) => !m.complexity)) {
+		assert.throws(() => resolveImageCommand({ prompt: "cat", help: false, complexity: "low" }, model, 0, config), /not supported/);
+		if (model.provider === "openai") {
+			const command = resolveImageCommand({ prompt: "cat", help: false }, model, 0, config);
+			assert.equal("complexity" in buildOpenAICodexRequest({ ...command, apiKey: key, baseUrl: "https://chatgpt.com/backend-api/codex", images: [] }).body, false);
+		}
+	}
+	for (const option of ["--complexity", "--complexity="]) assert.throws(() => parseImageCommand(`/image ${option}`, config), /requires/);
+	assert.equal(parseImageCommand("/image -- --complexity=low", config).prompt, "--complexity=low");
+});
+
+test("help describes the wizard, positioning, configured defaults and RPC complexity", () => {
+	const help = usageText(config);
+	for (const model of config.models) {
+		assert.ok(help.includes(model.key)); assert.ok(help.includes(model.name));
+		if (model.description) assert.ok(help.includes(model.description));
+	}
+	assert.match(help, /默认模型：OpenAI Codex → openai-flare-26/);
+	assert.match(help, /--complexity VALUE/);
+	assert.match(help, /--settings/);
+	assert.match(help, /Escape/);
+	assert.doesNotMatch(help, /[·•]/);
+	assert.doesNotThrow(() => usageText());
 });
 
 test("direct OpenAI adapter preserves the default quality", () => {
@@ -92,7 +138,7 @@ test("config-only model upgrade/addition changes parsing, request and validation
 	assert.throws(() => resolveImageCommand(parsed, model, 2, validated), /at most 1/);
 	assert.throws(() => resolveImageCommand({ ...parsed, prompt: "longer than ten" }, model, 0, validated), /10 characters/);
 	validateInputImages([png], model.inputImages);
-	assert.throws(() => validateInputImages([png], { ...model.inputImages, maxBytes: 7 }), /size limit|MB limit/);
+	assert.throws(() => validateInputImages([png], { ...model.inputImages, maxBytes: 7 }), /size limit|byte limit/);
 	assert.throws(() => validateInputImages([png], { ...model.inputImages, mimeTypes: ["image/jpeg"] }), /MIME/);
 	assert.equal(parseImageCommand("/image future-2 cat", validated).modelKey, "future-2");
 });

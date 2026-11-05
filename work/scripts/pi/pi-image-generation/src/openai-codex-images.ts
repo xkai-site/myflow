@@ -1,4 +1,4 @@
-import { decodeGeneratedImage } from "./image-files.ts";
+import { decodeGeneratedImage, inputImageDataUrl } from "./image-files.ts";
 import { requireImageEndpoint } from "./credentials.ts";
 import { mergeHeaders, requestImageJson } from "./http.ts";
 import type { GeneratedImage, ImageTransportOptions, ImageTransportResult } from "./types.ts";
@@ -48,9 +48,10 @@ export function buildOpenAICodexRequest(options: ImageTransportOptions): OpenAIC
 		quality: options.quality ?? "auto",
 		size: options.size,
 	};
+	if (options.complexity !== undefined) body.complexity = options.complexity;
 	if (isEdit) {
 		body.images = options.images.map((image) => ({
-			image_url: `data:${image.mimeType};base64,${image.data}`,
+			image_url: inputImageDataUrl(image),
 		}));
 	}
 	return {

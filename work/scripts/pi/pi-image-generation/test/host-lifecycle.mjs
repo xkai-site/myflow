@@ -20,6 +20,7 @@ globalThis.fetch=async()=>{throw new Error('Unexpected network request');};
 try {
  const {readImageConfig}=await jiti.import('../src/model-config.ts');
  const {resolveImageCommand}=await jiti.import('../src/command.ts');
+ const {itemOptions}=await jiti.import('../src/tui-options.ts');
  const {generateAndSave,createRuntimeImagesModels}=await jiti.import('../src/runtime.ts');
  const config=await readImageConfig();
  // Exercise the actual enabled catalog; do not force model flags to make tests pass.
@@ -48,6 +49,7 @@ try {
     calls.push(String(url));assert.equal(options.redirect,'error');
     if(options.method==='POST'){
      assert.equal(JSON.parse(options.body).model,selected.id);
+     assert.equal(JSON.parse(options.body).complexity,selected.complexity?.default);
      if(provider.adapter==='openai-codex-images')return Response.json({data:[{b64_json:bytes.toString('base64')}]});
      return Response.json({output:{choices:[{message:{content:[{image:'https://cdn.example.test/result.png'}]}}]}});
     }
@@ -101,31 +103,31 @@ try {
  const ctx={mode:'rpc',isIdle:()=>true,ui:{notify:(text)=>notices.push(text)}};
  await handler('--help',ctx);assert.match(notices.at(-1),/model-key/);
  await handler('--settings',ctx);assert.match(notices.at(-1),/TUI/);
- // Both real 2.5 models appear in the TUI and can advance to size selection.
+ // Real 2.5/2.6 models appear with positioning and advance to the parameter menu.
  // Cancel there so no credentials or paid request are needed for this UI check.
  const registry={
   getProvider:id=>id==='openai-codex'?{baseUrl:'https://chatgpt.com/backend-api/codex'}:undefined,
   getProviderAuthStatus:()=>({configured:true}),
   getProviderAuth:async()=>assert.fail('Cancelled command resolved credentials'),
  };
- for(const key of ['openai-sunburst','openai-flare']){
+ for(const key of ['openai-sunburst','openai-flare','openai-sunburst-26','openai-flare-26']){
   const questions=[];
   await handler('synthetic',{...ctx,mode:'tui',cwd:dir,modelRegistry:registry,ui:{...ctx.ui,
    editor:async()=> 'synthetic',
    select:async(title,options)=>{
     questions.push({title,options});
-    if(title==='Image task')return options[0];
-    if(title==='Image model')return options.find(option=>option.endsWith(`(${key})`));
+    if(title==='图片任务')return options[0];
+    if(title==='图片模型')return itemOptions(enabledModels.filter(m=>m.provider==='openai'),config.providers.find(p=>p.id==='openai').defaultModel).find(o=>o.item.key===key).label;
     return undefined;
    },
    custom:async()=>assert.fail('Cancelled before generation'),
   }});
-  const modelQuestion=questions.find(q=>q.title==='Image model');
+  const modelQuestion=questions.find(q=>q.title==='图片模型');
   assert.ok(modelQuestion);
   for(const model of enabledModels.filter(m=>m.provider==='openai')){
-   assert.ok(modelQuestion.options.some(option=>option.endsWith(`(${model.key})`)));
+   assert.ok(modelQuestion.options.some(option=>option.startsWith(`${model.name} - ${model.description}`)));
   }
-  assert.ok(questions.some(q=>q.title==='Image size'),`${key} must be selectable`);
+  assert.ok(questions.some(q=>q.title===`${config.models.find(m=>m.key===key).name} - 参数`),`${key} must be selectable`);
  }
  // RPC notification retains concrete causes and an existing log path, without auto-retrying.
  const failureCwd=path.join(dir,'rpc-failure');let failedCalls=0;
@@ -190,13 +192,13 @@ try {
  await writeFile(corruptPath,'not an image');
  for(const filePath of [path.join(outputDir,'missing.png'),corruptPath]){
   const rendered=renderer({data:{...generatedEntries[0],path:filePath}},{},theme).render(1000).join('\n');
-  assert.match(rendered,/Image preview unavailable/);
+  assert.match(rendered,/图片预览不可用/);
   assert.ok(rendered.includes(pathToFileURL(filePath).href));
  }
  await rm(corruptPath);
  for(const filePath of [undefined,'.pi/generated-images/relative.png',path.join(dir,'outside.png')]){
   const rendered=renderer({data:{...generatedEntries[0],path:filePath}},{},theme).render(1000).join('\n');
-  assert.match(rendered,/invalid path/);
+  assert.match(rendered,/保存路径无效/);
   assert.ok(!rendered.includes('file:///'));
  }
  // Real OSC 8 targets and styling, not merely a string containing a file URL.
@@ -249,11 +251,12 @@ try {
     const published=entries.slice(start);
     assert.equal(published.length,batch.length);
     assert.equal(notices.length,noticeStart+1);
-    assert.equal(notices.at(-1),`Saved ${batch.length} image(s):\n${batch.map(entry=>entry.path).join('\n')}`);
+    assert.equal(notices.at(-1),`已保存 ${batch.length} 张图片`);
+    for(const entry of batch)assert.ok(!notices.at(-1).includes(entry.path));
     assert.ok(published.every(entry=>!('galleryPath' in entry.data)));
     const rendered=published.flatMap(entry=>renderer({data:entry.data},{},theme).render(1000));
     const visible=[...rendered,notices.at(-1)].map(stripTerminalSequences).join('\n');
-    assert.equal(visible.split('Open original image').length-1,batch.length);
+    assert.equal(visible.split('打开原图').length-1,batch.length);
     assert.doesNotMatch(visible,/Browser preview|\.html/);
     for(const entry of batch){
      const tuiUrl=pathToFileURL(entry.path).href;
@@ -276,5 +279,7 @@ try {
  assert.deepEqual((await readdir(outputDir)).sort(),outputFilesBefore);
  assert.equal(await readFile(legacyGalleryPath,'utf8'),legacyHtml);
  for(const entry of generatedEntries)assert.deepEqual(await readFile(entry.path),bytes);
+ const {runTuiHostChecks}=await import('./tui-host.mjs');
+ await runTuiHostChecks({jiti,sdk,dir,config,token,bytes});
  console.log('Host-backed offline checks passed: mocked generation/edit, safe transport diagnostics/logs through SDK and RPC, direct original links without HTML writes, historical entries/reload, preview failure, styled OSC 8 targets, wrapping, theme refresh, per-image TUI link deduplication and RPC/unsupported-terminal fallback.');
 }finally{globalThis.fetch=originalFetch;await rm(dir,{recursive:true,force:true});}

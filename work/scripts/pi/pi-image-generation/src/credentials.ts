@@ -26,17 +26,17 @@ export function validateKey(value: string): string {
 export async function getAccountStatus(provider: ImageProviderConfig, agentDir: string, registry: AuthRegistry, env: NodeJS.ProcessEnv = process.env, ignoreSaved = false): Promise<ImageAccountStatus> {
 	try {
 		if (provider.auth.type === "api-key") {
-			if (!ignoreSaved && await readSavedKey(agentDir, provider.id)) return { configured: true, source: "Saved image API Key" };
+			if (!ignoreSaved && await readSavedKey(agentDir, provider.id)) return { configured: true, source: "已保存的图片 API Key" };
 			if (env[provider.auth.env]?.trim()) {
 				validateKey(env[provider.auth.env]!);
-				return { configured: true, source: `Environment: ${provider.auth.env}` };
+				return { configured: true, source: `环境变量：${provider.auth.env}` };
 			}
 		}
 		const id = provider.auth.type === "provider" ? provider.auth.providerId : provider.auth.fallbackProviderId;
 		const configured = registry.getProvider(id) !== undefined && registry.getProviderAuthStatus(id).configured;
-		return { configured, source: configured ? `Existing Pi provider: ${id}` : "Not configured" };
+		return { configured, source: configured ? `已有 Pi provider：${id}` : "未配置" };
 	} catch {
-		return { configured: false, source: "Configuration error", error: "Cannot read this image account. Check its credential file or Provider configuration; no fallback was used." };
+		return { configured: false, source: "配置错误", error: "无法读取此图片账户，请检查凭据文件或 provider 配置。未使用备用来源。" };
 	}
 }
 

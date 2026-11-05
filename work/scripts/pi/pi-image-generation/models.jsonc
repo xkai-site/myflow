@@ -4,7 +4,7 @@
     {
       "id": "openai", "name": "OpenAI Codex", "adapter": "openai-codex-images",
       "auth": { "type": "provider", "providerId": "openai-codex" },
-      "defaultModel": "openai"
+      "defaultModel": "openai-flare-26"
     },
     {
       "id": "qwen", "name": "Qwen Token Plan CN", "adapter": "ali-wan-images",
@@ -12,21 +12,25 @@
       "defaultModel": "wan"
     }
   ],
+  // Platform JSON /images/edits: up to 16 images; each image_url <= 20,971,520 characters.
+  // For the configured MIME types: floor((20,971,520 - data URL prefix length) / 4) * 3 = 15,728,622 bytes.
+  // https://developers.openai.com/api/reference/resources/images/methods/edit
   "models": [
     {
-      // Keep key stable when upgrading id.
+      // Legacy selector: do not remap this key when changing the provider default.
       "key": "openai", "id": "gpt-image-2", "name": "GPT Image 2", "provider": "openai",
+      "description": "兼容已有工作流",
       "tasks": ["generate", "edit"],
       "prompt": { "maxChars": 32000 },
-      "inputImages": { "maximum": 5, "maxBytes": 52428800, "mimeTypes": ["image/png", "image/jpeg", "image/webp", "image/bmp"] },
+      "inputImages": { "maximum": 16, "maxBytes": 15728622, "maxDataUrlLength": 20971520, "mimeTypes": ["image/png", "image/jpeg", "image/webp", "image/bmp"] },
       "size": {
         "generate": {
           "default": "auto",
           "options": [
-            { "value": "auto", "label": "Automatic" },
-            { "value": "1024x1024", "label": "Square" },
-            { "value": "1536x1024", "label": "Landscape" },
-            { "value": "1024x1536", "label": "Portrait" }
+            { "value": "auto", "label": "自动" },
+            { "value": "1024x1024", "label": "正方形" },
+            { "value": "1536x1024", "label": "横向" },
+            { "value": "1024x1536", "label": "纵向" }
           ],
           "custom": { "separator": "x", "minPixels": 655360, "maxPixels": 8294400, "maxSide": 3840, "maxRatio": 3, "multipleOf": 16 }
         }
@@ -34,10 +38,10 @@
       "quality": {
         "default": "auto",
         "options": [
-          { "value": "auto", "label": "Automatic" },
-          { "value": "low", "label": "Low — fastest" },
-          { "value": "medium", "label": "Medium — balanced" },
-          { "value": "high", "label": "High — highest detail" }
+          { "value": "auto", "label": "自动" },
+          { "value": "low", "label": "低" },
+          { "value": "medium", "label": "中" },
+          { "value": "high", "label": "高" }
         ]
       }
     },
@@ -77,18 +81,19 @@
       // Enabled in this catalog; backend access depends on the authenticated account.
       // https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst
       "key": "openai-sunburst", "id": "gpt-image-2.5-sunburst", "name": "GPT Image 2.5 Sunburst", "provider": "openai",
+      "description": "上代精细生成与编辑",
       "enabled": true,
       "tasks": ["generate", "edit"],
       "prompt": { "maxChars": 32000 },
-      "inputImages": { "maximum": 5, "maxBytes": 52428800, "mimeTypes": ["image/png", "image/jpeg", "image/webp", "image/bmp"] },
+      "inputImages": { "maximum": 16, "maxBytes": 15728622, "maxDataUrlLength": 20971520, "mimeTypes": ["image/png", "image/jpeg", "image/webp", "image/bmp"] },
       "size": {
         "generate": {
           "default": "auto",
           "options": [
-            { "value": "auto", "label": "Automatic" },
-            { "value": "1024x1024", "label": "Square" },
-            { "value": "1536x1024", "label": "Landscape" },
-            { "value": "1024x1536", "label": "Portrait" }
+            { "value": "auto", "label": "自动" },
+            { "value": "1024x1024", "label": "正方形" },
+            { "value": "1536x1024", "label": "横向" },
+            { "value": "1024x1536", "label": "纵向" }
           ],
           "custom": { "separator": "x", "minPixels": 655360, "maxPixels": 8294400, "maxSide": 3840, "maxRatio": 3, "multipleOf": 16 }
         }
@@ -96,30 +101,31 @@
       "quality": {
         "default": "auto",
         "options": [
-          { "value": "auto", "label": "Automatic" },
-          { "value": "low", "label": "Low — fastest" },
-          { "value": "medium", "label": "Medium — balanced" },
-          { "value": "high", "label": "High — high detail" },
-          { "value": "xhigh", "label": "Extra high — finer detail" },
-          { "value": "max", "label": "Max — highest detail" }
+          { "value": "auto", "label": "自动" },
+          { "value": "low", "label": "低" },
+          { "value": "medium", "label": "中" },
+          { "value": "high", "label": "高" },
+          { "value": "xhigh", "label": "超高" },
+          { "value": "max", "label": "最高" }
         ]
       }
     },
     {
       // https://developers.openai.com/api/docs/models/gpt-image-2.5-flare
       "key": "openai-flare", "id": "gpt-image-2.5-flare", "name": "GPT Image 2.5 Flare", "provider": "openai",
+      "description": "上代快速生成",
       "enabled": true,
       "tasks": ["generate", "edit"],
       "prompt": { "maxChars": 32000 },
-      "inputImages": { "maximum": 5, "maxBytes": 52428800, "mimeTypes": ["image/png", "image/jpeg", "image/webp", "image/bmp"] },
+      "inputImages": { "maximum": 16, "maxBytes": 15728622, "maxDataUrlLength": 20971520, "mimeTypes": ["image/png", "image/jpeg", "image/webp", "image/bmp"] },
       "size": {
         "generate": {
           "default": "auto",
           "options": [
-            { "value": "auto", "label": "Automatic" },
-            { "value": "1024x1024", "label": "Square" },
-            { "value": "1536x1024", "label": "Landscape" },
-            { "value": "1024x1536", "label": "Portrait" }
+            { "value": "auto", "label": "自动" },
+            { "value": "1024x1024", "label": "正方形" },
+            { "value": "1536x1024", "label": "横向" },
+            { "value": "1024x1536", "label": "纵向" }
           ],
           "custom": { "separator": "x", "minPixels": 655360, "maxPixels": 8294400, "maxSide": 3840, "maxRatio": 3, "multipleOf": 16 }
         }
@@ -127,12 +133,94 @@
       "quality": {
         "default": "auto",
         "options": [
-          { "value": "auto", "label": "Automatic" },
-          { "value": "low", "label": "Low — fastest" },
-          { "value": "medium", "label": "Medium — balanced" },
-          { "value": "high", "label": "High — high detail" },
-          { "value": "xhigh", "label": "Extra high — finer detail" },
-          { "value": "max", "label": "Max — highest detail" }
+          { "value": "auto", "label": "自动" },
+          { "value": "low", "label": "低" },
+          { "value": "medium", "label": "中" },
+          { "value": "high", "label": "高" },
+          { "value": "xhigh", "label": "超高" },
+          { "value": "max", "label": "最高" }
+        ]
+      }
+    },
+    {
+      // https://developers.openai.com/api/docs/guides/image-prompting
+      // 2.6 confirms multiples of 16 and ratio <= 3; pixel/edge caps retain the documented 2/2.5 range pending 2.6-specific confirmation.
+      "key": "openai-sunburst-26", "id": "gpt-image-2.6-sunburst", "name": "GPT Image 2.6 Sunburst", "provider": "openai",
+      "description": "精细创作与精确编辑",
+      "enabled": true,
+      "tasks": ["generate", "edit"],
+      "prompt": { "maxChars": 32000 },
+      "inputImages": { "maximum": 16, "maxBytes": 15728622, "maxDataUrlLength": 20971520, "mimeTypes": ["image/png", "image/jpeg", "image/webp", "image/bmp"] },
+      "size": {
+        "generate": {
+          "default": "auto",
+          "options": [
+            { "value": "auto", "label": "自动" },
+            { "value": "1024x1024", "label": "正方形" },
+            { "value": "1536x1024", "label": "横向" },
+            { "value": "1024x1536", "label": "纵向" }
+          ],
+          "custom": { "separator": "x", "minPixels": 655360, "maxPixels": 8294400, "maxSide": 3840, "maxRatio": 3, "multipleOf": 16 }
+        }
+      },
+      "quality": {
+        "default": "auto",
+        "options": [
+          { "value": "auto", "label": "自动" },
+          { "value": "low", "label": "低" },
+          { "value": "medium", "label": "中" },
+          { "value": "high", "label": "高" },
+          { "value": "xhigh", "label": "超高" },
+          { "value": "max", "label": "最高" }
+        ]
+      },
+      "complexity": {
+        "default": "high",
+        "options": [
+          { "value": "low", "label": "低" },
+          { "value": "medium", "label": "中" },
+          { "value": "high", "label": "高" }
+        ]
+      }
+    },
+    {
+      // https://developers.openai.com/api/docs/models/gpt-image-2.6-flare
+      // Same Platform JSON input limits; pixel/edge caps await 2.6-specific confirmation.
+      "key": "openai-flare-26", "id": "gpt-image-2.6-flare", "name": "GPT Image 2.6 Flare", "provider": "openai",
+      "description": "快速生成与日常迭代",
+      "enabled": true,
+      "tasks": ["generate", "edit"],
+      "prompt": { "maxChars": 32000 },
+      "inputImages": { "maximum": 16, "maxBytes": 15728622, "maxDataUrlLength": 20971520, "mimeTypes": ["image/png", "image/jpeg", "image/webp", "image/bmp"] },
+      "size": {
+        "generate": {
+          "default": "auto",
+          "options": [
+            { "value": "auto", "label": "自动" },
+            { "value": "1024x1024", "label": "正方形" },
+            { "value": "1536x1024", "label": "横向" },
+            { "value": "1024x1536", "label": "纵向" }
+          ],
+          "custom": { "separator": "x", "minPixels": 655360, "maxPixels": 8294400, "maxSide": 3840, "maxRatio": 3, "multipleOf": 16 }
+        }
+      },
+      "quality": {
+        "default": "auto",
+        "options": [
+          { "value": "auto", "label": "自动" },
+          { "value": "low", "label": "低" },
+          { "value": "medium", "label": "中" },
+          { "value": "high", "label": "高" },
+          { "value": "xhigh", "label": "超高" },
+          { "value": "max", "label": "最高" }
+        ]
+      },
+      "complexity": {
+        "default": "high",
+        "options": [
+          { "value": "low", "label": "低" },
+          { "value": "medium", "label": "中" },
+          { "value": "high", "label": "高" }
         ]
       }
     }
