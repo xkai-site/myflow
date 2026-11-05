@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { deleteImageKey, getAccountStatus, getCredentialPath, readSavedKey, saveImageKey } from "./credentials.ts";
 import { MODEL_CONFIG_PATH, type ImageConfig } from "./model-config.ts";
@@ -18,15 +19,44 @@ export async function runAccountSettings(ctx: ExtensionContext, config: ImageCon
 	const selected = await ctx.ui.select("图片账户设置", [...labels, showPaths]);
 	if (selected === undefined) return;
 	if (selected === showPaths) {
-		ctx.ui.notify(`模型配置：${MODEL_CONFIG_PATH}\n账户凭据：${getCredentialPath(agentDir)}\n凭据以明文保存在本地，由文件权限保护，未加密。`, "info");
+		ctx.ui.notify(configurationPaths(agentDir), "info");
 		return;
 	}
 	const index = labels.indexOf(selected);
 	const provider = config.providers[index];
 	if (!provider) return;
 	if (provider.auth.type === "provider") {
-		ctx.ui.notify(`此账户使用 Pi provider ${provider.auth.providerId}。\n${statuses[index].source}\n请通过对应扩展或设置完成认证。本插件不提供 provider 注册、登录或 token 刷新。`, "info");
-		return;
+		const providerId = provider.auth.providerId;
+		const command = `/login ${providerId}`;
+		const login = `登录 / 重新认证（填入 ${command}，回车执行）`;
+		const details = "查看认证说明与凭据路径";
+		const refresh = "刷新账户状态";
+		for (;;) {
+			const status = await getAccountStatus(provider, agentDir, ctx.modelRegistry);
+			const registered = ctx.modelRegistry.getProvider(providerId) !== undefined;
+			const source = registered ? status.source : `未注册 Pi provider：${providerId}`;
+			const action = await ctx.ui.select(`OpenAI 图片账户（${providerId}）— ${source}`, [
+				login, refresh, details, "保持当前设置",
+			]);
+			if (action === login) {
+				if (!registered) {
+					ctx.ui.notify(`当前 Pi 未注册 ${providerId}。请先使用包含该 provider 的 Pi 版本或安装相应 provider 扩展，完成后 /reload。`, "warning");
+					continue;
+				}
+				const draft = ctx.ui.getEditorText();
+				if (draft.trim() && !await ctx.ui.confirm("替换当前输入？", "将当前输入替换为 Pi 登录命令，不会自动提交。")) continue;
+				// Built-in /login is interactive-only, not an extension command. Never send it to the LLM.
+				ctx.ui.setEditorText(command);
+				ctx.ui.notify("已填入登录命令，按 Enter 打开 Pi 认证流程。完成后重新运行 /image 即可，无需重启；普通 OpenAI / Codex CLI 登录不会自动复用到此账户。", "info");
+				return;
+			}
+			if (action === details) {
+				ctx.ui.notify(`此账户复用 Pi provider ${providerId}。\n认证入口：${command}（由 Pi 处理登录、保存及刷新）。\n普通 openai 与 openai-codex 是不同账户配置；不会直接读取 Codex CLI 的 auth.json，也不接受 OpenAI Platform API Key。\n${configurationPaths(agentDir)}`, "info");
+				continue;
+			}
+			if (action === refresh) continue;
+			return;
+		}
 	}
 	if (statuses[index].error) ctx.ui.notify(statuses[index].error!, "warning");
 	const action = await ctx.ui.select("Qwen Token Plan CN（专用 Key 优先）", [
@@ -47,4 +77,8 @@ export async function runAccountSettings(ctx: ExtensionContext, config: ImageCon
 		await deleteImageKey(agentDir, provider.id);
 		ctx.ui.notify(`图片 API Key 已删除。当前来源：${(await getAccountStatus(provider, agentDir, ctx.modelRegistry)).source}`, "info");
 	}
+}
+
+function configurationPaths(agentDir: string): string {
+	return `模型配置：${MODEL_CONFIG_PATH}\nPi provider 登录凭据：${path.join(agentDir, "auth.json")}\n图片专用 Key（仅千问）：${getCredentialPath(agentDir)}\n凭据以明文保存在本地，由文件权限保护，未加密。不要手动粘贴 OpenAI token 到图片专用 Key 文件。`;
 }

@@ -25,15 +25,18 @@ export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes,t}) {
  const light=themeModule.getThemeByName('light');
  assert.ok(light);
 
- async function harness({modelKey='openai-flare-26',edit=false,providers=['openai'],choose,editor,custom,auth}={}) {
+ async function harness({modelKey='openai-flare-26',edit=false,providers=['openai'],choose,editor,custom,auth,draft='',confirm}={}) {
   let handler,input;
-  const entries=[],notices=[],questions=[],editors=[];
+  const entries=[],notices=[],questions=[],editors=[],prefills=[];
   await extension({registerEntryRenderer(){},registerCommand(_name,c){handler=c.handler},on(name,fn){if(name==='input')input=fn},appendEntry(type,data){entries.push({type,data})}});
   const ctx={mode:'tui',cwd:dir,isIdle:()=>true,modelRegistry:{
    getProvider(id){return id==='openai-codex'&&providers.includes('openai')?{baseUrl:'https://chatgpt.com/backend-api/codex'}:id==='qwen-token-plan-cn'&&providers.includes('qwen')?{baseUrl:'https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1'}:undefined},
    getProviderAuthStatus(){return {configured:true}},
    getProviderAuth:auth??(async()=>({auth:{apiKey:token}})),
   },ui:{theme:dark,
+   getEditorText(){return draft},
+   setEditorText(text){draft=text;prefills.push(text)},
+   confirm:confirm??(async()=>assert.fail('Unexpected confirmation')),
    notify(text,type){notices.push({text,type})},
    async select(title,options){
     questions.push({title,options});
@@ -55,7 +58,7 @@ export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes,t}) {
     try{component=factory(display,dark,keybindings,done)}catch(error){reject(error)}
    })),
   }};
-  return {handler,input,ctx,entries,notices,questions,editors};
+  return {handler,input,ctx,entries,notices,questions,editors,prefills};
  }
 
  try {
@@ -236,6 +239,87 @@ export async function runTuiHostChecks({jiti,sdk,dir,config,token,bytes,t}) {
     }
    })});
    await h.handler('--settings',h.ctx);assert.equal(h.entries.length,0);assert.equal(h.editors.length,0);
+   initTheme('dark',false);
+  });
+  await t.test('OpenAI settings hand off login through the editor, never credentials or an agent turn',async()=>{
+   for(const configured of [false,true]) {
+    const h=await harness({auth:async()=>assert.fail('Settings resolved credentials'),choose:(title,labels)=>labels[0]});
+    h.ctx.modelRegistry.getProviderAuthStatus=()=>({configured});
+    await h.handler('--settings',h.ctx);
+    assert.deepEqual(h.prefills,['/login openai-codex']);
+    assert.equal(h.questions.length,2);
+    assert.match(h.questions[1].title,configured?/已有 Pi provider：openai-codex/:/未配置/);
+    assert.match(h.notices.at(-1).text,/按 Enter/);
+    assert.equal(h.entries.length,0);assert.equal(h.editors.length,0);
+   }
+   // The no-account wizard exits after preparing login instead of prompting/generating.
+   const wizard=await harness({choose:(_title,labels)=>labels[0],auth:async()=>assert.fail('Wizard resolved credentials')});
+   wizard.ctx.modelRegistry.getProviderAuthStatus=()=>({configured:false});
+   await wizard.handler('保留到下次生成的提示词',wizard.ctx);
+   assert.deepEqual(wizard.prefills,['/login openai-codex']);
+   assert.equal(wizard.questions.some(q=>q.title==='图片任务'),false);
+   assert.equal(wizard.notices.filter(n=>n.type==='warning').length,1);
+   // A later invocation uses the newly configured provider without /reload.
+   wizard.ctx.modelRegistry.getProviderAuthStatus=()=>({configured:true});
+   wizard.ctx.ui.select=async()=>undefined;
+   await wizard.handler('',wizard.ctx);
+   assert.equal(wizard.notices.at(-1).text,'已取消图片生成');
+  });
+  await t.test('OpenAI login protects drafts and handles cancellation and missing providers',async()=>{
+   for(const allow of [false,true]) {
+    let confirmations=0,steps=0;
+    const h=await harness({draft:'未提交的草稿',confirm:async()=>{confirmations++;return allow},
+     choose:(_title,labels)=>++steps<=2?labels[0]:undefined});
+    await h.handler('--settings',h.ctx);
+    assert.equal(confirmations,1);
+    assert.deepEqual(h.prefills,allow?['/login openai-codex']:[]);
+    assert.equal(h.ctx.ui.getEditorText(),allow?'/login openai-codex':'未提交的草稿');
+   }
+   let steps=0;
+   const missing=await harness({providers:[],choose:(_title,labels)=>++steps<=2?labels[0]:undefined});
+   await missing.handler('--settings',missing.ctx);
+   assert.deepEqual(missing.prefills,[]);
+   assert.match(missing.questions[1].title,/未注册 Pi provider/);
+   assert.match(missing.notices.at(-1).text,/当前 Pi 未注册 openai-codex/);
+   const cancel=await harness({choose:(title,labels)=>title==='图片账户设置'?labels[0]:undefined});
+   await cancel.handler('--settings',cancel.ctx);
+   assert.deepEqual(cancel.prefills,[]);assert.deepEqual(cancel.notices,[]);
+  });
+  await t.test('settings distinguish credential paths and refresh status without reading tokens',async()=>{
+   const paths=await harness({choose:(_title,labels)=>labels.at(-1)});
+   await paths.handler('--settings',paths.ctx);
+   const text=paths.notices.at(-1).text;
+   assert.ok(text.includes(`Pi provider 登录凭据：${path.join(dir,'auth.json')}`));
+   assert.ok(text.includes(`图片专用 Key（仅千问）：${path.join(dir,'pi-image-generation','auth.json')}`));
+   assert.match(text,/明文/);assert.doesNotMatch(text,/signature/);
+   let configured=false,step=0;
+   const h=await harness({auth:async()=>assert.fail('Status resolved credentials'),choose:(title,labels)=>{
+    if(title==='图片账户设置')return labels[0];
+    if(++step===1)return labels.find(label=>label.startsWith('查看认证说明'));
+    if(step===2){configured=true;return labels.find(label=>label==='刷新账户状态')}
+    return undefined;
+   }});
+   h.ctx.modelRegistry.getProviderAuthStatus=()=>({configured});
+   await h.handler('--settings',h.ctx);
+   assert.match(h.notices[0].text,/认证入口：\/login openai-codex/);
+   assert.match(h.notices[0].text,/不会直接读取 Codex CLI/);
+   assert.match(h.questions.at(-1).title,/已有 Pi provider：openai-codex/);
+   assert.deepEqual(h.prefills,[]);
+  });
+  await t.test('native OpenAI account actions wrap and cancel in both themes',async()=>{
+   const h=await harness({choose:(title,labels)=>{
+    if(title==='图片账户设置')return labels[0];
+    return new Promise(resolve=>{
+     for(const appearance of ['dark','light']) {
+      initTheme(appearance,false);
+      const component=new ExtensionSelectorComponent(title,labels,resolve,()=>resolve(undefined));
+      for(const width of [24,40,80,120])assert.ok(component.render(width).every(line=>visibleWidth(line)<=width));
+      component.handleInput('\x1b');component.dispose();
+     }
+    });
+   }});
+   await h.handler('--settings',h.ctx);
+   assert.equal(h.questions.length,2);assert.deepEqual(h.prefills,[]);
    initTheme('dark',false);
   });
   const notIdle=await harness();await notIdle.handler('',{...notIdle.ctx,isIdle:()=>false});

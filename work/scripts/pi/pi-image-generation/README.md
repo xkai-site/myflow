@@ -29,9 +29,13 @@ TUI 会打开向导：生成/编辑 → 提示词 → 账户 → 模型 → 参�
 
 ### OpenAI：使用已配置的 Pi provider
 
-OpenAI 图片生成需要 Pi 中已有且已认证的 `openai-codex` provider。此图片扩展和 `pi-usage-openai` 都不会注册该对话 provider、执行 OAuth 登录或刷新 token；请由独立 provider/插件负责安装和认证。当前项目已不再提供此前 `pi-codex-official` 的 provider 功能。
+OpenAI 图片生成需要 Pi 中已有且已认证的 `openai-codex` provider。Pi 1.5.0 已内置此 provider（可能显示为 **OpenAI Codex (legacy)**）及其 OAuth 登录流程，无需另装 provider 插件。其他宿主版本若未提供此 provider，需先安装相应 provider 扩展。当前项目已不再提供此前 `pi-codex-official` 的 provider 功能。
 
-本扩展每次通过 Pi 的 `openai-codex` provider 读取认证信息，不自行登录或刷新 token。过期时通过提供该 provider 的扩展/Codex 流程更新登录。
+最短路径：Pi TUI 输入 `/image --settings` → 选择 OpenAI → **登录 / 重新认证**。插件返回主输入框并填入 `/login openai-codex`，按 Enter 后由 Pi 打开原生认证流程；已有未提交草稿时先确认是否替换。登录完成后重新运行 `/image`，无需重启或 `/reload`。也可直接执行 `/login openai-codex`。内置 `/login` 不支持通过扩展命令分发，因此此入口仅预填，不自动执行，也不会把登录命令交给 LLM。
+
+OpenAI 设置页还可刷新账户状态、查看认证说明与凭据路径。Pi provider 的登录凭据保存在 `<getAgentDir()>/auth.json`，不是图片专用 Key 文件。**普通 `openai` 与 `openai-codex` 是不同账户配置**；仅登录普通 OpenAI 或 Codex CLI 不会自动配置此图片账户，插件不会直接读取 `~/.codex/auth.json`。不要手动复制 token。
+
+本扩展每次通过 Pi 的 `openai-codex` provider 读取认证信息，不自行登录或刷新 token。登录、保存与刷新均由 Pi/provider 负责；认证失效时可从上述入口重新认证。
 请求发送到 ChatGPT Codex 订阅后端 `https://chatgpt.com/backend-api/codex/images/generations` 或 `https://chatgpt.com/backend-api/codex/images/edits`，**不是 OpenAI Platform API Key 接口**；账号权益、模型支持和额度由服务端决定。
 
 ### 千问：Token Plan CN API Key
@@ -53,7 +57,7 @@ OpenAI 图片生成需要 Pi 中已有且已认证的 `openai-codex` provider。
 | --- | --- |
 | TUI `/image` | 直接选择生成或编辑，进入向导 |
 | TUI `/image <prompt>` | 以整段参数预填提示词，再进入向导；**不解析下列非交互选项** |
-| `/image --settings` | 账户管理，秘密输入仅 TUI 可用 |
+| `/image --settings` | 账户管理：OpenAI 原生登录命令入口、状态/路径查看，千问专用 Key 设置；仅 TUI 可操作 |
 | `/image --help`、`/image -h` | 用法和全部模型 key（含禁用标记） |
 | RPC `/image …` | 按下列语法直接请求，不打开生成向导 |
 
@@ -168,7 +172,7 @@ TUI 会话显示路径、原图链接及可用时的终端预览。支持链接�
 
 | 现象 | 最短恢复路径 |
 | --- | --- |
-| 没有账户 / HTTP 401 | 检查 `/image --settings` 的来源；更新 Codex 登录或千问 Key，不盲目切换账户 |
+| 没有账户 / HTTP 401 | 打开 `/image --settings`；OpenAI 选择登录 / 重新认证，回车执行预填的 `/login openai-codex`；千问更新 Key，不盲目切换账户 |
 | HTTP 403 / 429 | 核对账号权限、模型支持、额度和限流；本地启用不等于上游授权 |
 | `fetch failed` / 超时 / 断连 / 5xx | 按通知区分生成、编辑、下载及发送/读取阶段，检查启动 Pi 的网络/代理环境；不能仅凭外层错误断定模型或 Key 无效 |
 | 配置/输入校验失败 | 修复 models.jsonc 后 `/reload`；核对模型 key、尺寸、画质、复杂度及参考图限制 |
