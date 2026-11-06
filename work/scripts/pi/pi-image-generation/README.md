@@ -129,19 +129,19 @@ OpenAI 设置页还可刷新账户状态、查看认证说明与凭据路径。P
 
 **能力依据与验证边界：** [生成接口](https://developers.openai.com/api/reference/resources/images/methods/generate)、[编辑接口](https://developers.openai.com/api/reference/resources/images/methods/edit)、[提示指南](https://developers.openai.com/api/docs/guides/image-prompting)和[生成指南](https://developers.openai.com/api/docs/guides/image-generation)确认参数语义；[2.6 Sunburst](https://developers.openai.com/api/docs/models/gpt-image-2.6-sunburst)与[2.6 Flare](https://developers.openai.com/api/docs/models/gpt-image-2.6-flare)支持两个图片端点，提示指南明确两款支持透明背景。2.5 的生成/编辑参考同样明确支持透明背景与 PNG/WebP。旧 `gpt-image-2` 的透明能力在文档中仍标为 preview，因此本轮不扩展其配置。
 
-当前本地 Codex 适配器将 JSON 发往既有 `/images/generations` 和 `/images/edits`，由 Pi SDK 的 `ImagesOptions.metadata` 贯通配置参数，没有改 OAuth、Header、路由或 Provider。**新增参数在 Codex 通道及实际账户上尚未在线验证**，Platform 文档不是 Codex 协议保证。能力清单仅允许上述四款尝试这些参数；服务端可能拒绝或忽略，忽略格式时会触发下文的格式不一致错误，不做隐式回退或重试。离线 Mock 仅证明本地序列化、校验与保存行为，不是在线生图验收。
+当前本地 Codex 适配器将 JSON 发往既有 `/images/generations` 和 `/images/edits`，由 Pi SDK 的 `ImagesOptions.metadata` 贯通配置参数，没有改 OAuth、Header、路由或 Provider。**新增参数尚未完成 Codex 通道及实际账户的完整在线验收**，Platform 文档不是 Codex 协议保证。能力清单仅允许上述四款尝试这些参数；服务端可能拒绝或忽略，忽略格式时会触发下文的格式不一致错误，不做隐式回退或重试。离线 Mock 仅证明本地序列化、校验与保存行为，不是在线生图验收。
 
 所有模型支持生成和参考图编辑（调用入口限制见上节），每次请求一张，无批量数量参数、mask 或多轮连续编辑。**默认仍只开放静态栅格输出和普通编辑。** SVG、Markup、GIF 都是默认关闭的实验性实现；Streaming 仅有独立离线解析/响应适配器，不接入生产。Platform 和官方 SDK 已证实协议，不代表 Codex 在线支持已获确认。
 
 ### 高级能力：证据与默认关闭策略
 
-完整调查、参数冲突、源码链接、输入安全缺口与验收记录见 [ADVANCED-CAPABILITIES.md](ADVANCED-CAPABILITIES.md)。必须区分 Platform API 文档、Codex 客户端可序列化和 Codex 服务端实际接受。本轮没有真实在线图片调用，也没有验证账户预览权益。
+完整调查、参数冲突、源码链接、输入安全缺口与验收记录见 [ADVANCED-CAPABILITIES.md](ADVANCED-CAPABILITIES.md)。必须区分 Platform API 文档、Codex 客户端可序列化和 Codex 服务端实际接受。经明确授权，2.6 Flare 已执行 Markup / SVG 各 1 次，累计 2 次后停止：Markup 返回 PNG 但尺寸不符，SVG HTTP 200 后校验失败、未保存产物；不记正式可用，也没有验证账户预览权益。
 
 | 能力 | 当前状态 | 默认行为 |
 | --- | --- | --- |
-| SVG | Platform 与官方 SDK 协议已证实；本地安全 XML/文件生成链路完成，Codex 未确认 | 两款 2.6 的 `svg.enabled: false`；不显示选项，不发送 SVG 请求 |
+| SVG | 本地安全 XML/文件链路完成；2.6 Flare S1 HTTP 200，但后续协议/本地校验失败，无可交付 SVG | 两款 2.6 的 `svg.enabled: false`；不显示选项，不发送 SVG 请求 |
 | GIF | 官方 Platform 2.6 支持生成；官方 Codex 客户端含 GIF 序列化，未验证服务端/账户接受 | 原实验实现不重写，两个 `gif.enabled` 均为 false |
-| Markup | Platform 与 SDK 字段已证实；独立 PNG、真实透明像素、方向/尺寸及请求链路完成，Codex 未确认 | 2.5/2.6 两款各自 `markup.enabled: false`；不显示标记路径输入 |
+| Markup | 本地独立 PNG/透明像素/方向链路完成；2.6 Flare M1 返回 PNG，左圆变绿，但请求 1024×1024、实际 1254×1254，人工验收未确认 | 2.5/2.6 两款各自 `markup.enabled: false`；不显示标记路径输入 |
 | Streaming | Platform Images SSE 与官方 SDK 事件类型已证实；独立增量解析/响应适配器完成，Codex 未确认 | 不接生产、不显示入口、不发送流式字段；配置禁止 `streaming.enabled: true` |
 
 **实验 Markup：** 操作者明确知情后，仅将目标模型 `nativeCapabilities.markup.enabled` 改为 `true` 并 `/reload`。TUI 编辑参数菜单可选一个标记 PNG 路径，不增加默认步骤；Escape 保留，留空移除。RPC 示例：
@@ -158,7 +158,7 @@ OpenAI 设置页还可刷新账户状态、查看认证说明与凭据路径。P
 
 **Streaming：** `src/image-sse.ts` 只接收已有的 SSE Response，用于离线适配验证，没有 fetch/认证或生产 UI 入口。支持多行 data、CRLF/CR/LF、跨块 UTF-8、错误/断流和取消；单事件 48 MiB、累计输入 192 MiB。部分图仅临时回调，必须收到 completed 才能返回最终图片；不把 partial 写入历史，也不把 Responses 事件或 `[DONE]` 当作 Images 完成协议。当前不允许启用生产流式开关。
 
-所有实验启用都可能允许真实付费请求，不等于已确认当前 Codex 账户支持。未经明确授权，本项目测试不在线调用。当前安全收尾仅准备了 [Codex 最小在线验收计划](CODEX-ONLINE-ACCEPTANCE.md)：优先 Markup 1 次、可选 SVG 1 次，总计最多 2 次、串行、不重试；需要操作者另行批准，不涉及 GIF 或 SSE 探测。**在线测试待授权，尚未发起真实图片请求。**
+所有实验启用都可能允许真实付费请求，不等于已确认当前 Codex 账户支持。常规测试保持离线。按 [Codex 最小在线验收计划](CODEX-ONLINE-ACCEPTANCE.md)，本轮经批准串行执行 M1/S1 各 1 次、无重试；M1 尺寸异常后，操作者另行明确指示继续 S1，不冒充人工效果验收通过。**累计 2/2，现已停止，全部生产开关仍为 false。** 不涉及 GIF 或 SSE 探测，任何新增请求都需重新授权。一次性守卫与执行器仅在 `test/`，未接入生产，也不属于 `npm test` 的真实 API 调用。
 
 **实验 GIF，仅供明确知情的人工验证：** `models.jsonc` 的两款 2.6 模型分别有 `nativeCapabilities.gif`，其中 `enabled: false` 是默认值。仅操作者自行将目标模型改为 `true` 并 `/reload`，才允许选择 `GIF（实验性，Codex 未在线验证）` 或通过 RPC 请求。启用一个模型不影响另一个。启用会允许发送真实请求，可能消耗额度；修改配置不等于取得 GIF preview access 或完成线上验收。
 

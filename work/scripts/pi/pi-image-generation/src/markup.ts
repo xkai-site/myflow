@@ -37,6 +37,7 @@ export function assertPreparedMarkup(images: readonly InputImage[], markup: Inpu
  if (prepared.get(markup) !== images) throw new Error("Markup must pass pixel/orientation validation before request construction");
 }
 
+// TODO: 当前 Codex Markup 编辑链路/服务端响应实测固定为 1254×1254（不同 size 均如此），非客户端传参或缩放问题；待核实服务端尺寸限制。
 /** Real bounded pixel decoding, not a header/alpha-channel test. Returns a separate
  * oriented PNG overlay and oriented first image; never composites the two. */
 export async function prepareMarkupEdit(model: ImageModelConfig, images: readonly InputImage[], markup: InputImage, signal?: AbortSignal): Promise<{ images: readonly InputImage[]; markup: InputImage }> {
