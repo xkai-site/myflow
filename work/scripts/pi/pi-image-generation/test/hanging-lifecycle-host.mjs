@@ -22,9 +22,9 @@ let calls=0,entered=false,requestSignal,loader,doneCount=0,completed=false;
 const notices=[],entries=[];
 const never=new Promise(()=>{});
 globalThis.fetch=async(_url,request)=>{
- calls++;entered=true;requestSignal=request.signal;
- if(phase==='fetch')return never;
- const response=Response.json({});response.arrayBuffer=()=>never;return response;
+ calls++;requestSignal=request.signal;
+ if(phase==='fetch'){entered=true;return never;}
+ return new Response(new ReadableStream({pull(){entered=true;return never;}},{highWaterMark:0}));
 };
 try {
  const {default:extension}=await jiti.import('../extensions/index.ts');

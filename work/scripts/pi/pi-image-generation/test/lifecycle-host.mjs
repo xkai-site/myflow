@@ -122,10 +122,12 @@ export async function runLifecycleHostChecks({t,harness,jiti,sdk,dir,token,bytes
    globalThis.fetch=async(url,request)=>{
     calls++;signal=request.signal;
     if(phase==='download'&&request.method==='POST')return successFetch(url,request);
-    entered=true;
     if(phase==='body'){
-     const response=Response.json({});response.arrayBuffer=()=>gate.promise;return response;
+     return new Response(new ReadableStream({async pull(controller){
+      entered=true;controller.enqueue(new Uint8Array(await gate.promise));controller.close();
+     }},{highWaterMark:0}));
     }
+    entered=true;
     return gate.promise;
    };
    const h=await cancellable(phase==='download'?{modelKey:'wan',providers:['qwen']}:{ });

@@ -118,15 +118,45 @@ export function mergeHeaders(
 }
 
 export async function readJsonResponse(response: Response, maxBytes: number): Promise<unknown> {
+	if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("Invalid JSON response byte limit");
 	const contentLength = response.headers.get("content-length");
 	if (contentLength !== null) {
 		const declared = Number(contentLength);
-		if (Number.isFinite(declared) && declared > maxBytes) throw new Error("Provider response is too large");
+		if (Number.isFinite(declared) && declared > maxBytes) {
+			void response.body?.cancel().catch(() => {});
+			throw new Error("Provider response is too large");
+		}
 	}
-	const bytes = new Uint8Array(await response.arrayBuffer());
-	if (bytes.length > maxBytes) throw new Error("Provider response is too large");
+	let bytes = new Uint8Array(0);
+	let received = 0;
+	if (response.body) {
+		const reader = response.body.getReader();
+		let completed = false;
+		try {
+			while (true) {
+				const { value, done } = await reader.read();
+				if (done) { completed = true; break; }
+				// Count actual decoded bytes before copying; never trust Content-Length for allocation.
+				if (value.byteLength > maxBytes - received) throw new Error("Provider response is too large");
+				const required = received + value.byteLength;
+				if (required > bytes.length) {
+					// Geometric growth bounds retained storage without keeping a list of tiny chunks
+					// or retaining arbitrary backing buffers belonging to the network implementation.
+					const grown = new Uint8Array(Math.min(maxBytes, Math.max(required, bytes.length * 2, 64 * 1024)));
+					grown.set(bytes.subarray(0, received));
+					bytes = grown;
+				}
+				bytes.set(value, received);
+				received = required;
+			}
+		} finally {
+			// Cleanup must not wait indefinitely for an uncooperative stream or mask the original error.
+			if (!completed) void reader.cancel().catch(() => {});
+			reader.releaseLock();
+		}
+	}
 	try {
-		return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+		return JSON.parse(new TextDecoder().decode(bytes.subarray(0, received))) as unknown;
 	} catch {
 		throw new Error(`Provider returned invalid JSON (HTTP ${response.status})`);
 	}

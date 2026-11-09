@@ -76,10 +76,12 @@ test("late success from abort-ignoring fetch/body is cancelled without success d
 			operation: "generate",
 			fetch: async () => {
 				calls++;
-				const response = Response.json({ data: [] });
-				if (phase === "fetch") controller.abort();
-				else response.arrayBuffer = async () => { controller.abort(); return new TextEncoder().encode('{"data":[]}').buffer; };
-				return response;
+				if (phase === "fetch") { controller.abort(); return Response.json({ data: [] }); }
+				return new Response(new ReadableStream({ pull(body) {
+					controller.abort();
+					body.enqueue(new TextEncoder().encode('{"data":[]}'));
+					body.close();
+				} }, { highWaterMark: 0 }));
 			},
 			onDiagnostic: async (record) => { records.push(record); return "unexpected.json"; },
 		}), (error: Error) => error.name === "AbortError");

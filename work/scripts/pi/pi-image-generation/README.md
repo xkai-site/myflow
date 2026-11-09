@@ -119,7 +119,7 @@ TUI 编辑需在向导中填写本地参考图路径，每行一个，支持拖�
 
 ### 实验能力
 
-默认只开放静态栅格输出与普通编辑。以下能力不能视为 Codex 后端或具体账户的已验证承诺：
+默认只开放静态栅格输出与普通编辑。Codex 后端不一定已开放完全能力：
 
 - **Markup**：实验性编辑，默认关闭。仅在已有配置的目标模型上显式设置 `nativeCapabilities.markup.enabled: true` 并重载；TUI 编辑参数可选图层，RPC 用 `--markup`。原图保持第一项，图层走独立字段，不混入参考图、不合成。图层必须是真实含透明像素的 PNG，原图与图层方向归一化后同尺寸，分别受字节/像素限制；二者分别编码为 PNG，不改变其余参考图顺序。
 - **SVG**：实验性矢量输出，默认关闭。两款 2.6 按模型启用 `nativeCapabilities.svg.enabled` 后可用 `--format svg`，仅生成；经严格静态 XML 白名单校验，拒绝脚本、事件、外部资源等，按原字节保存，不自动修复危险 XML。
@@ -128,18 +128,9 @@ TUI 编辑需在向导中填写本地参考图路径，每行一个，支持拖�
 
 实验能力不支持任意叠加：Markup 不与 GIF/SVG/流式混用，不开放 mask、prompt rewriter 或输出压缩参数。启用实验配置会允许真实请求，可能计费，不等于获得服务端授权或通过验收。SVG/GIF 仅显示文件信息及链接，终端不渲染 SVG、不播放动画。
 
-## 文件、安全与失败恢复
+## 文件与失败恢复
 
-文件保存在 **Pi 当前项目** `.pi/generated-images/`，不是插件目录；无自定义输出路径选项。文件名含时间、账户、模型及随机后缀，扩展名按真实格式；输出上限 32 MiB，实验 SVG 另限 2 MiB。不自动打开应用或生成 HTML。
-
-先校验完整响应，再通过临时文件和原子 rename 保存；失败或取消会回滚本次文件。请求格式、服务端格式/MIME 声明与真实字节分别检查，任一不一致即报错、不保存、不重试，不靠改后缀或转换格式掩盖问题。
-透明背景是请求意图：无 Alpha 通道时拒绝，有 Alpha 通道不证明存在透明像素；普通输出不是逐像素解码，效果需用户检查。
-
-TUI 显示保存路径、原图链接及可用时的宿主预览，通知只显示保存数量。支持链接的终端可 Ctrl+点击，否则复制路径。Kitty 非 PNG 预览依赖宿主 transcoder，无此能力时文字降级，不改写文件。
-历史视图校验路径、目录/文件身份、非符号链接、大小与实际内容后才提供链接；危险、缺失或篡改文件仅显示路径和警告，不修改/删除历史文件。校验只证明检查时符合限制，不能防止之后被外部修改。
-
-加载中可取消，界面立即关闭；请求发送前取消认证等待不会继续发图。已发送请求、读取或保存若未结算，仍保留忙碌保护，**不能用 `/reload` 绕过**。迟到结果会丢弃，底层结算后解锁；永久挂起需退出 Pi 终止本地执行。
-**请求可能消耗额度/计费，插件不自动重试。** 超时、断连、取消、下载或保存失败时上游仍可能已完成并计费；先检查本地结果及服务端状态，再决定是否手动重发。没有服务端任务查询或恢复下载命令。
+文件保存在 **Pi 当前项目** `.pi/generated-images/`
 
 | 现象 | 恢复要点 |
 | --- | --- |
@@ -169,10 +160,18 @@ npm run test:host
 模型顺序兼容检查（若环境变量原已设置，执行后恢复原值）：
 
 ```powershell
-$env:PI_IMAGE_TEST_REVERSE_MODELS = "1"
-npm test
-npm run test:host
-Remove-Item Env:PI_IMAGE_TEST_REVERSE_MODELS
+$previousReverseModels = Get-Item Env:PI_IMAGE_TEST_REVERSE_MODELS -ErrorAction SilentlyContinue
+try {
+    $env:PI_IMAGE_TEST_REVERSE_MODELS = "1"
+    npm test
+    npm run test:host
+} finally {
+    if ($null -ne $previousReverseModels) {
+        $env:PI_IMAGE_TEST_REVERSE_MODELS = $previousReverseModels.Value
+    } else {
+        Remove-Item Env:PI_IMAGE_TEST_REVERSE_MODELS -ErrorAction SilentlyContinue
+    }
+}
 ```
 
 倒序仅作用于内存模型目录，不改生产清单。Windows 无文件 symlink 权限时宿主测试显式模拟 lstat 拒绝分支，目录 junction 仍真实测试。
@@ -186,6 +185,6 @@ Remove-Item Env:PI_IMAGE_TEST_REVERSE_MODELS
 - [Images Edit Reference](https://developers.openai.com/api/reference/resources/images/methods/edit)
 - [Codex 官方源码](https://github.com/openai/codex)：仅供研究实际请求结构，当前客户端实现不是后端永久规则。
 
-模型能力、默认值与范围维护在 `models.jsonc`；客户端适配和安全边界维护在 `src/`、`extensions/`；回归维护在 `test/`；使用变化同步此 README。历史调查与执行过程交给 Git，不维护另一份协议或验收台账文档。
+模型能力、默认值与范围维护在 `models.jsonc`；客户端适配和安全边界维护在 `src/`、`extensions/`；回归维护在 `test/`；使用变化同步此 README。历史调查与执行过程交给 Git，禁止维护另一份协议或验收台账文档。
 
 许可证：MIT，见 [LICENSE](LICENSE)。
