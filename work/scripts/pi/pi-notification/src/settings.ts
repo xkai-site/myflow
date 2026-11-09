@@ -551,7 +551,6 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
 
   items.push(makeItem({ group: "基础", label: "启用提醒", path: "enabled", kind: "boolean" }));
   items.push(makeItem({ id: "reminders.completed", group: "提醒时机", label: "执行完成", path: "rules.runCompleted.enabled", kind: "boolean" }));
-  items.push(makeItem({ id: "reminders.waiting", group: "提醒时机", label: "需要我回复", path: "rules.waitingForUser.enabled", kind: "boolean" }));
   items.push(makeItem({
     group: "基础",
     label: "接收哪些重要程度的提醒",
@@ -574,6 +573,7 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
     patch: (value) => ({ kind: "compound", operations: failurePaths.map((path) => ({ kind: "path", path, value })) }),
     snapshot: (current) => ({ kind: "compound", operations: failurePaths.map((path) => ({ kind: "path", path, value: getPathValue(current, path) })) }),
   });
+  items.push(makeItem({ id: "reminders.waiting", group: "提醒时机", label: "需要我回复", path: "rules.waitingForUser.enabled", kind: "boolean" }));
   items.push({ ...makeItem({ group: "接收", label: "在哪里接收", path: "channels", kind: "collection", candidates: channelCandidates, labels: channelLabels, emptyLabel: "不投递" }),
     destinations: true,
     patch: (value) => ({ kind: "compound", operations: [
@@ -793,9 +793,9 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
         read: (current) => getPathValue(current.providers.find((entry) => entry.id === "email")?.options, optionPath),
         patch: (value) => ({ kind: "providerOption", id: "email", optionPath, value: list ? (Array.isArray(value) ? value : []) : value }),
         candidates: () => [],
-        format: (value) => Array.isArray(value) ? (value.length ? value.join(", ") : "（未配置）") : String(value ?? "（未配置）"),
+        format: (value) => Array.isArray(value) ? (value.length ? value.join(", ") : "（未配置）") : value === undefined || value === "" ? "（未配置）" : String(value),
         userPath: `providers.email.options.${optionPath}`,
-        inputHint: list ? "多个邮箱以逗号分隔，最多 50 个" : "邮箱地址 / 文本，最长 254 字符",
+        inputHint: list ? "最多 50 个收件地址，逗号分隔；留空清除" : optionPath === "from" ? "发件邮箱地址，最长 254 字符；留空清除" : "主题前缀，最长 254 字符；可留空",
         parseInput: (text) => {
           const value = text.trim();
           if (value.length > (list ? 12700 : 254) || /[\r\n\0]/.test(value)) return { ok: false, message: "输入过长或包含换行" };
@@ -901,7 +901,7 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
     label: "提醒时机",
     kind: "fields",
     group: "提醒时机",
-    summary: (config) => [config.rules.runCompleted.enabled ? "完成" : "", config.rules.runFailed.enabled || config.rules.compactFailed.enabled ? "失败" : "", config.rules.waitingForUser.enabled ? "等我回复" : ""].filter(Boolean).join("、") || "全部关闭",
+    summary: (config) => [config.rules.runCompleted.enabled ? "完成" : "", config.rules.runFailed.enabled || config.rules.compactFailed.enabled ? "失败" : "", config.rules.waitingForUser.enabled ? "等我回复" : "", config.rules.toolFailed.enabled ? "工具失败" : "", config.rules.runAborted.enabled ? "中止" : ""].filter(Boolean).join("、") || "全部关闭",
   },
   { id: "content", label: "内容与隐私", kind: "fields", group: "内容", summary: () => "耗时、会话名等", actions: [{ key: "action:preview", action: "preview" }] },
   {

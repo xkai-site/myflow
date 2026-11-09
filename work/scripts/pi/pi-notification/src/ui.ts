@@ -1,32 +1,16 @@
 /**
- * Settings UI.
+ * Notification control center and navigation controller.
+ * - ui-model.ts: effective state, email next steps, canonical pending changes and save scope.
+ * - ui-primitives.ts: native list/input rendering and the isolated batch-save review.
+ * - ui-secret.ts: bounded, masked credential input with no serializable secret state.
  *
- * Three levels, entered from a fixed home page (never a flat dump of every field):
- *  - the home page: the global switch, reminder occasions, destinations, a direct test action,
- *    and one progressive-disclosure entry; summaries keep common choices readable at a glance;
- *  - a category page: either the fields of one group (内容/免打扰/渠道/高级设置) or one row per
- *    notification rule;
- *  - the candidate list of one field, with fixed marker columns (two columns for focus, two for the
- *    current value); the trailing ` · 默认` is a separate channel and can coexist with the markers.
- *
- * Esc pops one level of a `history` stack, so the parent page and its focus come back exactly as
- * they were; the read-only `?` field details are part of the same stack.
- *
- * This module only renders and handles keys; persistence, activation and the silence checks
- * live in the command layer, so the component can be driven without a host.
- *
- * Deliberate choices:
- *  1. Marker cells carry no colour, so a marker appearing or disappearing never shifts text
- *     horizontally.
- *  2. The trailing ` · 默认` and the marker columns are given width before the value text;
- *     overflow truncates the value and never swallows a marker.
- *  3. Ctrl+S is consumed only while the component holds input; no global shortcut is
- *     registered, so it cannot collide with the host's own save binding.
- *  4. Space is the quick toggle (booleans on a page, the focused candidate in a candidate list);
- *     Enter is the explicit open/select, so a boolean can still be opened to read its source.
+ * Home is compact; advanced categories, per-rule candidates and source/restore details remain
+ * independently reachable. Esc restores the parent's exact focus. No fixed-height blank padding.
+ * All persistence, activation and silence checks stay in commands.ts; rendering never sends.
+ * Ctrl+S saves only the effective focused item, not a hovered candidate or the entire page.
  */
 
-import { CURSOR_MARKER, decodeKittyPrintable, Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Input, Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 import {
   CUSTOM_ROW_LABEL,
@@ -49,11 +33,13 @@ import {
   type SettingCategory,
   type SettingItem,
   type SettingValue,
-  QQ_MAIL_URL,
 } from "./settings.ts";
 import type { NotificationConfig, TestProgress, DeliveryResult } from "./types.ts";
 import { resolveChannels } from "./rules.ts";
 import { sanitizeError } from "./log.ts";
+import { controlStatus, emailSetup, pendingSettings, type SaveScope } from "./ui-model.ts";
+import { menuList, SaveReview, textInput } from "./ui-primitives.ts";
+import { SecretPrompt } from "./ui-secret.ts";
 
 /** Only the theme capabilities used here, as method signatures, to stay SDK-palette agnostic. */
 export interface SettingsTheme {
@@ -85,6 +71,9 @@ export interface SettingsHost {
   config(): NotificationConfig;
   /** Raw user file, used for the presence and value of sparse user defaults. */
   userRaw(): unknown;
+  runtimeState?(): { degraded?: boolean; configError?: boolean; quiet?: boolean; terminalIssue?: string };
+  /** One atomic sparse write, only the reviewed canonical leaves. */
+  saveChanges(items: readonly SettingItem[]): { ok: boolean; message: string };
   /**
    * Value this conversation's overlay set for the item, or undefined when Enter never touched it.
    * Presence decides "this conversation changed it"; comparing values cannot tell an override that
@@ -101,6 +90,7 @@ export interface SettingsHost {
   test(channels?: string[], onProgress?: (progress: TestProgress) => void): SettingsTestResult;
   testEmail(onProgress?: (progress: TestProgress) => void): SettingsTestResult;
   credentialStatus(): string;
+  canManageCredentials?(): boolean;
   saveCredential(value: string): { ok: boolean; message: string };
   deleteCredential(): { ok: boolean; message: string };
   openQqSettings(): { ok: boolean; message: string };
@@ -130,14 +120,13 @@ const DEFAULT_SUFFIX_MIN_WIDTH = 24;
 /** Trailing marker of a row that opens another page. */
 const OPEN_MARK = " ›";
 
-const FOOTER_KEY_HINTS = "Ctrl+T 测试通知 · 更多设置中查看状态与诊断";
-const STATUS_KEY_HINTS = "Ctrl+T 测试通知   Ctrl+R 重读   Ctrl+O 状态与诊断";
-
-const ACTION_LABELS: Record<"test" | "emailTest" | "emailEnable" | "credentialSave" | "credentialDelete" | "status" | "reload" | "search" | "preview", string> = {
+const ACTION_LABELS: Record<"saveAll" | "saveEmail" | "test" | "emailTest" | "emailEnable" | "credentialSave" | "credentialDelete" | "status" | "reload" | "search" | "preview", string> = {
+  saveAll: "保存本次修改为以后默认",
+  saveEmail: "5. 保存邮箱设置为默认",
   test: "发送测试通知",
-  emailTest: "发送邮箱测试",
-  emailEnable: "确认启用邮箱并加入统一接收方式",
-  credentialSave: "设置邮箱授权码（遮蔽输入）",
+  emailTest: "4. 发送邮箱测试",
+  emailEnable: "3. 确认启用邮箱并加入统一接收方式",
+  credentialSave: "2. 设置邮箱授权码（遮蔽输入）",
   credentialDelete: "移除已保存的邮箱授权码",
   status: "状态与诊断",
   reload: "重新读取配置",
@@ -156,7 +145,7 @@ type MenuRow =
   | { key: string; kind: "qqLink"; label: string }
   /** Read-only information row on the status page. */
   | { key: string; kind: "text"; text: string }
-  | { key: string; kind: "action"; action: "test" | "emailTest" | "emailEnable" | "credentialSave" | "credentialDelete" | "status" | "reload" | "search" | "preview" };
+  | { key: string; kind: "action"; action: "saveAll" | "saveEmail" | "test" | "emailTest" | "emailEnable" | "credentialSave" | "credentialDelete" | "status" | "reload" | "search" | "preview" };
 
 /** Pages that are a list of rows; `id` is stable so a refresh can rebuild the same page. */
 interface MenuPage {
@@ -170,13 +159,13 @@ interface MenuPage {
 type View =
   | MenuPage
   | { kind: "detail"; itemId: string; focus: number }
-  | { kind: "input"; itemId: string; buffer: string; error?: string }
-  | { kind: "secret"; buffer: string; error?: string }
+  | { kind: "input"; itemId: string; buffer: string; error?: string; editor?: Input }
+  | { kind: "secret"; prompt: SecretPrompt }
   | { kind: "secretConfirm"; focus: number }
   /** Read-only, pageable full field details; `a`/`d` run the restore actions. */
   | { kind: "help"; itemId: string; offset: number }
   /** Search over the complete field table; Enter opens a result even when it is otherwise hidden. */
-  | { kind: "search"; query: string; focus: number }
+  | { kind: "search"; query: string; focus: number; editor?: Input }
   /** Confirmation page for the destructive restore; default focus is cancel. */
   | { kind: "confirm"; itemId: string; focus: number; applyValue?: ItemValue; enableEmail?: boolean }
   /** Read-only example notification body. */
@@ -229,6 +218,44 @@ export class NotifySettingsComponent {
   private emailTestLabel?: string;
   private emailTestKey?: string;
   private credentialRevision = 0;
+  private saveReview?: SaveReview;
+  private hasFocus = false;
+  readonly capturesViewportInput = true;
+
+  get focused(): boolean { return this.hasFocus; }
+  set focused(value: boolean) {
+    this.hasFocus = value;
+    if (this.view?.kind === "input" || this.view?.kind === "search") this.editor().focused = value;
+    this.invalidate();
+  }
+
+  private editor(): Input {
+    if (this.view.kind !== "input" && this.view.kind !== "search") throw new Error("Not a text view");
+    const view = this.view;
+    view.editor ??= textInput(view.kind === "input" ? view.buffer : view.query);
+    view.editor.focused = this.hasFocus;
+    return view.editor;
+  }
+
+  private pending(scope: SaveScope = "all"): SettingItem[] {
+    return pendingSettings(this.host.config(), this.host.userRaw(), (item) => this.host.sessionOverride(item), scope);
+  }
+
+  private openSaveReview(scope: SaveScope): void {
+    const items = this.pending(scope);
+    if (!items.length) { this.report({ ok: true, message: "没有尚未保存的修改；当前值与以后默认一致。" }); return; }
+    this.saveReview = new SaveReview(items.map((item) => `${item.label}：${item.format(this.value(item))}`), this.keybindings, (save) => {
+      this.saveReview = undefined;
+      if (save) {
+        const result = this.host.saveChanges(items);
+        if (result.ok) this.summary.savedDefaults += items.length;
+        this.refresh();
+        this.report(result);
+      }
+    });
+    this.message = undefined;
+    this.invalidate(); this.requestRender();
+  }
 
   private emailStateKey(): string {
     const provider = this.host.config().providers.find((entry) => entry.id === "email");
@@ -242,9 +269,15 @@ export class NotifySettingsComponent {
     this.testGeneration++;
     this.unsubscribeTest?.();
     this.unsubscribeTest = undefined;
+    // Drop navigation references and scrub the credential-only buffer on custom UI teardown.
+    this.history = [];
+    if (this.view.kind === "secret") { this.view.prompt.clear(); this.view = this.buildEmailPage(); }
+    this.saveReview = undefined;
+    this.invalidate();
   }
 
   private startTest(emailOnly = false): void {
+    emailOnly ||= this.view.kind === "menu" && this.view.id === "email-config";
     this.unsubscribeTest?.();
     this.unsubscribeTest = undefined;
     const generation = ++this.testGeneration;
@@ -343,7 +376,8 @@ export class NotifySettingsComponent {
     rows.push({ key: "action:test", kind: "action", action: "test" });
     const more = SETTING_CATEGORIES.find((candidate) => candidate.id === "more");
     if (more) rows.push({ key: `category:${more.id}`, kind: "category", category: more });
-    return { kind: "menu", id: "home", title: "通知（修改仅本对话生效）", rows, focus: 0 };
+    rows.push({ key: "action:save-all", kind: "action", action: "saveAll" });
+    return { kind: "menu", id: "home", title: "通知控制中心", rows, focus: 0 };
   }
 
   private buildCategoryPage(category: SettingCategory): MenuPage {
@@ -365,7 +399,11 @@ export class NotifySettingsComponent {
     const { items, collapsed } = categoryPageItems(category, this.items, this.host.config());
     const channelItems = items;
     const rows: MenuRow[] = channelItems.map((item) => ({ key: `item:${item.id}`, kind: "field", item, label: item.label }));
-    if (category.id === "channels" && this.items.some((item) => item.id === "provider:email")) {
+    if (category.id === "channels" && !routingExceptions(this.host.config()).length) {
+      const index = rows.findIndex((row) => row.key === "item:routes.unify");
+      if (index >= 0) rows.splice(index, 1);
+    }
+    if (category.id === "channels" && this.items.some((item) => item.id === "provider:email:from")) {
       const state = emailReadiness(this.host.config(), this.host.credentialStatus() !== "未设置");
       const summary = `${state.label} · ${state.usedBy} 类提醒使用`;
       rows.push({ key: "email-config", kind: "emailConfig", label: "邮箱提醒", summary });
@@ -387,28 +425,17 @@ export class NotifySettingsComponent {
     return { kind: "menu", id: `subgroup:${category.id}`, title: label, rows, focus: 0 };
   }
 
+  private canManageCredentials(): boolean { return this.host.canManageCredentials?.() ?? process.platform === "win32"; }
+
   private buildEmailPage(): MenuPage {
     const rows: MenuRow[] = this.items.filter((item) => item.providerId === "email" && item.group === "邮箱")
-      .map((item) => ({ key: `item:${item.id}`, kind: "field" as const, item, label: item.label }));
-    const status = this.host.credentialStatus();
-    const credentialStatus = status === "未设置" ? "尚未设置"
-      : status.startsWith("已保存于") ? "已设置（Windows 凭据管理器）" : "已设置（兼容方式）";
-    rows.push({ key: "text:credential-status", kind: "text", text: `邮箱授权码：${credentialStatus}` });
-    if (process.platform === "win32") {
-      rows.push({ key: "action:credential-save", kind: "action", action: "credentialSave" });
-      rows.push({ key: "action:credential-delete", kind: "action", action: "credentialDelete" });
-    }
+      .map((item) => ({ key: `item:${item.id}`, kind: "field" as const, item, label: `1. ${item.label}` }));
+    if (this.canManageCredentials()) rows.push({ key: "action:credential-save", kind: "action", action: "credentialSave" });
     rows.push({ key: "action:email-enable", kind: "action", action: "emailEnable" });
-    const destinations = this.itemById("channels");
-    if (destinations) rows.push({ key: "item:channels", kind: "field", item: destinations, label: "接收方式（Ctrl+S 保存此项）" });
-    const readiness = emailReadiness(this.host.config(), this.host.credentialStatus() !== "未设置");
-    rows.push({ key: "text:email-readiness", kind: "text", text: `${this.emailTestKey === this.emailStateKey() ? this.emailTestLabel ?? readiness.label : readiness.label}；${readiness.usedBy} 类提醒使用邮箱` });
-    if (routingExceptions(this.host.config()).length) rows.push({ key: "item:routes.unify", kind: "field", item: this.itemById("routes.unify")!, label: "自定义例外：可确认归一" });
-    rows.push({ key: "qq:settings", kind: "qqLink", label: "QQ 邮箱网页版设置 ↗" });
     rows.push({ key: "action:email-test", kind: "action", action: "emailTest" });
-    rows.push({ key: "text:email-password-note", kind: "text", text: "需要 QQ 邮箱授权码（不是登录密码）。" });
-    rows.push({ key: "text:email-smtp-note", kind: "text", text: "在 QQ 邮箱「设置 → 帐户」开启 SMTP 并生成授权码。" });
-    rows.push({ key: "text:email-platform-note", kind: "text", text: "界面安全保存仅支持 Windows；其它系统请按安装说明配置兼容方式。" });
+    rows.push({ key: "action:save-email", kind: "action", action: "saveEmail" });
+    rows.push({ key: "qq:settings", kind: "qqLink", label: "获取授权码：QQ 邮箱设置 ↗" });
+    if (this.canManageCredentials() && this.host.credentialStatus() !== "未设置") rows.push({ key: "action:credential-delete", kind: "action", action: "credentialDelete" });
     return { kind: "menu", id: "email-config", title: "邮箱提醒", rows, focus: 0 };
   }
 
@@ -491,7 +518,15 @@ export class NotifySettingsComponent {
     const row = view.rows[view.focus];
     if (!row) return;
     if (row.kind === "field") {
-      this.push({ kind: "detail", itemId: row.item.id, focus: this.initialDetailFocus(row.item) });
+      if ((view.id === "home" || view.id === "category:rules") && row.item.kind === "boolean") {
+        this.commit(row.item, this.value(row.item) !== true, false);
+        this.requestRender();
+        return;
+      }
+      if (view.id === "email-config" && row.item.providerOptionPath) {
+        const value = this.value(row.item);
+        this.push({ kind: "input", itemId: row.item.id, buffer: Array.isArray(value) ? value.join(", ") : String(value ?? "") });
+      } else this.push({ kind: "detail", itemId: row.item.id, focus: this.initialDetailFocus(row.item) });
       return;
     }
     if (row.kind === "rule") {
@@ -515,8 +550,12 @@ export class NotifySettingsComponent {
       return;
     }
     if (row.kind === "text") return;
+    if (row.action === "saveAll" || row.action === "saveEmail") {
+      this.openSaveReview(row.action === "saveAll" ? "all" : "email");
+      return;
+    }
     if (row.action === "credentialSave") {
-      this.push({ kind: "secret", buffer: "" });
+      this.push({ kind: "secret", prompt: new SecretPrompt() });
       return;
     }
     if (row.action === "credentialDelete") {
@@ -612,28 +651,43 @@ export class NotifySettingsComponent {
     }
     this.contentWidth = content;
     const lines: string[] = [];
-    lines.push(truncateToWidth(this.theme.fg("accent", this.theme.bold(this.titleText())), content));
-    lines.push("");
+    lines.push(truncateToWidth(this.theme.fg("accent", this.theme.bold(this.saveReview ? "保存为以后默认 · 确认范围" : this.titleText())), content));
+    if (this.saveReview) return [lines[0], ...this.saveReview.render(content, this.theme)];
+    lines.push(...this.contextLines(content));
     lines.push(...this.bodyLines(content));
-    while (lines.length < 2 + BODY_ROWS) lines.push("");
     lines.push(...this.helpLines(content));
-    lines.push(this.hintLine(content));
+    const position = this.positionInfo();
+    if (position && !(this.view.kind === "menu")) lines.push(this.theme.fg("dim", position));
     for (const line of this.restrictionLines(content)) lines.push(line);
-    for (const hint of this.footerHints()) lines.push(truncateToWidth(this.theme.fg("dim", hint), content));
+    for (const hint of this.footerHints(content)) lines.push(...wrapTextWithAnsi(this.theme.fg("dim", hint), content));
     const message = this.message;
     const paint = message ? this.colorForTone(message.tone) : (text: string) => this.theme.fg("dim", text);
-    const fieldFocused = this.focusedFieldItem() !== undefined && (this.view.kind === "menu" || this.view.kind === "detail");
-    const messageText = message
-      ? message.text
-      : fieldFocused
-        ? "Enter 修改本次对话；Ctrl+S 设为以后默认"
-        : "";
+    const messageText = message?.text ?? "";
     // Bounded and wrapped, so the item name, scope and failure text stay readable without a long
     // message pushing the list off screen.
-    for (const line of this.boundedWrap(messageText, content, 3)) lines.push(truncateToWidth(paint(line), content));
+    if (messageText) for (const line of this.boundedWrap(messageText, content, 3)) lines.push(truncateToWidth(paint(line), content));
     this.cachedWidth = width;
-    this.cachedLines = lines;
+    this.cachedLines = lines.map((line) => truncateToWidth(line, content));
     return this.cachedLines;
+  }
+
+  private contextLines(width: number): string[] {
+    if (this.view.kind !== "menu") return [];
+    const config = this.host.config();
+    const lines: string[] = [];
+    if (this.view.id === "home") {
+      const state = controlStatus(config, { ...this.host.runtimeState?.(), restrictions: this.host.restrictions(), hasCredential: this.host.credentialStatus() !== "未设置" });
+      lines.push(...wrapTextWithAnsi(this.theme.fg(state.tone, `当前：${state.label}`), width));
+      for (const note of state.notes) lines.push(...wrapTextWithAnsi(this.theme.fg("warning", note), width));
+      lines.push(...wrapTextWithAnsi(this.theme.fg("dim", `修改仅本对话即时生效 · ${this.pending().length} 项尚未保存`), width));
+    }
+    if (this.view.id === "email-config") {
+      const setup = emailSetup(config, this.host.credentialStatus() !== "未设置", this.emailTestKey === this.emailStateKey() ? this.emailTestLabel : undefined, this.pending("email").length);
+      for (const text of [setup.conditions, `下一步：${setup.next}`, `测试：${setup.test}`]) lines.push(...wrapTextWithAnsi(this.theme.fg("muted", text), width));
+      if (!this.canManageCredentials()) lines.push(...wrapTextWithAnsi(this.theme.fg("dim", "授权码：用 PI_NOTIFY_QQ_SMTP_AUTH_CODE 注入；界面安全存储仅支持 Windows。"), width));
+      if (routingExceptions(config).length) lines.push(...wrapTextWithAnsi(this.theme.fg("warning", "有提醒单独设置接收方式；启用邮箱不会改写这些例外。"), width));
+    }
+    return lines;
   }
 
   /**
@@ -657,7 +711,7 @@ export class NotifySettingsComponent {
    * Footer keys available for the current focus: a category/rule/text row cannot be saved or
    * toggled, so its footer does not advertise those keys.
    */
-  private footerHints(): string[] {
+  private footerHints(width: number): string[] {
     const view = this.view;
     if (view.kind === "input") return ["Enter 应用   Esc 取消"];
     if (view.kind === "secret") return ["输入不显示明文   Enter 保存到 Windows 凭据管理器   Esc 取消"];
@@ -665,15 +719,21 @@ export class NotifySettingsComponent {
     if (view.kind === "search") return ["输入以筛选   ↑↓ 选择   Enter 打开   Esc 返回"];
     if (view.kind === "confirm") return ["↑↓ 选择   Enter 确认   Esc 取消（默认取消）"];
     if (view.kind === "preview") return ["↑↓ 滚动   Esc 返回"];
-    if (view.kind === "help") return ["a 沿用以后默认   d 恢复内置默认   ↑↓ 滚动   Esc 返回", FOOTER_KEY_HINTS];
-    if (view.kind === "menu" && view.id === "status") return ["↑↓ 滚动   Enter 重读配置   Esc 返回", STATUS_KEY_HINTS];
+    if (view.kind === "help") return ["a 沿用以后默认 · d 恢复内置默认", "↑↓ 滚动 · Esc 返回"];
+    if (view.kind === "menu" && view.id === "status") return ["↑↓ / PgUp/PgDn 滚动 · Esc 返回", "Ctrl+R 重读 · Ctrl+T 测试通知"];
     if (view.kind === "menu" && view.rows[view.focus]?.kind === "rule") {
-      return ["↑↓ 移动   Space 开关提醒   Enter 详细设置   Esc 返回", FOOTER_KEY_HINTS];
+      return ["↑↓ 移动 · Space 开关 · Enter 详情 · Esc 返回"];
     }
     if (view.kind === "menu" && view.rows[view.focus]?.kind !== "field") {
-      return ["↑↓ 移动   Enter 打开 / 执行   Esc 返回", FOOTER_KEY_HINTS];
+      return ["↑↓ 移动 · Enter 打开 / 执行 · Esc 返回", ...(view.id === "home" ? ["/ 搜索 · Ctrl+T 测试通知 · Ctrl+O 诊断"] : [])];
     }
-    return ["↑↓ 移动   Enter 修改   Space 快速切换   Esc 返回", "Ctrl+S 设为以后默认"];
+    const item = this.focusedFieldItem();
+    if (view.kind === "menu" && (view.id === "home" || view.id === "category:rules") && item?.kind === "boolean") {
+      return ["↑↓ 移动 · Enter/Space 开关 · Esc 返回", "Ctrl+S 设为以后默认 · ? 来源与恢复"];
+    }
+    const toggle = item?.kind === "boolean" ? "Space 开关" : this.view.kind === "detail" && item?.kind === "collection" ? "Space 多选" : "";
+    if (width < 50) return ["↑↓ 移动 · Enter 修改 · Esc 返回", ...(toggle ? [toggle] : []), "Ctrl+S 设为以后默认 · ? 来源与恢复"];
+    return [`↑↓ 移动 · Enter 修改${toggle ? ` · ${toggle}` : ""} · Esc 返回`, "Ctrl+S 设为以后默认 · ? 来源与恢复"];
   }
 
   /**
@@ -696,16 +756,15 @@ export class NotifySettingsComponent {
     if (view.kind === "secretConfirm") return "移除邮箱授权码";
     const item = this.itemById(view.itemId);
     if (!item) return "通知";
-    if (view.kind === "input") return "自定义输入";
+    if (view.kind === "input") return `${item.providerOptionPath ? "填写" : "修改"}${item.label}`;
     if (view.kind === "help") return `字段说明 · ${item.label}`;
     if (view.kind === "confirm") return `${view.applyValue === undefined ? "恢复默认" : "确认应用（仅本对话）"} · ${item.label}`;
     return item.label;
   }
 
   /**
-   * Short summary under the body: the full name, the current value and where it comes from. The
-   * complete three layers live in the pageable `?` field-details view, so a narrow terminal never
-   * loses them.
+   * Only the source below a field; do not repeat its label/value or the keyboard footer.
+   * Full three-layer details remain pageable via `?`.
    */
   private helpLines(width: number): string[] {
     const view = this.view;
@@ -720,9 +779,8 @@ export class NotifySettingsComponent {
     }
     const item = this.focusedFieldItem();
     if (item) {
-      const current = item.format(this.value(item));
-      const source = this.sessionValue(item) === undefined ? "使用以后默认" : this.sessionValue(item) === "partial" ? "部分仅本对话修改" : "仅本对话修改";
-      lines.push(`${item.label} · 当前 ${current} · ${source} · ? 查看详情`);
+      const source = this.sessionValue(item) === undefined ? "以后默认" : this.sessionValue(item) === "partial" ? "部分本对话覆盖" : "本对话覆盖";
+      if (!(view.kind === "menu" && view.id === "home")) lines.push(`来源：${source}`);
     }
     if (lines.length === 0) return [];
     return this.dim(this.boundedWrap(lines.join("  "), width, 3), width);
@@ -807,26 +865,6 @@ export class NotifySettingsComponent {
     return rows;
   }
 
-  private hintLine(width: number): string {
-    const hints: string[] = [];
-    // Actionable hints go first so they survive truncation on a narrow terminal; the position
-    // counter is informational and is pushed last.
-    if (this.focusedFieldItem() && (this.view.kind === "menu" || this.view.kind === "detail")) hints.push("? 字段详情");
-    if (this.view.kind === "menu" && this.view.rows[this.view.focus]?.kind === "field") hints.push("Space 快速切换");
-    if (this.view.kind === "menu" && this.view.rows[this.view.focus]?.kind === "rule") hints.push("Space 开关提醒");
-    if (this.view.kind === "detail") {
-      const item = this.itemById(this.view.itemId);
-      if (item?.kind === "collection") hints.push("集合字段：Enter/Space 切换成员（可多选）");
-    }
-    if (this.view.kind === "help") hints.push("a 沿用以后默认 · d 恢复内置默认 · ↑↓ 滚动");
-    if (this.view.kind === "search") hints.push("输入以筛选 · Enter 打开结果 · Esc 返回");
-    if (this.view.kind === "confirm") hints.push("默认取消：Enter 取消，↓ 再选确认恢复");
-    if (this.view.kind === "preview") hints.push("示例，不会发送 · ↑↓ 滚动 · Esc 返回");
-    const position = this.positionInfo();
-    if (position) hints.push(position);
-    return truncateToWidth(this.theme.fg("dim", hints.join("   ")), width);
-  }
-
   /** Position hint, present only when the list overflows; it never takes row width. */
   private positionInfo(): string | undefined {
     const total = this.totalRows();
@@ -891,7 +929,7 @@ export class NotifySettingsComponent {
     if (view.kind !== "search") return [];
     const results = this.searchResults();
     const lines: string[] = [
-      truncateToWidth(this.theme.fg("accent", `搜索：${view.query}`) + CURSOR_MARKER, width),
+      ...this.editor().render(width),
       truncateToWidth(this.theme.fg("dim", results.length === 0 ? "没有匹配的设置" : `${results.length} 项匹配（含当前不生效的字段）`), width),
     ];
     const rows = results.map((item, index) => {
@@ -954,8 +992,8 @@ export class NotifySettingsComponent {
   private menuLines(width: number): string[] {
     const view = this.view;
     if (view.kind !== "menu") return [];
-    const rows = view.rows.map((row, index) => this.menuRow(row, index === view.focus, width));
-    return this.window(rows, this.centeredScroll(view.focus, rows.length));
+    const labels = view.rows.map((row) => this.menuRow(row, false, Math.max(5, width)).slice(2));
+    return menuList(labels, view.focus, width, BODY_ROWS, this.theme);
   }
 
   private detailLines(width: number): string[] {
@@ -977,10 +1015,7 @@ export class NotifySettingsComponent {
   private secretLines(width: number): string[] {
     const view = this.view;
     if (view.kind !== "secret") return [];
-    const lines = ["授权码只保存在 Windows 凭据管理器，不写入配置、会话或日志。",
-      `› ${"●".repeat(Math.min(view.buffer.length, Math.max(0, width - 3)))}${CURSOR_MARKER}`];
-    if (view.error) lines.push(view.error);
-    return lines.flatMap((line) => wrapTextWithAnsi(line, Math.max(1, width))).slice(0, BODY_ROWS);
+    return view.prompt.render(width, this.hasFocus);
   }
 
   private secretConfirmLines(width: number): string[] {
@@ -1004,8 +1039,7 @@ export class NotifySettingsComponent {
         lines.push(truncateToWidth(this.theme.fg("muted", line), width));
       }
     }
-    const prefix = this.theme.fg("accent", "› ");
-    lines.push(`${prefix}${truncateToWidth(view.buffer, Math.max(1, width - 2))}${CURSOR_MARKER}`);
+    lines.push(...this.editor().render(width));
     if (view.error) {
       for (const line of wrapTextWithAnsi(view.error, width)) lines.push(truncateToWidth(this.theme.fg("error", line), width));
     }
@@ -1037,11 +1071,13 @@ export class NotifySettingsComponent {
     const focus = FOCUS_CELL(focused);
     const mark = this.openMark(row);
     if (row.kind === "action") {
-      return truncateToWidth(`${focus}${ACTION_LABELS[row.action]}${mark}`, width);
+      const scope = row.action === "saveAll" ? "all" : row.action === "saveEmail" ? "email" : undefined;
+      const label = scope ? `${ACTION_LABELS[row.action]} · ${this.pending(scope).length} 项` : ACTION_LABELS[row.action];
+      return truncateToWidth(`${focus}${label}${mark}`, width);
     }
     if (row.kind === "qqLink") {
       const label = truncateToWidth(row.label, Math.max(0, width - 2));
-      return `${focus}\x1b[94m\x1b]8;;${QQ_MAIL_URL}\x1b\\${label}\x1b]8;;\x1b\\\x1b[39m`;
+      return `${focus}${label}`;
     }
     if (row.kind === "text") {
       return truncateToWidth(`${focus}${row.text}`, width);
@@ -1065,7 +1101,7 @@ export class NotifySettingsComponent {
       // A field's current value is its headline: the value keeps its room and the label yields.
       const head = `${focus}${label}`;
       const suffix = `${gap}${summary}`;
-      const available = width - visibleWidth(suffix) - visibleWidth(mark);
+      const available = Math.max(Math.min(visibleWidth(head), Math.floor(width * 0.55)), width - visibleWidth(suffix) - visibleWidth(mark));
       const text = visibleWidth(head) > available ? truncateToWidth(head, Math.max(3, available), "…") : head;
       return truncateToWidth(`${text}${suffix}${mark}`, width);
     }
@@ -1100,7 +1136,8 @@ export class NotifySettingsComponent {
     if (visibleWidth(label) > room) label = truncateToWidth(label, room, "…");
     const head = `${FOCUS_CELL(index === focusIndex)}${CURRENT_CELL(isCurrent)}${label}`;
     const pad = Math.max(1, width - reserved - visibleWidth(head));
-    return truncateToWidth(`${head}${" ".repeat(pad)}${suffix}`, width);
+    const line = truncateToWidth(`${head}${" ".repeat(pad)}${suffix}`, width);
+    return index === focusIndex ? this.theme.fg("accent", line) : line;
   }
 
   /** True when this candidate is the saved user default; collections match by membership. */
@@ -1150,6 +1187,11 @@ export class NotifySettingsComponent {
 
   handleInput(data: string): void {
     if (this.closed) return;
+    if (this.saveReview) {
+      this.saveReview.handleInput(data);
+      this.invalidate(); this.requestRender();
+      return;
+    }
     if (this.view.kind === "secret") {
       this.handleSecretInput(data);
       return;
@@ -1242,15 +1284,10 @@ export class NotifySettingsComponent {
     else if (this.keybindings.matches(data, "tui.select.confirm")) {
       const item = results[view.focus];
       if (item) this.push({ kind: "detail", itemId: item.id, focus: this.initialDetailFocus(item) });
-    } else if (matchesKey(data, Key.backspace) || data === "\x7f" || data === "\b") {
-      this.setSearchQuery([...view.query].slice(0, -1).join(""));
     } else {
-      const printable = decodeKittyPrintable(data) ?? data;
-      const clean = [...printable].filter((character) => {
-        const code = character.charCodeAt(0);
-        return code >= 32 && code !== 0x7f;
-      }).join("");
-      if (clean !== "") this.setSearchQuery(view.query + clean);
+      const editor = this.editor();
+      editor.handleInput(data);
+      this.setSearchQuery(editor.getValue());
     }
   }
 
@@ -1292,7 +1329,11 @@ export class NotifySettingsComponent {
             ...patchOperations(item.patch(value)), { kind: "providers", id: "email", value: true },
           ] }) } : item;
           this.commit(target, view.applyValue, false);
-        } else this.report(this.host.restoreBuiltinDefault(item));
+        } else {
+          const result = this.host.restoreBuiltinDefault(item);
+          this.refresh();
+          this.report(result);
+        }
         this.requestRender();
       }
     }
@@ -1417,7 +1458,9 @@ export class NotifySettingsComponent {
     if (data === "a") {
       // “follow the user default again”: clears only this conversation's override.
       if (!item) return;
-      this.report(this.host.followUserDefault(item));
+      const result = this.host.followUserDefault(item);
+      this.refresh();
+      this.report(result);
       this.requestRender();
       return;
     }
@@ -1440,29 +1483,16 @@ export class NotifySettingsComponent {
   }
 
   private handleSecretInput(data: string): void {
-    const view = this.view;
-    if (view.kind !== "secret") return;
-    if (this.keybindings.matches(data, "tui.select.cancel")) { this.pop(); return; }
-    if (this.keybindings.matches(data, "tui.select.confirm") || data === "\n") {
-      if (!view.buffer || view.buffer.length > 128) {
-        this.view = { ...view, error: "请输入 1–128 位授权码" };
-        this.invalidate(); this.requestRender();
-        return;
-      }
-      const result = this.host.saveCredential(view.buffer);
+    if (this.view.kind !== "secret") return;
+    const event = this.view.prompt.handleInput(data, this.keybindings);
+    if (event.cancelled) { this.pop(); return; }
+    if (event.submitted !== undefined) {
+      const result = this.host.saveCredential(event.submitted);
       if (result.ok) this.credentialRevision++;
-      this.pop(); // Drop the only UI reference to the secret, including on failure.
-      if (this.view.kind === "menu") this.view = this.rebuildPage(this.view);
+      this.pop();
+      this.refresh();
       this.report(result);
       return;
-    }
-    if (matchesKey(data, Key.backspace) || data === "\x7f" || data === "\b") {
-      this.view = { kind: "secret", buffer: view.buffer.slice(0, -1) };
-    } else {
-      const printable = decodeKittyPrintable(data) ?? (data.startsWith("\x1b") ? "" : data);
-      if (/^[\x21-\x7e]+$/.test(printable) && view.buffer.length + printable.length <= 128) {
-        this.view = { kind: "secret", buffer: view.buffer + printable };
-      }
     }
     this.invalidate(); this.requestRender();
   }
@@ -1512,22 +1542,12 @@ export class NotifySettingsComponent {
       this.requestRender();
       return;
     }
-    if (matchesKey(data, Key.backspace) || data === "\x7f" || data === "\b") {
-      this.view = { ...view, buffer: [...view.buffer].slice(0, -1).join(""), error: undefined };
-      this.invalidate();
-      this.requestRender();
-      return;
-    }
-    const printable = decodeKittyPrintable(data) ?? data;
-    const clean = [...printable].filter((character) => {
-      const code = character.charCodeAt(0);
-      return code >= 32 && code !== 0x7f;
-    }).join("");
-    if (clean !== "") {
-      this.view = { ...view, buffer: view.buffer + clean, error: undefined };
-      this.invalidate();
-      this.requestRender();
-    }
+    const editor = this.editor();
+    editor.handleInput(data);
+    view.buffer = editor.getValue();
+    view.error = undefined;
+    this.invalidate();
+    this.requestRender();
   }
 
   /** Enter: submits the value; collection kinds are turned into an array by the callers. */

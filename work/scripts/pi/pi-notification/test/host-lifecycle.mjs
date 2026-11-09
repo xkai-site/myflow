@@ -899,6 +899,14 @@ function routeToItem(settingsModule, items, id, config) {
 /** Down-presses per page, with Enter between pages; `open` adds the Enter that opens the field. */
 function keysAlongRoute(settingsModule, items, id, { open, after, close = true, config = configModule.defaultConfig() }) {
   const keys = [];
+  const item = items.find((candidate) => candidate.id === id);
+  // Daily switches now toggle in place. Use the expert search path when a regression specifically
+  // needs to hover a candidate without applying it (e.g. the Ctrl+S isolation contract).
+  if (open && (id === "enabled" || item?.group === "提醒时机")) {
+    keys.push("/", id, K.enter, ...after);
+    if (close) keys.push(...CLOSE);
+    return keys;
+  }
   const route = routeToItem(settingsModule, items, id, config);
   route.forEach((downs, index) => {
     for (let step = 0; step < downs; step += 1) keys.push(K.down);
@@ -1316,6 +1324,44 @@ await step("J13d 清空最后一个覆盖后 /reload 不复活旧值", async () 
   assert.ok(reloaded.plugin.some((row) => row.event === "config_loaded"), "reload 应重读配置");
   assert.equal((await overlayHost.prompt()).deliveries.length, 1, "reload 后旧覆盖不得复活");
   assert.deepEqual(overlayHost.runtimeErrors, []);
+});
+
+await step("J13e 控制中心批量保存：真实命令事务、范围取消、损坏保护与零外发", async () => {
+  const driver = createUiDriver();
+  const host = await makeHost({ label: "batch-defaults", extensions: [PROBE_ENTRY, PLUGIN_ENTRY], mode: "tui", userConfig: NO_COALESCE, driver });
+  const drive = async (keys) => { driver.setKeys(keys); return host.command("/notify"); };
+  const saveRow = Array(5).fill(K.down);
+  const module = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "settings.ts")).href);
+  const items = module.buildSettingItems(configModule.loadConfig({ agentDir: host.agentDir }).config);
+  try {
+    const before = fs.readFileSync(host.userConfigPath, "utf8");
+    await drive(keysAlongRoute(module, items, "content.includeCost", { open: true, after: [K.down, K.enter] }));
+    await drive([...saveRow, K.enter, K.enter, K.esc]);
+    assert.equal(fs.readFileSync(host.userConfigPath, "utf8"), before, "默认确认必须取消");
+    const saved = await drive([...saveRow, K.enter, K.down, K.enter, K.esc]);
+    assert.equal(host.readUserConfigRaw().content.includeCost, false);
+    assert.ok(saved.plugin.some((entry) => entry.event === "notify_defaults_saved"));
+    assert.equal(saved.deliveries.length, 0);
+    assert.match(driver.renders.at(-1).join(""), /0 项尚未保存/);
+    await drive(keysAlongRoute(module, items, "enabled", { open: true, after: [K.down, K.enter] }));
+    const savedFile = fs.readFileSync(host.userConfigPath, "utf8");
+    const previousSilence = process.env.PI_NOTIFY_DISABLE;
+    process.env.PI_NOTIFY_DISABLE = "1";
+    try {
+      const silenced = await drive([...saveRow, K.enter, K.down, K.enter, K.esc]);
+      assert.equal(silenced.deliveries.length, 0);
+      assert.equal(fs.readFileSync(host.userConfigPath, "utf8"), savedFile);
+      assert.match(driver.renders.map((frame) => frame.join("")).join(""), /强制静默期间不能保存/);
+    } finally {
+      if (previousSilence === undefined) delete process.env.PI_NOTIFY_DISABLE; else process.env.PI_NOTIFY_DISABLE = previousSilence;
+    }
+    await drive(keysAlongRoute(module, items, "content.includeDuration", { open: true, after: [K.down, K.enter] }));
+    fs.writeFileSync(host.userConfigPath, "{broken-config");
+    await drive([...saveRow, K.enter, K.down, K.enter, K.esc]);
+    assert.equal(fs.readFileSync(host.userConfigPath, "utf8"), "{broken-config");
+    assert.match(driver.renders.map((frame) => frame.join("")).join(""), /批量保存失败/);
+    assert.deepEqual(host.runtimeErrors, []);
+  } finally { await host.dispose(); }
 });
 
 await step("J14 非 TUI 模式守卫：print/json/rpc 都不打开组件、不写盘、凭据不外泄", async () => {

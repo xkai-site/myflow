@@ -37,6 +37,7 @@ import { resolveQqCredential, saveQqCredential, deleteQqCredential } from "./mai
 import { createDefaultTerminalIo, selectTerminalChannel } from "./providers/terminal.ts";
 import { evaluateRunOutcome, resolveChannels } from "./rules.ts";
 import { testBlockMessage, emailReadiness, buildSettingItems, channelLabel, patchOperations, applyOverlay, applySettingPatch, settingSnapshot, settingUserFilePatch, itemRemovals, builtinDefaultValue, clearItemOverride, emailTestBlockReason, QQ_MAIL_URL, sessionOverrideValue, type SessionOverlay } from "./settings.ts";
+import { pendingPatch } from "./ui-model.ts";
 import { NotifySettingsComponent, type ItemValue, type NotifySettingsSummary, type SettingsHost, type SettingsRestriction } from "./ui.ts";
 import type { ApiSnapshot, Logger, NotificationConfig, NotificationService, RunOutcome, RunSummary, TestProgress } from "./types.ts";
 
@@ -184,7 +185,7 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
     const checked = applyOverlay(deps.config(), next);
     if (checked.problems.length) return { ok: false, message: `未应用「${name(item)}」：${checked.problems.map((problem) => sanitizeError(`${problem.path}: ${problem.message}`)).join(";")}` };
     deps.setOverlay(next);
-    return { ok: true, message: `已应用（仅本对话）「${name(item)}」= ${item.format(item.read(deps.config()))}；Ctrl+S 可设为以后默认` };
+    return { ok: true, message: `已应用（仅本对话）「${name(item)}」= ${item.format(item.read(deps.config()))}` };
   };
 
   const sendTest = (channels: string[], onProgress?: (progress: TestProgress) => void) => {
@@ -203,6 +204,11 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
   return {
     config: () => deps.config(),
     userRaw: () => deps.userRaw(),
+    runtimeState: () => {
+      const terminal = selectTerminalChannel(createDefaultTerminalIo().environment());
+      return { degraded: deps.configLoad().degraded, configError: deps.configLoad().errors.length > 0, quiet: deps.service().isQuietHours(),
+        terminalIssue: terminal.channel === "none" ? terminal.reason : undefined };
+    },
     sessionOverride: (item) => sessionOverrideValue(deps.overlay(), item),
     restrictions,
 
@@ -227,7 +233,24 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
       }
       deps.reload(ctx); // Re-read only after a successful write, so both layers refresh together.
       deps.log.record({ event: "notify_default_saved", item: item.id, path: item.paths ?? item.userPath });
-      return { ok: true, message: `已保存为默认「${name(item)}」= ${item.format(item.read(deps.config()))}（作用范围：以后默认；其他本对话修改未保存；${sanitize(userConfigPath(deps.agentDir()), 2000)}）` };
+      return { ok: true, message: `已保存为默认「${name(item)}」= ${item.format(item.read(deps.config()))}（以后默认；其他本对话修改未保存）` };
+    },
+
+    saveChanges(items) {
+      if (!items.length) return { ok: true, message: "没有尚未保存的修改。" };
+      if (forcedOff(deps) && items.some((item) => item.id === "enabled" || (item.providerId && !item.providerOptionPath && item.read(deps.config()) === true))) {
+        return { ok: false, message: "未保存：强制静默期间不能保存总开关或开启渠道；其他修改仍只对本对话生效。" };
+      }
+      const current = deps.config();
+      const patch = pendingPatch(items, current);
+      const result = writeUserDefault(deps.agentDir(), (raw) => settingUserFilePatch(raw, current, patch));
+      if (!result.ok) {
+        deps.log.record({ event: "notify_defaults_write_failed", items: items.map((item) => item.id) });
+        return { ok: false, message: "批量保存失败：用户文件未改动，本对话修改仍保留。请修复配置或写入权限后重试（Ctrl+O 诊断）。" };
+      }
+      deps.reload(ctx);
+      deps.log.record({ event: "notify_defaults_saved", items: items.map((item) => item.id) });
+      return { ok: true, message: `已保存 ${items.length} 项为以后默认；本对话继续生效，其他已打开对话不变。` };
     },
 
     testEmail(onProgress) {
@@ -236,6 +259,8 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
       if (reason) return { ok: false, message: `邮箱测试未发送：${reason}` };
       return sendTest(["email"], onProgress);
     },
+
+    canManageCredentials: () => process.platform === "win32",
 
     credentialStatus() {
       const source = resolveQqCredential().source;
@@ -376,12 +401,7 @@ export async function handleNotifyCommand(args: string, ctx: ExtensionCommandCon
       requestRender: () => tui.requestRender(),
       done,
     });
-    return {
-      render: (width: number) => component.render(width),
-      handleInput: (data: string) => component.handleInput(data),
-      invalidate: () => component.invalidate(),
-      dispose: () => component.dispose(),
-    };
+    return component;
   });
   deps.log.record({
     event: "notify_settings_closed",

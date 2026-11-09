@@ -19,6 +19,7 @@ const PLUGIN_DIR = fileURLToPath(new URL("..", import.meta.url));
 const patch = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "patch.ts")).href);
 const settings = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "settings.ts")).href);
 const config = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "config.ts")).href);
+const uiModel = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "ui-model.ts")).href);
 
 const failures = [];
 async function step(name, run) {
@@ -433,6 +434,29 @@ await step("S16 显式归一只修改六个 channels；旧元数据不猜测归�
   assert.deepEqual(settings.clearItemOverride(overlay, item).patch, { rules: { runFailed: { enabled: false, level: "warning" } } });
   const legacy = { ...settings.emptyOverlay(), providers: { email: true } };
   assert.equal(settings.clearItemOverride(legacy, itemOf("channels")).providers.email, true);
+});
+
+await step("S17 邮箱批量补丁只写已审查叶字段，不快照无关渠道/API/显式例外", () => {
+  const raw = { providers: [{ id: "terminal", type: "terminal", enabled: true, options: {} }, { id: "debug", type: "debug", enabled: true, options: { tag: "keep" }, future: 7 }],
+    api: { enabled: false }, rules: { runFailed: { channels: [] } } };
+  const base = config.mergeConfig(config.defaultConfig(), raw, "test").config;
+  const items = settings.buildSettingItems(base);
+  const find = (id) => items.find((item) => item.id === id);
+  let overlay = settings.emptyOverlay();
+  for (const [id, value] of [["channels", ["terminal", "email"]], ["provider:email:from", "fake@qq.com"], ["provider:terminal", false], ["provider:debug", false]]) {
+    overlay = settings.applySettingPatch(overlay, find(id), find(id).patch(value));
+  }
+  const current = settings.applyOverlay(base, overlay).config;
+  const pending = uiModel.pendingSettings(current, raw, (item) => settings.sessionOverrideValue(overlay, item), "email");
+  assert.deepEqual(pending.map((item) => item.id), ["channels", "provider:email", "provider:email:from"]);
+  const patch = settings.settingUserFilePatch(raw, current, uiModel.pendingPatch(pending, current));
+  assert.deepEqual(patch.channels, ["terminal", "email"]);
+  assert.equal(patch.providers.find((provider) => provider.id === "debug").enabled, true);
+  assert.deepEqual(patch.providers.find((provider) => provider.id === "debug").options, { tag: "keep" });
+  assert.equal(patch.providers.find((provider) => provider.id === "debug").future, 7);
+  assert.equal(patch.providers.find((provider) => provider.id === "terminal").enabled, true, "不能固化其它已选渠道开关");
+  assert.equal(patch.api, undefined); assert.equal(patch.rules, undefined);
+  assert.deepEqual(settings.mergePatch(raw, patch).rules.runFailed.channels, []);
 });
 
 for (const item of failures) {

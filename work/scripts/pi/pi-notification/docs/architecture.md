@@ -25,17 +25,22 @@
 | `src/config.ts` | 内置默认、用户文件解析与校验、损坏降级、稀疏写入和按字段删除 |
 | `src/patch.ts` | 配置路径操作与补丁合并，过滤原型相关键 |
 | `src/settings.ts` | 字段定义、会话覆盖、单项保存/恢复、接收例外与邮箱就绪状态 |
-| `src/ui.ts` | 菜单、候选、确认、状态和测试反馈的 TUI 渲染与键盘事件 |
+| `src/ui.ts` | 控制中心导航、日常原地开关、逐规则候选、返回栈及异步测试反馈 |
+| `src/ui-model.ts` | 无 IO 的生效状态/邮箱下一步模型、去重的待保存字段与批量补丁 |
+| `src/ui-primitives.ts` | Pi 原生 SelectList/Input 适配、独立的批量保存范围确认与分页 |
+| `src/ui-secret.ts` | 独立遮蔽输入、有限分块粘贴、取消/销毁清理；私有状态不进入普通 JSON |
 | `src/commands.ts` | 连接界面动作、配置读写、投递测试及非 TUI 状态展示 |
 | `src/mail/credentials.ts`、`smtp.ts` | 环境变量/系统凭据库与 QQ SMTP；授权码独立于配置 JSON |
 | `src/log.ts` | 控制字符清洗、错误脱敏和可选诊断日志 |
 
 配置顺序为内置默认 → 用户配置 → 本对话覆盖。Enter 修改本对话，Ctrl+S 保存当前项已生效值；重载/恢复保留所属会话覆盖，new/fork 使用各自会话状态。用户文件损坏时保留原文，通知降级为本机失败提醒，API 关闭。
 
-首页组织为总开关、提醒时机、接收方式、测试通知和更多设置。统一接收方式是顶层 `channels`，规则使用 `"inherit"` 跟随，显式数组保留单独选择，空数组停止该类投递。确认统一时只修改规则路由。
+首页先显示生效状态、阻断原因与未保存数量，再提供总开关、提醒时机、接收方式、测试通知、更多设置和批量保存。日常开关 Enter/Space 原地切换；专业字段仍可通过搜索与详情编辑。未保存数量比较实际字段与以后默认，而非简单统计覆盖存在性；复合项与逐规则入口按底层字段去重。批量确认默认取消，`writeUserDefault` 一次验证/原子落盘，仅写确认过的字段，不固化无关渠道开关、API 或 JSON 专业参数。保存不删除会话覆盖。
+
+统一接收方式是顶层 `channels`，规则使用 `"inherit"` 跟随，显式数组保留单独选择，空数组停止该类投递。确认统一时只修改规则路由。
 
 测试通知可跳过等级、免打扰与频率筛选，仍服从强制静默、总开关及渠道开关。反馈区分拒收、排队、投递和失败；接收服务接受后，实际可见性仍由终端、系统或邮箱决定。Windows 界面可保存授权码到用户凭据管理器，测试使用替身凭据库。
 
 ## 验证入口
 
-纯状态、配置和投递测试分别位于 `lifecycle-state.mjs`、`config-validation.mjs`、`settings-patch.mjs`、`routing-contract.mjs`、`service-coalesce.mjs`。`settings-ui.mjs` 检查真实组件；`host-lifecycle.mjs` 检查真实会话，`cli-smoke.mjs` 检查真实进程。完整映射与环境见[开发与测试](../README.md#开发与测试)。
+纯状态、配置和投递测试分别位于 `lifecycle-state.mjs`、`config-validation.mjs`、`settings-patch.mjs`、`routing-contract.mjs`、`service-coalesce.mjs`。`settings-ui.mjs` 检查真实组件、任务闭环、模拟凭据安全与 40/70/110 列快照；`host-lifecycle.mjs` 检查真实会话，`cli-smoke.mjs` 检查真实进程。完整映射与环境见[开发与测试](../README.md#开发与测试)。

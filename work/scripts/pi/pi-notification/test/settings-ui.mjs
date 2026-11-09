@@ -15,6 +15,7 @@ const jiti = createJiti(import.meta.url, { moduleCache: false, fsCache: false, a
 const tui = await jiti.import("@earendil-works/pi-tui");
 const config = await jiti.import("../src/config.ts");
 const settings = await jiti.import("../src/settings.ts");
+const model = await jiti.import("../src/ui-model.ts");
 const { NotifySettingsComponent } = await jiti.import("../src/ui.ts");
 const { createService } = await jiti.import("../src/service.ts");
 const { resolveChannels } = await jiti.import("../src/rules.ts");
@@ -32,6 +33,13 @@ function harness(raw, options = {}) {
   const effective = () => settings.applyOverlay(config.loadConfig({ agentDir: dir }).config, overlay).config;
   const host = {
     config: effective, userRaw: () => config.readUserConfigRaw(dir).raw,
+    runtimeState: () => ({ degraded: config.loadConfig({ agentDir: dir }).degraded, configError: config.loadConfig({ agentDir: dir }).errors.length > 0, quiet: options.quiet }),
+    saveChanges(items) {
+      calls.save.push(...items.map((item) => item.id));
+      const current = effective();
+      const result = config.writeUserDefault(dir, (raw) => settings.settingUserFilePatch(raw, current, model.pendingPatch(items, current)));
+      return { ok: result.ok, message: result.ok ? `已保存 ${items.length} 项为以后默认` : "批量保存失败：文件未改动" };
+    },
     sessionOverride: (item) => settings.sessionOverrideValue(overlay, item),
     restrictions: () => options.restrictions ?? [],
     setValue(item, value) {
@@ -55,6 +63,7 @@ function harness(raw, options = {}) {
       return { ok: result.ok, message: result.ok ? "已恢复初始设置" : "恢复失败" };
     },
     itemScope: (item) => item.paths ? [item.label] : [item.label],
+    canManageCredentials: () => options.canManageCredentials ?? true,
     credentialStatus: () => options.vault?.value ? "已保存于 Windows 凭据管理器" : "未设置",
     saveCredential(value) { options.vault.value = value; calls.credential.push("save"); return { ok: true, message: "授权码已安全保存（所有对话可用）" }; },
     deleteCredential() { delete options.vault.value; calls.credential.push("delete"); return { ok: true, message: "已移除授权码" }; },
@@ -98,15 +107,17 @@ function choose(h, label) {
   h.press(K.enter);
 }
 try {
-  await step("首页只有五个任务入口；用户语言，不暴露配置键", () => {
-    const h = harness(); assert.deepEqual(h.state().rows, ["item:enabled", "category:rules", "category:channels", "action:test", "category:more"]);
+  await step("首页是紧凑控制中心：生效状态、常用任务与明确保存入口", () => {
+    const h = harness(); assert.deepEqual(h.state().rows, ["item:enabled", "category:rules", "category:channels", "action:test", "category:more", "action:save-all"]);
+    assert.match(h.frame().join(""), /当前：提醒已开启.*0 项尚未保存/);
+    assert.ok(h.frame().length < 16);
     assert.match(h.frame().join(""), /仅本对话/);
     assert.doesNotMatch(h.frame().join(""), /provider|inherit|minLevel|coalesce|overlay/);
     row(h, "category:more", true); assert.deepEqual(h.state().rows.slice(0, 3), ["category:content", "category:quietHours", "category:professional"]);
   });
   await step("普通提醒仅完成/失败/等我回复，默认不改变", () => {
     const h = harness(); row(h, "category:rules", true);
-    assert.deepEqual(h.state().rows, ["item:reminders.completed", "item:reminders.waiting", "item:reminders.failed"]);
+    assert.deepEqual(h.state().rows, ["item:reminders.completed", "item:reminders.failed", "item:reminders.waiting"]);
     assert.equal(h.host.config().rules.waitingForUser.enabled, false);
     assert.equal(h.host.config().content.includeAssistantExcerpt, false);
   });
@@ -116,7 +127,7 @@ try {
     choose(h, "关闭"); assert.equal(h.host.config().rules.runFailed.enabled, false); assert.equal(h.raw().rules.runFailed.enabled, true);
   });
   await step("Enter/Space 不写文件；Ctrl+S 只保存已生效而非悬停候选", () => {
-    const h = harness(); row(h, "item:enabled", true); h.press(K.down); h.press(K.save);
+    const h = harness(); searchItem(h, "enabled"); h.press(K.down); h.press(K.save);
     assert.equal(h.raw().enabled, true); assert.equal(h.calls.set.length, 0);
     h.press(K.enter); assert.equal(h.host.config().enabled, false); assert.equal(h.raw().enabled, true);
     h.press(K.save); assert.equal(h.raw().enabled, false); assert.deepEqual(Object.keys(h.raw()), ["enabled"]);
@@ -134,8 +145,9 @@ try {
   });
   await step("返回保留焦点，重读保持本对话修改", () => {
     const h = harness(); row(h, "category:rules", true); row(h, "item:reminders.failed", true);
-    choose(h, "关闭"); h.press(K.reload); assert.equal(h.host.config().rules.runFailed.enabled, false);
-    h.press(K.esc); assert.equal(h.state().rows[h.state().focus], "item:reminders.failed");
+    assert.equal(h.state().view.id, "category:rules", "日常开关 Enter 原地切换，不打开候选编辑器");
+    h.press(K.reload); assert.equal(h.host.config().rules.runFailed.enabled, false);
+    h.press("?"); h.press(K.esc); assert.equal(h.state().rows[h.state().focus], "item:reminders.failed");
     h.press(K.esc); assert.equal(h.state().rows[h.state().focus], "category:rules");
   });
   await step("旧规则自定义不被统一接收设置覆盖", () => {
@@ -248,9 +260,9 @@ try {
     row(h, "action:credential-save", true); h.press("fake-new-code"); h.press(K.enter);
     assert.doesNotMatch(h.frame().slice(0, 14).join(""), /已提交给邮箱服务/);
     assert.doesNotMatch(JSON.stringify(h.overlay()), /fake-new-code/);
-    row(h, "item:provider:email:from", true); choose(h, "自定义…");
+    row(h, "item:provider:email:from", true);
     for (const _ of "sender@qq.com") h.press("\x7f");
-    h.press("different@qq.com"); h.press(K.enter); h.press(K.esc);
+    h.press("different@qq.com"); h.press(K.enter);
     assert.doesNotMatch(h.frame().slice(0, 14).join(""), /已提交给邮箱服务/);
   });
   await step("主题变化后 invalidate 重绘，宽度变化不复用旧缓存", () => {
@@ -269,7 +281,7 @@ try {
     assert.equal(h.raw(), undefined);
     home(h); row(h, "category:channels", true); row(h, "email-config", true);
     for (const [id, text] of [["provider:email:from", "sender@qq.com"], ["provider:email:to", "reader@example.com"]]) {
-      row(h, `item:${id}`, true); choose(h, "自定义…"); h.press(text); h.press(K.enter); h.press(K.esc);
+      row(h, `item:${id}`, true); h.press(text); h.press(K.enter);
     }
     row(h, "action:credential-save", true); h.press("fake-journey-code"); h.press(K.enter);
     assert.equal(h.calls.test.length, 0); assert.equal(h.raw(), undefined);
@@ -305,6 +317,155 @@ try {
       assert.doesNotMatch(JSON.stringify(h.raw()), /fake-journey-code|sender@qq.com|reader@example.com/);
       if (process.env.PI_NOTIFY_ACCEPTANCE_FRAMES === "1") for (const [label, frame] of frames) console.log(`\n[验收画面：${label}]\n${frame}`);
     } finally { h.press(K.esc); h.component.dispose(); await service.dispose(); }
+  });
+  await step("未保存数量按真实差异计数、别名去重；撤回和单项保存后归零", () => {
+    const h = harness();
+    row(h, "category:rules", true); row(h, "item:reminders.failed"); h.press(K.space);
+    const pending = () => model.pendingSettings(h.host.config(), h.raw(), h.host.sessionOverride);
+    assert.equal(pending().length, 2, "失败控制对应两个实际字段，不重复计算复合项");
+    assert.deepEqual(pending().map((item) => item.id), ["rules.runFailed.enabled", "rules.compactFailed.enabled"]);
+    h.press(K.save); assert.equal(pending().length, 0);
+    assert.notEqual(h.host.sessionOverride(settings.buildSettingItems(h.host.config()).find((item) => item.id === "reminders.failed")), undefined);
+    h.press(K.space); assert.equal(pending().length, 2);
+    h.press(K.space); assert.equal(pending().length, 0);
+  });
+  await step("批量保存默认取消、Esc 原焦点返回；确认原子写入所有修改", () => {
+    const h = harness({ api: { enabled: false }, future: "keep" });
+    row(h, "item:enabled"); h.press(K.space);
+    searchItem(h, "content.includeCost"); choose(h, "关闭"); home(h);
+    row(h, "action:save-all", true);
+    assert.match(h.frame().join(""), /其他已打开对话不变.*不包含授权码/);
+    h.press(K.test); assert.equal(h.calls.test.length, 0, "范围确认中快捷键不得外发");
+    h.press(K.enter); assert.deepEqual(h.raw(), { api: { enabled: false }, future: "keep" });
+    row(h, "action:save-all", true); h.press(K.esc);
+    assert.equal(h.state().rows[h.state().focus], "action:save-all");
+    h.press(K.enter); h.press(K.down); h.press(K.enter);
+    assert.deepEqual(h.raw(), { api: { enabled: false }, future: "keep", enabled: false, content: { includeCost: false } });
+    assert.match(h.frame().join(""), /0 项尚未保存/);
+    assert.equal(h.calls.save.length, 2);
+  });
+  await step("批量写入损坏 JSON 全部拒绝且保留本对话修改，首页直说降级", () => {
+    const h = harness(); row(h, "item:enabled"); h.press(K.space);
+    fs.writeFileSync(config.userConfigPath(h.dir), "{broken"); h.press(K.reload);
+    assert.match(h.frame().join(""), /配置降级.*拒绝覆盖默认/);
+    row(h, "action:save-all", true); h.press(K.down); h.press(K.enter);
+    assert.match(h.state().message.text, /批量保存失败/);
+    assert.equal(fs.readFileSync(config.userConfigPath(h.dir), "utf8"), "{broken");
+    assert.equal(h.overlay().patch.enabled, false);
+  });
+  await step("邮箱完成闭环：地址、模拟凭据、明确启用、手动测试、只保存邮箱范围", () => {
+    const h = harness(undefined, { vault: {} });
+    row(h, "category:rules", true); row(h, "item:reminders.completed"); h.press(K.space); home(h);
+    row(h, "category:channels", true); row(h, "email-config", true);
+    assert.match(h.frame().join(""), /下一步：填写发件/);
+    for (const [id, value] of [["from", "fake@qq.com"], ["to", "reader@example.com"]]) {
+      row(h, `item:provider:email:${id}`, true);
+      assert.equal(h.state().view.kind, "input"); h.press(value); h.press(K.enter);
+      assert.equal(h.state().view.id, "email-config");
+    }
+    assert.match(h.frame().join(""), /下一步：设置 QQ 邮箱授权码/);
+    row(h, "action:credential-save", true); h.press("fake-only-code"); h.press(K.enter);
+    assert.match(h.frame().join(""), /下一步：明确确认启用邮箱/);
+    assert.equal(h.calls.test.length, 0); assert.equal(h.raw(), undefined);
+    row(h, "action:email-enable", true); confirm(h);
+    h.press(K.test); assert.deepEqual(h.calls.test[0].channels, ["email"], "邮箱页快捷测试只能发邮箱");
+    h.calls.test[0].onProgress({ id: "mail", stage: "result", result: { providerId: "email", ok: true } });
+    h.calls.test[0].onProgress({ id: "mail", stage: "finished" });
+    assert.match(h.frame().join(""), /确认收件后，保存邮箱设置/);
+    row(h, "action:save-email", true); h.press(K.down); h.press(K.enter);
+    const future = config.loadConfig({ agentDir: h.dir }).config;
+    assert.equal(future.providers.find((p) => p.id === "email").options.from, "fake@qq.com");
+    assert.deepEqual(future.providers.find((p) => p.id === "email").options.to, ["reader@example.com"]);
+    assert.equal(future.providers.find((p) => p.id === "email").enabled, true);
+    assert.deepEqual(future.channels, ["terminal", "email"]);
+    assert.equal(future.rules.runCompleted.enabled, true, "不夹带其它任务的修改");
+    assert.equal(h.host.config().rules.runCompleted.enabled, false);
+    assert.doesNotMatch(JSON.stringify(h.raw()) + JSON.stringify(h.overlay()), /fake-only-code/);
+    assert.match(h.frame().join(""), /默认已同步/);
+  });
+  await step("邮箱失败测试引导重试，非 Windows 显示环境变量步骤而非不可执行存储", () => {
+    const h = harness(undefined, { vault: {}, canManageCredentials: false });
+    row(h, "category:channels", true); row(h, "email-config", true);
+    assert.ok(!h.state().rows.includes("action:credential-save"));
+    assert.match(h.frame().join(""), /PI_NOTIFY_QQ_SMTP_AUTH_CODE/);
+    assert.match(model.emailSetup(h.host.config(), true, "邮箱测试未成功，请查看测试结果", 2).test, /未成功/);
+    const ready = h.host.config(); const p = ready.providers.find((p) => p.id === "email");
+    Object.assign(p, { enabled: true, options: { from: "a@qq.com", to: ["b@example.com"] } }); ready.channels = ["email"];
+    assert.match(model.emailSetup(ready, true, "邮箱测试未成功", 2).next, /修复后重试/);
+  });
+  await step("有效状态集中解释强制静默、全关、缺渠道、免打扰、等级和例外", () => {
+    const state = (raw, options = {}) => { const h = harness(raw, options); return h.frame().join(""); };
+    assert.match(state({ enabled: false }), /当前：提醒已暂停/);
+    assert.match(state({ channels: [] }), /没有提醒使用接收方式/);
+    assert.match(state({ providers: [{ id: "terminal", type: "terminal", enabled: false }] }), /接收方式已关闭或不存在/);
+    assert.match(state(undefined, { quiet: true }), /免打扰中/);
+    assert.match(state({ minLevel: "error", rules: { runFailed: { channels: [] } } }), /等级筛选：仅错误.*接收例外：运行失败/);
+    assert.match(state(undefined, { restrictions: [{ label: "强制静默", reason: "PI_NOTIFY_DISABLE" }] }), /当前：强制静默/);
+    assert.match(model.controlStatus(config.defaultConfig(), { restrictions: [], hasCredential: false, terminalIssue: "PI_NOTIFY_CHANNEL=off" }).notes.join(""), /本机不可用/);
+  });
+  await step("原生输入：焦点传播、长地址横向滚动、光标移动及粘贴；取消不改值", () => {
+    const h = harness(undefined, { vault: {} }); h.component.focused = true;
+    row(h, "category:channels", true); row(h, "email-config", true); row(h, "item:provider:email:from", true);
+    h.press("\x1b[200~long-fake-address@qq.com\x1b[201~");
+    assert.ok(h.state().view.editor.focused);
+    assert.ok(h.frame(40).join("").includes(tui.CURSOR_MARKER));
+    h.press("\x1b[D"); h.press("\x7f");
+    assert.equal(h.state().view.buffer, "long-fake-address@qq.cm");
+    h.component.focused = false; assert.equal(h.state().view.editor.focused, false);
+    assert.ok(!h.frame(40).join("").includes(tui.CURSOR_MARKER));
+    h.press(K.esc); assert.equal(h.host.config().providers.find((p) => p.id === "email").options.from, "");
+  });
+  await step("授权码分块粘贴、错误与取消不会泄漏明文到渲染/快照/配置", () => {
+    const h = harness(undefined, { vault: {} }); h.component.focused = true;
+    row(h, "category:channels", true); row(h, "email-config", true); row(h, "action:credential-save", true);
+    h.press("\x1b[20"); h.press("0~fake-secret-"); h.press("only\x1b[201~");
+    assert.doesNotMatch(h.frame(40).join("") + JSON.stringify(h.state()), /fake-secret-only/);
+    assert.match(h.frame(40).join(""), /●/);
+    h.press(K.enter); assert.deepEqual(h.calls.credential, ["save"]);
+    assert.doesNotMatch(JSON.stringify(h.raw()) + JSON.stringify(h.overlay()), /fake-secret-only/);
+    row(h, "action:credential-save", true); h.press("\x1b[200~bad\nsecret\x1b[201~"); h.press(K.enter);
+    assert.equal(h.state().view.kind, "secret"); assert.match(h.frame(40).join(""), /控制字符/);
+    h.press(K.esc); assert.equal(h.calls.credential.length, 1);
+    row(h, "action:credential-save", true); h.press("fake-disposed"); h.component.dispose();
+    assert.doesNotMatch(JSON.stringify(h.state()), /fake-disposed/);
+  });
+  await step("范围确认超过五项可分页，未查看项目也不重复或遗漏保存", () => {
+    const h = harness();
+    for (const id of ["content.includeCost", "content.includeDuration", "content.includeSessionLabel", "content.includeToolFailureNames", "content.includeAssistantExcerpt", "rules.waitingForUser.enabled"]) {
+      searchItem(h, id); choose(h, id === "content.includeAssistantExcerpt" || id === "rules.waitingForUser.enabled" ? "开启" : "关闭");
+    }
+    home(h); row(h, "action:save-all", true);
+    assert.match(h.frame(40).join(""), /1–5\/6/);
+    h.press("\x1b[6~"); assert.match(h.frame(40).join(""), /2–6\/6/);
+    h.press(K.down); h.press(K.enter);
+    assert.equal(h.calls.save.length, 6); assert.match(h.frame(40).join(""), /0 项尚未保存/);
+  });
+  await step("40/70/110 列主要页面布局快照、重复渲染、焦点和滚动回归", () => {
+    const frames = {};
+    const h = harness(undefined, { vault: {} });
+    const capture = (name) => {
+      for (const width of [40, 70, 110]) {
+        const frame = h.frame(width);
+        assert.deepEqual(h.frame(width), frame);
+        h.component.invalidate(); assert.deepEqual(h.frame(width), frame);
+        for (const line of frame) assert.ok(tui.visibleWidth(line) <= width, `${name}: ${line}`);
+        assert.ok(frame.some((line) => line.includes("→ ")), `${name} focus missing`);
+        assert.ok(frame.every((line, index) => index === 0 || line !== "" || frame[index - 1] !== ""), "不应有固定空白");
+        frames[`${name}-${width}`] = frame;
+      }
+    };
+    capture("home"); row(h, "category:rules", true); capture("reminders"); home(h);
+    row(h, "category:channels", true); row(h, "email-config", true); capture("email");
+    row(h, "item:provider:email:from", true); h.press("fake@qq.com"); h.press(K.enter);
+    row(h, "action:save-email", true); capture("save-review"); h.press(K.esc);
+    h.press(K.status); for (let i = 0; i < 24; i++) h.press(K.down); capture("diagnostics-bottom");
+    assert.match(h.frame(40).join(""), /诊断行 23/);
+    h.press(K.esc); assert.equal(h.state().rows[h.state().focus], "action:save-email");
+    const file = new URL("./fixtures/notification-layout.json", import.meta.url);
+    if (process.env.PI_NOTIFY_UPDATE_LAYOUTS === "1") fs.writeFileSync(file, JSON.stringify(frames, null, 2) + "\n");
+    assert.deepEqual(frames, JSON.parse(fs.readFileSync(file, "utf8")));
+    const before = JSON.parse(fs.readFileSync(new URL("./fixtures/notification-layout-before.json", import.meta.url), "utf8"));
+    for (const name of ["home", "reminders", "email"]) assert.ok(frames[`${name}-70`].length < before[name].length, `${name} 应比重设计前更紧凑`);
   });
   await step("Ctrl+O 可分页、重读动作可见，Ctrl+T 独立于业务开关", () => {
     const h = harness({ enabled: false }); h.press(K.status); assert.equal(h.state().view.id, "status"); row(h, "action:reload", true); assert.equal(h.calls.reload, 1);
