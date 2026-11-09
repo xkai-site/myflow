@@ -41,5 +41,8 @@
   "dependencies": {
     "@napi-rs/keyring": "^2.1.0",
     "nodemailer": "^7.0.13"
+  },
+  "devDependencies": {
+    "@types/nodemailer": "^7.0.12"
   }
 }

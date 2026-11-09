@@ -28,11 +28,8 @@ import type {
   NotificationConfig,
   NotifyLevel,
   ProviderConfig,
-  RuleConfig,
   ToolFailureMode,
-  ToolFailureRuleConfig,
   UIPromptKind,
-  WaitingForUserRuleConfig,
 } from "./types.ts";
 
 export const CONFIG_VERSION = 1;
@@ -246,16 +243,18 @@ function checkRules(
   baseRules: NotificationConfig["rules"],
   errors: ConfigProblem[],
   warnings: ConfigProblem[],
-): Partial<Record<string, RuleConfig>> | undefined {
+): NotificationConfig["rules"] | undefined {
   if (value === undefined) return undefined;
   if (!isPlainObject(value)) {
     errors.push({ path: "rules", message: "必须是对象" });
     return undefined;
   }
-  const result: Record<string, RuleConfig> = {};
+  // Clone the complete typed rule set so sparse edits keep each rule's own fields.
+  const result = structuredClone(baseRules);
   for (const [key, ruleRaw] of Object.entries(value)) {
     const fieldPath = `rules.${key}`;
-    if (!(RULE_KEYS as readonly string[]).includes(key)) {
+    const ruleKey = RULE_KEYS.find((candidate) => candidate === key);
+    if (ruleKey === undefined) {
       // Forward compatibility: a rule name from a newer version is ignored with a warning.
       warnings.push({ path: fieldPath, message: "未知规则名，已忽略（可能是更新版本写入的）" });
       continue;
@@ -266,8 +265,7 @@ function checkRules(
     }
     // Inherit from **base**, not from the factory defaults: when a single setting is saved or
     // the three layers are merged, the siblings of that rule must survive untouched.
-    const base = baseRules as unknown as Record<string, RuleConfig>;
-    const rule: RuleConfig = structuredClone(base[key]);
+    const rule = result[ruleKey];
     const target = rule as unknown as Record<string, unknown>;
     checkBoolean(ruleRaw, "enabled", target, `${fieldPath}.enabled`, errors);
     const level = checkLevel(ruleRaw.level, `${fieldPath}.level`, errors);
@@ -275,8 +273,8 @@ function checkRules(
     const channels = ruleRaw.channels === "inherit" ? "inherit" : checkChannels(ruleRaw.channels, `${fieldPath}.channels`, errors);
     if (channels) rule.channels = channels;
 
-    if (key === "toolFailed") {
-      const toolRule = rule as ToolFailureRuleConfig;
+    if (ruleKey === "toolFailed") {
+      const toolRule = result.toolFailed;
       if (ruleRaw.mode !== undefined) {
         if (typeof ruleRaw.mode !== "string" || !TOOL_FAILURE_MODES.includes(ruleRaw.mode as ToolFailureMode)) {
           errors.push({ path: `${fieldPath}.mode`, message: `必须是 ${TOOL_FAILURE_MODES.join(" | ")} 之一，实际是 ${JSON.stringify(ruleRaw.mode)}` });
@@ -287,8 +285,8 @@ function checkRules(
       checkPositiveInt(ruleRaw, "threshold", target, `${fieldPath}.threshold`, errors, { min: 1, max: 100 });
     }
 
-    if (key === "waitingForUser") {
-      const waitingRule = rule as WaitingForUserRuleConfig;
+    if (ruleKey === "waitingForUser") {
+      const waitingRule = result.waitingForUser;
       if (ruleRaw.kinds !== undefined) {
         if (!Array.isArray(ruleRaw.kinds) || ruleRaw.kinds.some((item) => typeof item !== "string")) {
           errors.push({ path: `${fieldPath}.kinds`, message: `必须是字符串数组，实际是 ${JSON.stringify(ruleRaw.kinds)}` });
@@ -306,10 +304,8 @@ function checkRules(
         }
       }
     }
-
-    result[key] = rule;
   }
-  return result as Partial<Record<string, RuleConfig>>;
+  return result;
 }
 
 function checkProviders(
@@ -477,12 +473,7 @@ export function mergeConfig(base: NotificationConfig, raw: unknown, source: stri
   const channels = checkChannels(raw.channels, "channels", errors);
   if (channels) config.channels = channels;
   const rules = checkRules(raw.rules, base.rules, errors, warnings);
-  if (rules) {
-    for (const key of RULE_KEYS) {
-      const override = rules[key];
-      if (override) config.rules[key] = override;
-    }
-  }
+  if (rules) config.rules = rules;
 
   if (raw.quietHours !== undefined) {
     if (!isPlainObject(raw.quietHours)) {

@@ -131,6 +131,37 @@ await step("C4 规则内部字段：level / channels / toolFailed 策略与阈�
   assert.deepEqual(errorPaths({ rules: { toolFailed: { mode: "immediate", threshold: 2 } } }), []);
 });
 
+await step("C4b 稀疏规则修改保留专属字段、未修改规则及 base，不靠通用规则类型覆盖", () => {
+  const base = config.defaultConfig();
+  base.rules.toolFailed = { enabled: true, level: "error", channels: ["debug"], mode: "immediate", threshold: 7 };
+  base.rules.waitingForUser = { enabled: true, level: "warning", channels: [], kinds: ["editor"] };
+  const before = structuredClone(base);
+  const result = config.mergeConfig(base, { rules: {
+    toolFailed: { enabled: false },
+    waitingForUser: { level: "error" },
+    runCompleted: { channels: [] },
+  } }, "test");
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.config.rules, { ...before.rules,
+    toolFailed: { ...before.rules.toolFailed, enabled: false },
+    waitingForUser: { ...before.rules.waitingForUser, level: "error" },
+    runCompleted: { ...before.rules.runCompleted, channels: [] },
+  });
+  result.config.rules.toolFailed.channels.push("terminal");
+  result.config.rules.waitingForUser.kinds.push("input");
+  assert.deepEqual(base, before, "校验和修改合并结果都不能污染 base");
+
+  const specialized = config.mergeConfig(base, { rules: {
+    toolFailed: { mode: "aggregate", threshold: 2 },
+    waitingForUser: { kinds: ["select", "select", "custom"] },
+  } }, "test");
+  assert.deepEqual(specialized.errors, []);
+  assert.deepEqual(specialized.warnings.map((problem) => problem.path), ["rules.waitingForUser.kinds"]);
+  assert.deepEqual(specialized.config.rules.toolFailed, { ...before.rules.toolFailed, mode: "aggregate", threshold: 2 });
+  assert.deepEqual(specialized.config.rules.waitingForUser, { ...before.rules.waitingForUser, kinds: ["select"] });
+  assert.deepEqual(base, before);
+});
+
 await step("C5 waitingForUser.kinds：未知 kind 报错，custom 只警告并从生效值里滤掉", async () => {
   const unknown = merge({ rules: { waitingForUser: { kinds: ["select", "bogus"] } } });
   assert.deepEqual(unknown.errors.map((problem) => problem.path), ["rules.waitingForUser.kinds"]);

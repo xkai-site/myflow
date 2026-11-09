@@ -1,6 +1,7 @@
 import { lookup as systemLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import nodemailer from "nodemailer";
+import type SMTPTransport from "nodemailer/lib/smtp-transport/index.js";
 import type { MailMessage, MailSender } from "./sender.ts";
 import { QQ_AUTH_ENV, resolveQqCredential, type CredentialStore } from "./credentials.ts";
 export { QQ_AUTH_ENV } from "./credentials.ts";
@@ -65,7 +66,7 @@ export interface SmtpTransportLike {
   sendMail(message: MailMessage): Promise<{ accepted?: unknown[]; rejected?: unknown[] }>;
   close?(): void;
 }
-export type SmtpTransportFactory = (options: Record<string, unknown>) => SmtpTransportLike;
+export type SmtpTransportFactory = (options: SMTPTransport.Options) => SmtpTransportLike;
 
 function validEmail(value: unknown): value is string {
   return typeof value === "string" && value.length <= 254 && /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value);
@@ -92,7 +93,7 @@ export function createQqSmtpSender(
   const env = deps.env ?? process.env;
   const timeout = Math.max(250, Math.min(MAX_SMTP_PHASE_TIMEOUT_MS, Math.floor(deps.timeoutMs ?? 30000)));
   const lookup = deps.lookup ?? ((hostname, options) => systemLookup(hostname, options));
-  const factory = deps.transportFactory ?? ((transportOptions) => nodemailer.createTransport(transportOptions) as unknown as SmtpTransportLike);
+  const factory: SmtpTransportFactory = deps.transportFactory ?? ((transportOptions) => nodemailer.createTransport(transportOptions));
   let disposed = false;
   return {
     validate: () => disposed ? "邮箱发送器已关闭" : validateQqSmtp(options, env, deps.credentialStore),
@@ -112,7 +113,8 @@ export function createQqSmtpSender(
           host,
           port: 465,
           secure: true,
-          auth: { user: options.from, pass: auth },
+          // validateQqSmtp above has checked this externally supplied address.
+          auth: { user: options.from as string, pass: auth },
           connectionTimeout: timeout,
           greetingTimeout: timeout,
           socketTimeout: timeout,

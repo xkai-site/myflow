@@ -71,6 +71,30 @@ try {
   assert.equal(closed, 1);
 
   const message = { from: "sender@qq.com", to: "a@example.org", subject: "test", text: "plain" };
+  // Exercise the default Nodemailer adapter too, without creating a socket or reading the real vault.
+  const nodemailer = require("nodemailer");
+  const previousCreateTransport = nodemailer.createTransport;
+  let defaultOptions, defaultClosed = 0;
+  nodemailer.createTransport = (transportOptions) => {
+    defaultOptions = transportOptions;
+    return { async sendMail(payload) {
+      assert.deepEqual(payload, message);
+      return { accepted: [payload.to], rejected: [] };
+    }, close() { defaultClosed++; } };
+  };
+  try {
+    const defaultSender = createQqSmtpSender(options, { env: process.env, credentialStore: vault, lookup: smtpLookup });
+    await defaultSender.send(message, new AbortController().signal);
+    assert.equal(defaultOptions.auth.user, "sender@qq.com");
+    assert.equal(defaultOptions.auth.pass, "test-auth-value");
+    assert.equal(defaultOptions.host, "203.0.113.10");
+    assert.deepEqual(defaultOptions.tls, { servername: "smtp.qq.com", rejectUnauthorized: true });
+    assert.equal(defaultOptions.disableFileAccess, true);
+    assert.equal(defaultOptions.disableUrlAccess, true);
+    assert.equal(defaultClosed, 1);
+    await defaultSender.dispose();
+  } finally { nodemailer.createTransport = previousCreateTransport; }
+
   let createdAfterDnsFailure = false;
   const dnsFailure = createQqSmtpSender(options, {
     env: process.env, credentialStore: vault,
