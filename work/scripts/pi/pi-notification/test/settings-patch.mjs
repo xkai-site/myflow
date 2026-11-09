@@ -12,12 +12,15 @@
  */
 
 import assert from "node:assert/strict";
+import { mergePatch } from "../src/patch.ts";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const PLUGIN_DIR = fileURLToPath(new URL("..", import.meta.url));
 const patch = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "patch.ts")).href);
 const settings = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "settings.ts")).href);
+import * as settingState from "../src/settings-state.ts";
+import * as channels from "../src/channels.ts";
 const config = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "config.ts")).href);
 const uiModel = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "ui-model.ts")).href);
 
@@ -112,16 +115,16 @@ await step("P4 补丁不能替换结果的原型：__proto__ / constructor / pro
 });
 
 await step("S1 overlay 形状防御：空 overlay 与非法条目", () => {
-  assert.deepEqual(settings.emptyOverlay(), { patch: {}, providers: {}, providerOptions: {} });
-  assert.equal(settings.isEmptyOverlay(settings.emptyOverlay()), true);
-  assert.equal(settings.isEmptyOverlay({ patch: { enabled: false }, providers: {}, providerOptions: {} }), false);
-  assert.equal(settings.isEmptyOverlay({ patch: {}, providers: { terminal: false }, providerOptions: {} }), false);
+  assert.deepEqual(settingState.emptyOverlay(), { patch: {}, providers: {}, providerOptions: {} });
+  assert.equal(settingState.isEmptyOverlay(settingState.emptyOverlay()), true);
+  assert.equal(settingState.isEmptyOverlay({ patch: { enabled: false }, providers: {}, providerOptions: {} }), false);
+  assert.equal(settingState.isEmptyOverlay({ patch: {}, providers: { terminal: false }, providerOptions: {} }), false);
 
-  assert.equal(settings.overlayFromEntry(undefined), undefined);
-  assert.equal(settings.overlayFromEntry(42), undefined);
-  assert.deepEqual(settings.overlayFromEntry({ patch: {}, providers: {} }), { patch: {}, providers: {}, providerOptions: {} },
+  assert.equal(settingState.overlayFromEntry(undefined), undefined);
+  assert.equal(settingState.overlayFromEntry(42), undefined);
+  assert.deepEqual(settingState.overlayFromEntry({ patch: {}, providers: {} }), { patch: {}, providers: {}, providerOptions: {} },
     "空快照是合法状态（已清空），必须保留以免 /reload 复活旧值");
-  assert.deepEqual(settings.overlayFromEntry({ patch: "broken", providers: { a: "yes", b: true } }), {
+  assert.deepEqual(settingState.overlayFromEntry({ patch: "broken", providers: { a: "yes", b: true } }), {
     patch: {},
     providers: { b: true },
     providerOptions: {},
@@ -133,22 +136,22 @@ await step("S2 hasUserDefault / userDefaultValue：按路径存在性判断，�
   const providerItem = itemOf("provider:terminal");
   const minLevelItem = itemOf("minLevel");
 
-  assert.equal(settings.hasUserDefault(undefined, boolItem), false, "没有用户文件时未保存");
-  assert.equal(settings.hasUserDefault({}, boolItem), false);
-  assert.equal(settings.hasUserDefault({ content: {} }, boolItem), false);
-  assert.equal(settings.hasUserDefault({ content: { includeCost: false } }, boolItem), true, "等于出厂默认的值只要被保存过也算保存过");
-  assert.equal(settings.userDefaultValue({ content: { includeCost: false } }, boolItem), false);
-  assert.equal(settings.userDefaultValue({ content: {} }, boolItem), undefined);
+  assert.equal(settingState.hasUserDefault(undefined, boolItem), false, "没有用户文件时未保存");
+  assert.equal(settingState.hasUserDefault({}, boolItem), false);
+  assert.equal(settingState.hasUserDefault({ content: {} }, boolItem), false);
+  assert.equal(settingState.hasUserDefault({ content: { includeCost: false } }, boolItem), true, "等于出厂默认的值只要被保存过也算保存过");
+  assert.equal(settingState.userDefaultValue({ content: { includeCost: false } }, boolItem), false);
+  assert.equal(settingState.userDefaultValue({ content: {} }, boolItem), undefined);
 
-  assert.equal(settings.hasUserDefault({ providers: "terminal" }, providerItem), false, "providers 不是数组时视为未保存");
-  assert.equal(settings.hasUserDefault({ providers: [{ id: "terminal" }] }, providerItem), false, "条目里没有 enabled 就是未保存");
-  assert.equal(settings.hasUserDefault({ providers: [{ id: "terminal", enabled: false }] }, providerItem), true);
-  assert.equal(settings.userDefaultValue({ providers: [{ id: "terminal", enabled: false }] }, providerItem), false);
-  assert.equal(settings.userDefaultValue({ providers: [{ id: "other", enabled: false }] }, providerItem), undefined);
+  assert.equal(settingState.hasUserDefault({ providers: "terminal" }, providerItem), false, "providers 不是数组时视为未保存");
+  assert.equal(settingState.hasUserDefault({ providers: [{ id: "terminal" }] }, providerItem), false, "条目里没有 enabled 就是未保存");
+  assert.equal(settingState.hasUserDefault({ providers: [{ id: "terminal", enabled: false }] }, providerItem), true);
+  assert.equal(settingState.userDefaultValue({ providers: [{ id: "terminal", enabled: false }] }, providerItem), false);
+  assert.equal(settingState.userDefaultValue({ providers: [{ id: "other", enabled: false }] }, providerItem), undefined);
 
-  assert.equal(settings.hasUserDefault({ minLevel: "error" }, minLevelItem), true);
-  assert.equal(settings.userDefaultValue({ minLevel: "error" }, minLevelItem), "error");
-  assert.equal(settings.userDefaultValue({}, minLevelItem), undefined);
+  assert.equal(settingState.hasUserDefault({ minLevel: "error" }, minLevelItem), true);
+  assert.equal(settingState.userDefaultValue({ minLevel: "error" }, minLevelItem), "error");
+  assert.equal(settingState.userDefaultValue({}, minLevelItem), undefined);
 });
 
 await step("S3 isCurrentValue / collectionValue：标量相等，集合按成员", () => {
@@ -165,21 +168,21 @@ await step("S3 isCurrentValue / collectionValue：标量相等，集合按成员
   assert.deepEqual(settings.collectionValue(["a"], "a"), [], "最后一个成员也能移除");
 });
 
-await step("S4 candidatesOf：枚举项给出全部候选，时间项给出预设集", () => {
+await step("S4 配置项契约：枚举项给出全部候选，时间项给出预设集", () => {
   assert.deepEqual(
-    settings.candidatesOf(itemOf("minLevel"), config.defaultConfig()).map((candidate) => candidate.value),
+    itemOf("minLevel").candidates(config.defaultConfig()).map((candidate) => candidate.value),
     ["info", "warning", "error"],
   );
-  assert.equal(settings.candidatesOf(itemOf("quietHours.start"), config.defaultConfig()).length, 7);
+  assert.equal(itemOf("quietHours.start").candidates(config.defaultConfig()).length, 7);
   assert.equal(settings.CUSTOM_ROW_LABEL, "自定义…", "custom 行标签是 UI 与测试共用的常量");
   assert.deepEqual(
-    settings.candidatesOf(itemOf("quietHours.enabled"), config.defaultConfig()).map((candidate) => candidate.value),
+    itemOf("quietHours.enabled").candidates(config.defaultConfig()).map((candidate) => candidate.value),
     [true, false],
   );
 });
 
 await step("S5 中文化只改展示：值/配置键不变，阈值与规则严重程度使用不同文案", () => {
-  const labels = (id) => settings.candidatesOf(itemOf(id), config.defaultConfig()).map((candidate) => candidate.label);
+  const labels = (id) => itemOf(id).candidates(config.defaultConfig()).map((candidate) => candidate.label);
   // Values stay the enum ids; only the labels are translated.
   assert.deepEqual(labels("minLevel"), ["所有等级", "警告及错误", "仅错误"], "通知门槛应表达“及以上”");
   assert.deepEqual(labels("rules.runFailed.level"), ["提示", "警告", "错误"], "规则严重程度用常见日志等级名");
@@ -219,52 +222,52 @@ await step("S7 来源按 overlay 存在性判定：false / 空集合 / 与默认
   const minLevelItem = itemOf("minLevel");
 
   // false is a value, not “no override”: comparing values would misreport it as inherited.
-  assert.equal(settings.sessionOverrideValue({ patch: { content: { includeCost: false } }, providers: {} }, boolItem), false);
-  assert.equal(settings.sessionOverrideValue({ patch: {}, providers: {} }, boolItem), undefined);
+  assert.equal(settingState.sessionOverrideValue({ patch: { content: { includeCost: false } }, providers: {} }, boolItem), false);
+  assert.equal(settingState.sessionOverrideValue({ patch: {}, providers: {} }, boolItem), undefined);
   // An empty collection is still an explicit choice.
   assert.deepEqual(
-    settings.sessionOverrideValue({ patch: { rules: { runCompleted: { channels: [] } } }, providers: {} }, channelsItem),
+    settingState.sessionOverrideValue({ patch: { rules: { runCompleted: { channels: [] } } }, providers: {} }, channelsItem),
     [],
   );
-  assert.equal(settings.sessionOverrideValue({ patch: { rules: {} }, providers: {} }, channelsItem), undefined);
+  assert.equal(settingState.sessionOverrideValue({ patch: { rules: {} }, providers: {} }, channelsItem), undefined);
   // Same value as the user default: presence decides, so it still counts as a conversation override.
-  assert.equal(settings.sessionOverrideValue({ patch: { minLevel: "info" }, providers: {} }, minLevelItem), "info");
-  assert.equal(settings.sessionOverrideValue({ patch: { minLevel: "error" }, providers: {} }, minLevelItem), "error");
+  assert.equal(settingState.sessionOverrideValue({ patch: { minLevel: "info" }, providers: {} }, minLevelItem), "info");
+  assert.equal(settingState.sessionOverrideValue({ patch: { minLevel: "error" }, providers: {} }, minLevelItem), "error");
 
   // Channel switches live in the provider map, and a false switch is a real override.
   const terminal = itemOf("provider:terminal");
-  assert.equal(settings.sessionOverrideValue({ patch: {}, providers: { terminal: false } }, terminal), false);
-  assert.equal(settings.sessionOverrideValue({ patch: {}, providers: { terminal: true } }, terminal), true);
-  assert.equal(settings.sessionOverrideValue({ patch: {}, providers: {} }, terminal), undefined);
+  assert.equal(settingState.sessionOverrideValue({ patch: {}, providers: { terminal: false } }, terminal), false);
+  assert.equal(settingState.sessionOverrideValue({ patch: {}, providers: { terminal: true } }, terminal), true);
+  assert.equal(settingState.sessionOverrideValue({ patch: {}, providers: {} }, terminal), undefined);
 });
 
 await step("S8 渠道内置缺省：开关缺省为开启；定义来源看用户文件，不看同名 id", () => {
   const terminal = itemOf("provider:terminal");
-  assert.equal(settings.builtinDefaultValue(terminal), true, "渠道开关的内置缺省是开启");
-  assert.equal(settings.builtinDefaultValue(itemOf("minLevel")), "info");
-  assert.equal(settings.builtinDefaultValue(itemOf("content.includeCost")), true);
+  assert.equal(settingState.builtinDefaultValue(terminal), true, "渠道开关的内置缺省是开启");
+  assert.equal(settingState.builtinDefaultValue(itemOf("minLevel")), "info");
+  assert.equal(settingState.builtinDefaultValue(itemOf("content.includeCost")), true);
   // Definition origin: the user file is the only layer that can provide a definition besides the
   // factory defaults, so a same-named user entry still means “user-provided”.
-  assert.equal(settings.providerDefinitionSource(terminal, undefined), "default");
-  assert.equal(settings.providerDefinitionSource(terminal, { providers: [{ id: "terminal", type: "webhook" }] }), "user");
-  assert.equal(settings.providerDefinitionSource(terminal, { providers: "broken" }), "default");
+  assert.equal(settingState.providerDefinitionSource(terminal, undefined), "default");
+  assert.equal(settingState.providerDefinitionSource(terminal, { providers: [{ id: "terminal", type: "webhook" }] }), "user");
+  assert.equal(settingState.providerDefinitionSource(terminal, { providers: "broken" }), "default");
 
   const customConfig = config.defaultConfig();
   customConfig.providers = [{ id: "team.myhook", type: "debug", enabled: false, options: {} }];
   const custom = settings.buildSettingItems(customConfig).find((item) => item.providerId === "team.myhook");
   assert.ok(custom, "自定义渠道项缺失");
-  assert.equal(settings.providerDefinitionSource(custom, undefined), "default", "用户文件没写就按出厂默认处理");
-  assert.equal(settings.providerDefinitionSource(custom, { providers: [{ id: "team.myhook" }] }), "user");
+  assert.equal(settingState.providerDefinitionSource(custom, undefined), "default", "用户文件没写就按出厂默认处理");
+  assert.equal(settingState.providerDefinitionSource(custom, { providers: [{ id: "team.myhook" }] }), "user");
   // The switch itself still has a built-in default of on, matching checkProviders.
-  assert.equal(settings.builtinDefaultValue(custom), true, "自定义渠道的开关内置缺省仍为开启");
+  assert.equal(settingState.builtinDefaultValue(custom), true, "自定义渠道的开关内置缺省仍为开启");
 
   // A dotted id is addressed as a whole (array lookup / overlay map key), never split as a path.
   assert.equal(custom.userPath, "providers.team.myhook.enabled");
-  assert.equal(settings.hasUserDefault({ providers: [{ id: "team.myhook", enabled: false }] }, custom), true);
-  assert.equal(settings.userDefaultValue({ providers: [{ id: "team.myhook", enabled: false }] }, custom), false);
-  assert.equal(settings.hasUserDefault({ providers: [{ id: "team.my", enabled: false }] }, custom), false);
-  assert.equal(settings.sessionOverrideValue({ patch: {}, providers: { "team.myhook": false } }, custom), false);
-  assert.equal(settings.sessionOverrideValue({ patch: {}, providers: { team: true } }, custom), undefined);
+  assert.equal(settingState.hasUserDefault({ providers: [{ id: "team.myhook", enabled: false }] }, custom), true);
+  assert.equal(settingState.userDefaultValue({ providers: [{ id: "team.myhook", enabled: false }] }, custom), false);
+  assert.equal(settingState.hasUserDefault({ providers: [{ id: "team.my", enabled: false }] }, custom), false);
+  assert.equal(settingState.sessionOverrideValue({ patch: {}, providers: { "team.myhook": false } }, custom), false);
+  assert.equal(settingState.sessionOverrideValue({ patch: {}, providers: { team: true } }, custom), undefined);
 
   // Prototype members are not overrides: ids like `toString` / `constructor` must be read as own keys.
   const weirdConfig = config.defaultConfig();
@@ -276,8 +279,8 @@ await step("S8 渠道内置缺省：开关缺省为开启；定义来源看用�
   for (const id of ["toString", "constructor"]) {
     const weird = weirdItems.find((item) => item.providerId === id);
     assert.ok(weird, `缺少渠道项 ${id}`);
-    assert.equal(settings.sessionOverrideValue({ patch: {}, providers: {} }, weird), undefined, `${id} 不得把原型成员当覆盖`);
-    assert.equal(settings.sessionOverrideValue({ patch: {}, providers: { [id]: false } }, weird), false);
+    assert.equal(settingState.sessionOverrideValue({ patch: {}, providers: {} }, weird), undefined, `${id} 不得把原型成员当覆盖`);
+    assert.equal(settingState.sessionOverrideValue({ patch: {}, providers: { [id]: false } }, weird), false);
   }
 });
 
@@ -288,7 +291,7 @@ await step("S9 渠道用户文件补丁：只改目标 enabled，保留 options/
       { id: "debug", type: "debug", enabled: true, options: { url: "https://example.invalid/hook" }, note: "keep-me" },
     ],
   };
-  const patched = settings.channelUserFilePatch(raw, "terminal", "terminal", false);
+  const patched = settingState.channelUserFilePatch(raw, "terminal", "terminal", false);
   assert.deepEqual(patched, {
     providers: [
       { id: "terminal", type: "terminal", enabled: false, options: {} },
@@ -303,16 +306,16 @@ await step("S9 渠道用户文件补丁：只改目标 enabled，保留 options/
 
   // 只存在于出厂默认的渠道：新增最小条目，不复制出厂 options。
   assert.deepEqual(
-    settings.channelUserFilePatch(undefined, "terminal", "terminal", false),
+    settingState.channelUserFilePatch(undefined, "terminal", "terminal", false),
     { providers: [{ id: "terminal", type: "terminal", enabled: false }] },
   );
   // providers 不是数组时按空数组重建为合法数组。
   assert.deepEqual(
-    settings.channelUserFilePatch({ providers: "broken" }, "terminal", "terminal", false),
+    settingState.channelUserFilePatch({ providers: "broken" }, "terminal", "terminal", false),
     { providers: [{ id: "terminal", type: "terminal", enabled: false }] },
   );
   // 目标不在用户文件里时只追加，不重写已有条目。
-  const appended = settings.channelUserFilePatch({ providers: [{ id: "debug", enabled: true, options: { tag: 1 } }] }, "terminal", "terminal", false);
+  const appended = settingState.channelUserFilePatch({ providers: [{ id: "debug", enabled: true, options: { tag: 1 } }] }, "terminal", "terminal", false);
   assert.deepEqual(appended, {
     providers: [
       { id: "debug", enabled: true, options: { tag: 1 } },
@@ -324,12 +327,12 @@ await step("S9 渠道用户文件补丁：只改目标 enabled，保留 options/
 await step("S10 恢复清空最后一个 overlay：空快照仍然被认作有效快照（不复活旧值）", () => {
   const entry = (sessionId, patch) => ({
     type: "custom",
-    customType: settings.SESSION_OVERLAY_ENTRY,
+    customType: settingState.SESSION_OVERLAY_ENTRY,
     data: { sessionId, patch, providers: {} },
   });
   const entries = [entry("s", { minLevel: "error" }), entry("s", {})];
   assert.deepEqual(
-    settings.restoreOverlayFromEntries(entries, "s"),
+    settingState.restoreOverlayFromEntries(entries, "s"),
     { patch: {}, providers: {}, providerOptions: {} },
     "最后一条空快照表示已清空，不能被忽略而恢复成 error",
   );
@@ -380,11 +383,11 @@ await step("S13 clearItemOverride：只清目标项的本对话覆盖（普通�
   const minLevel = itemOf("minLevel");
   const terminal = itemOf("provider:terminal");
   assert.deepEqual(
-    settings.clearItemOverride({ patch: { minLevel: "error", enabled: false }, providers: {}, providerOptions: {} }, minLevel),
+    settingState.clearItemOverride({ patch: { minLevel: "error", enabled: false }, providers: {}, providerOptions: {} }, minLevel),
     { patch: { enabled: false }, providers: {}, providerOptions: {} },
   );
   assert.deepEqual(
-    settings.clearItemOverride({ patch: {}, providers: { terminal: false, debug: true }, providerOptions: {} }, terminal),
+    settingState.clearItemOverride({ patch: {}, providers: { terminal: false, debug: true }, providerOptions: {} }, terminal),
     { patch: {}, providers: { debug: true }, providerOptions: {} },
   );
 });
@@ -395,45 +398,45 @@ await step("S14 复合项保存有效混合状态，不统一、不泄漏其他�
   current.content.includeAssistantExcerpt = true;
   const item = itemOf("reminders.failed");
   assert.equal(item.read(current), "mixed");
-  const saved = settings.settingUserFilePatch({}, current, settings.settingSnapshot(item, current));
+  const saved = settingState.settingUserFilePatch({}, current, settingState.settingSnapshot(item, current));
   assert.deepEqual(saved, { rules: { runFailed: { enabled: true }, compactFailed: { enabled: false } } });
-  const next = settings.applySettingPatch(settings.emptyOverlay(), item, item.patch(false));
-  assert.equal(settings.applyOverlay(current, next).config.rules.runFailed.enabled, false);
-  assert.equal(settings.clearItemOverride(next, item).patch.rules, undefined);
+  const next = settingState.applySettingPatch(settingState.emptyOverlay(), item, item.patch(false));
+  assert.equal(settingState.applyOverlay(current, next).config.rules.runFailed.enabled, false);
+  assert.equal(settingState.clearItemOverride(next, item).patch.rules, undefined);
 });
 
 await step("S15 接收多选与启用原子应用，provider 归属转移后不误还原", () => {
   const current = config.defaultConfig();
   const item = itemOf("channels");
-  let overlay = settings.applySettingPatch(settings.emptyOverlay(), item, item.patch(["terminal", "email"]));
-  let effective = settings.applyOverlay(current, overlay).config;
+  let overlay = settingState.applySettingPatch(settingState.emptyOverlay(), item, item.patch(["terminal", "email"]));
+  let effective = settingState.applyOverlay(current, overlay).config;
   assert.equal(effective.providers.find((p) => p.id === "email").enabled, true);
   assert.deepEqual(effective.channels, ["terminal", "email"]);
   assert.equal(effective.rules.runFailed.channels, "inherit");
-  overlay = settings.applySettingPatch(overlay, itemOf("provider:email"), itemOf("provider:email").patch(false));
-  const restored = settings.clearItemOverride(overlay, item);
+  overlay = settingState.applySettingPatch(overlay, itemOf("provider:email"), itemOf("provider:email").patch(false));
+  const restored = settingState.clearItemOverride(overlay, item);
   assert.equal(restored.providers.email, false, "专业页显式禁用归属于自身");
   assert.equal(restored.patch.channels, undefined);
-  effective = settings.applyOverlay(current, overlay).config;
+  effective = settingState.applyOverlay(current, overlay).config;
   const raw = { providers: [{ id: "email", type: "email", options: { from: "saved@qq.com" }, future: 7 }] };
-  const saved = settings.settingUserFilePatch(raw, effective, settings.settingSnapshot(item, effective));
+  const saved = settingState.settingUserFilePatch(raw, effective, settingState.settingSnapshot(item, effective));
   assert.equal(saved.providers.find((p) => p.id === "email").enabled, false, "Ctrl+S 不重新开启");
   assert.equal(saved.providers.find((p) => p.id === "email").options.from, "saved@qq.com");
   assert.equal(saved.providers.find((p) => p.id === "email").future, 7);
-  const roundTrip = settings.overlayFromEntry(settings.overlayEntryData("s", overlay, 1));
+  const roundTrip = settingState.overlayFromEntry(settingState.overlayEntryData("s", overlay, 1));
   assert.deepEqual(roundTrip, overlay);
 });
 
 await step("S16 显式归一只修改六个 channels；旧元数据不猜测归属", () => {
   const item = itemOf("routes.unify");
-  const overlay = settings.applySettingPatch({ ...settings.emptyOverlay(), patch: { rules: { runFailed: { enabled: false, level: "warning", channels: [] } } } }, item, item.patch("inherit"));
+  const overlay = settingState.applySettingPatch({ ...settingState.emptyOverlay(), patch: { rules: { runFailed: { enabled: false, level: "warning", channels: [] } } } }, item, item.patch("inherit"));
   assert.equal(overlay.patch.rules.runFailed.enabled, false);
   assert.equal(overlay.patch.rules.runFailed.level, "warning");
   assert.equal(Object.keys(overlay.patch.rules).length, 6);
   assert.equal(overlay.patch.rules.runFailed.channels, "inherit");
-  assert.deepEqual(settings.clearItemOverride(overlay, item).patch, { rules: { runFailed: { enabled: false, level: "warning" } } });
-  const legacy = { ...settings.emptyOverlay(), providers: { email: true } };
-  assert.equal(settings.clearItemOverride(legacy, itemOf("channels")).providers.email, true);
+  assert.deepEqual(settingState.clearItemOverride(overlay, item).patch, { rules: { runFailed: { enabled: false, level: "warning" } } });
+  const legacy = { ...settingState.emptyOverlay(), providers: { email: true } };
+  assert.equal(settingState.clearItemOverride(legacy, itemOf("channels")).providers.email, true);
 });
 
 await step("S17 邮箱批量补丁只写已审查叶字段，不快照无关渠道/API/显式例外", () => {
@@ -442,21 +445,35 @@ await step("S17 邮箱批量补丁只写已审查叶字段，不快照无关渠�
   const base = config.mergeConfig(config.defaultConfig(), raw, "test").config;
   const items = settings.buildSettingItems(base);
   const find = (id) => items.find((item) => item.id === id);
-  let overlay = settings.emptyOverlay();
+  let overlay = settingState.emptyOverlay();
   for (const [id, value] of [["channels", ["terminal", "email"]], ["provider:email:from", "fake@qq.com"], ["provider:terminal", false], ["provider:debug", false]]) {
-    overlay = settings.applySettingPatch(overlay, find(id), find(id).patch(value));
+    overlay = settingState.applySettingPatch(overlay, find(id), find(id).patch(value));
   }
-  const current = settings.applyOverlay(base, overlay).config;
-  const pending = uiModel.pendingSettings(current, raw, (item) => settings.sessionOverrideValue(overlay, item), "email");
+  const current = settingState.applyOverlay(base, overlay).config;
+  const pending = uiModel.pendingSettings(current, raw, (item) => settingState.sessionOverrideValue(overlay, item), "email");
   assert.deepEqual(pending.map((item) => item.id), ["channels", "provider:email", "provider:email:from"]);
-  const patch = settings.settingUserFilePatch(raw, current, uiModel.pendingPatch(pending, current));
+  const patch = settingState.settingUserFilePatch(raw, current, settingState.pendingPatch(pending, current));
   assert.deepEqual(patch.channels, ["terminal", "email"]);
   assert.equal(patch.providers.find((provider) => provider.id === "debug").enabled, true);
   assert.deepEqual(patch.providers.find((provider) => provider.id === "debug").options, { tag: "keep" });
   assert.equal(patch.providers.find((provider) => provider.id === "debug").future, 7);
   assert.equal(patch.providers.find((provider) => provider.id === "terminal").enabled, true, "不能固化其它已选渠道开关");
   assert.equal(patch.api, undefined); assert.equal(patch.rules, undefined);
-  assert.deepEqual(settings.mergePatch(raw, patch).rules.runFailed.channels, []);
+  assert.deepEqual(mergePatch(raw, patch).rules.runFailed.channels, []);
+});
+
+await step("S18 渠道 id 与原型成员同名时，其他渠道覆盖不会被整批丢弃", () => {
+  const base = config.mergeConfig(config.defaultConfig(), { providers: [
+    { id: "constructor", type: "debug", enabled: true },
+    { id: "toString", type: "debug", enabled: true },
+    { id: "terminal", type: "terminal", enabled: true },
+  ] }, "test").config;
+  const overlay = { ...settingState.emptyOverlay(), providers: { terminal: false } };
+  const result = settingState.applyOverlay(base, overlay);
+  assert.deepEqual(result.problems, []);
+  assert.equal(result.config.providers.find((provider) => provider.id === "terminal").enabled, false);
+  for (const id of ["constructor", "toString"]) assert.equal(result.config.providers.find((provider) => provider.id === id).enabled, true);
+  assert.equal(base.providers.find((provider) => provider.id === "terminal").enabled, true);
 });
 
 for (const item of failures) {

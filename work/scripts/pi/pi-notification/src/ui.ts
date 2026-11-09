@@ -6,7 +6,7 @@
  *
  * Home is compact; advanced categories, per-rule candidates and source/restore details remain
  * independently reachable. Esc restores the parent's exact focus. No fixed-height blank padding.
- * All persistence, activation and silence checks stay in commands.ts; rendering never sends.
+ * Persistence, activation and silence checks stay in settings-actions.ts; rendering never sends.
  * Ctrl+S saves only the effective focused item, not a hovered candidate or the entire page.
  */
 
@@ -17,18 +17,12 @@ import {
   RULE_INFOS,
   SETTING_CATEGORIES,
   buildSettingItems,
-  builtinDefaultValue,
   categoryPageItems,
   collectionValue,
-  hasUserDefault,
   isCurrentValue,
-  providerDefinitionSource,
   ruleSummary,
-  emailReadiness,
   channelLabel,
-  testBlockMessage,
   routingExceptions,
-  userDefaultValue,
   type SettingCategory,
   type SettingItem,
   type SettingValue,
@@ -36,7 +30,10 @@ import {
 import type { NotificationConfig, TestProgress, DeliveryResult } from "./types.ts";
 import { resolveChannels } from "./rules.ts";
 import { sanitizeError } from "./log.ts";
-import { channelRules, channelState, controlStatus, emailMissing, emailSetup, pendingSettings, type ActionResult, type SaveScope } from "./ui-model.ts";
+import { channelRules, emailMissing, emailSetup, pendingSettings, type SaveScope } from "./ui-model.ts";
+import { builtinDefaultValue, hasUserDefault, providerDefinitionSource, userDefaultValue } from "./settings-state.ts";
+import { channelState, controlStatus, emailReadiness, emailRequirement } from "./channels.ts";
+import { testBlockMessage, type ActionResult, type ItemValue, type SettingsHost } from "./settings-actions.ts";
 import { menuList, SaveReview, textInput } from "./ui-primitives.ts";
 import { SecretPrompt } from "./ui-secret.ts";
 
@@ -49,58 +46,6 @@ export interface SettingsTheme {
 /** Injected key parser: the host passes its keybindings manager, tests pass a stub. */
 export interface SettingsKeybindings {
   matches(data: string, keybinding: string): boolean;
-}
-
-export type ItemValue = SettingValue | SettingValue[];
-
-/**
- * Session-level restriction that overrides the user's own setting, such as forced silence.
- * Kept separate from the three value layers so the UI shows it as an extra limit instead of
- * reporting it as a user default that was turned off.
- */
-export interface SettingsRestriction {
-  label: string;
-  reason: string;
-}
-
-export interface SettingsTestResult extends ActionResult { unsubscribe?: () => void }
-
-export interface SettingsHost {
-  /** Effective config, including this conversation's overlay. */
-  config(): NotificationConfig;
-  /** Raw user file, used for the presence and value of sparse user defaults. */
-  userRaw(): unknown;
-  runtimeState?(): { degraded?: boolean; configError?: boolean; quiet?: boolean; terminalIssue?: string; channelIssues?: string[] };
-  /** One atomic sparse write, only the reviewed canonical leaves. */
-  saveChanges(items: readonly SettingItem[]): ActionResult;
-  /**
-   * Value this conversation's overlay set for the item, or undefined when Enter never touched it.
-   * Presence decides "this conversation changed it"; comparing values cannot tell an override that
-   * happens to equal the user default from an inherited one.
-   */
-  sessionOverride(item: SettingItem): unknown;
-  /** Session-level restrictions that override the user's setting; empty when none apply. */
-  restrictions(): SettingsRestriction[];
-  /** Enter: writes the per-conversation overlay, effective immediately. */
-  setValue(item: SettingItem, value: ItemValue): ActionResult;
-  /** Ctrl+S: freezes the value as a user default with a single sparse write. */
-  saveDefault(item: SettingItem, value: ItemValue): ActionResult;
-  /** Ctrl+T: sends a test notification. */
-  test(channels?: string[], onProgress?: (progress: TestProgress) => void): SettingsTestResult;
-  testEmail(onProgress?: (progress: TestProgress) => void): SettingsTestResult;
-  credentialStatus(): string;
-  canManageCredentials?(): boolean;
-  saveCredential(value: string): ActionResult;
-  deleteCredential(): ActionResult;
-  openQqSettings(): ActionResult | Promise<ActionResult>;
-  /** Ctrl+R: re-reads the config without reloading the extension. */
-  reload(): ActionResult;
-  /** Ctrl+O: read-only, paged status text. */
-  statusLines(): string[];
-  followUserDefault(item: SettingItem): ActionResult;
-  restoreBuiltinDefault(item: SettingItem): ActionResult;
-  itemScope?(item: SettingItem): string[];
-  preview(): { ok: boolean; message: string; lines: string[] };
 }
 
 /** Visible list rows; the component sizes itself instead of reading the terminal height. */
@@ -157,18 +102,24 @@ interface MenuPage {
   focus: number;
 }
 
+type Confirmation =
+  | { kind: "enableChannel"; id: string; addUnified: boolean }
+  | { kind: "apply"; value: ItemValue }
+  | { kind: "followDefault" }
+  | { kind: "restoreBuiltin" };
+
 type View =
   | MenuPage
   | { kind: "detail"; itemId: string; focus: number }
-  | { kind: "input"; itemId: string; buffer: string; error?: string; editor?: Input }
+  | { kind: "input"; itemId: string; error?: string; editor: Input }
   | { kind: "secret"; prompt: SecretPrompt }
   | { kind: "secretConfirm"; focus: number }
   /** Read-only, pageable full field details; `a`/`d` run the restore actions. */
   | { kind: "help"; itemId: string; offset: number }
   /** Search over the complete field table; Enter opens a result even when it is otherwise hidden. */
-  | { kind: "search"; query: string; focus: number; editor?: Input }
+  | { kind: "search"; focus: number; editor: Input }
   /** Confirmation page for the destructive restore; default focus is cancel. */
-  | { kind: "confirm"; itemId: string; focus: number; applyValue?: ItemValue; channelId?: string; addUnified?: boolean; followDefault?: boolean }
+  | { kind: "confirm"; itemId: string; focus: number; action: Confirmation }
   /** Read-only example notification body. */
   | { kind: "preview"; lines: string[]; offset: number; title?: string };
 
@@ -208,9 +159,10 @@ export class NotifySettingsComponent {
   private view: View;
   /** Parent pages, most recent last; Esc pops so a page returns with its exact focus. */
   private history: View[] = [];
-  private message?: { text: string; tone: Tone };
   private feedback?: ActionResult;
-  private testDetails: string[] = [];
+  private get message(): { text: string; tone: Tone } | undefined {
+    return this.feedback ? { text: this.feedback.message, tone: this.feedback.ok ? "info" : "error" } : undefined;
+  }
   private summary: NotifySettingsSummary = { savedDefaults: 0, changed: 0 };
   private cachedWidth?: number;
   private cachedLines?: string[];
@@ -236,7 +188,6 @@ export class NotifySettingsComponent {
   private editor(): Input {
     if (this.view.kind !== "input" && this.view.kind !== "search") throw new Error("Not a text view");
     const view = this.view;
-    view.editor ??= textInput(view.kind === "input" ? view.buffer : view.query);
     view.editor.focused = this.hasFocus;
     return view.editor;
   }
@@ -253,11 +204,9 @@ export class NotifySettingsComponent {
       if (save) {
         const result = this.host.saveChanges(items);
         if (result.ok) this.summary.savedDefaults += items.length;
-        this.refresh();
         this.report(result);
       }
     });
-    this.message = undefined;
     this.invalidate(); this.requestRender();
   }
 
@@ -297,7 +246,7 @@ export class NotifySettingsComponent {
     let latest: ActionResult | undefined;
     let finished = false;
     let sending = false;
-    this.testDetails = [];
+    let testDetails: string[] = [];
     const onProgress = (event: TestProgress): void => {
       if (this.closed || generation !== this.testGeneration || (emailOnly && emailKey !== this.emailStateKey())) return;
       if (event.result) {
@@ -313,20 +262,20 @@ export class NotifySettingsComponent {
         latest = { ok: true, message: `测试：${label}`, feedback: { kind: "progress" } };
         if (emailOnly && emailKey === this.emailStateKey()) { this.emailTestKey = emailKey; this.emailTestLabel = label; }
       } else if (event.stage === "cancelled") {
-        latest = results.size ? { ok: false, message: "测试已停止，已取得的发送结果保留在详情中。", feedback: { kind: "recoverable", details: this.testDetails } }
+        latest = results.size ? { ok: false, message: "测试已停止，已取得的发送结果保留在详情中。", feedback: { kind: "delivery", details: testDetails } }
           : { ok: false, message: sending ? "测试已停止，无法确认发送结果。" : testBlockMessage(event.reason ?? "unknown"), feedback: { kind: event.reason === "internal_error" || !event.reason ? "unknown" : "recoverable", next: "diagnostics" } };
         if (emailOnly && !results.has("email") && emailKey === this.emailStateKey()) { this.emailTestKey = emailKey; this.emailTestLabel = sending ? "结果未知" : "未发送"; }
       } else if (event.stage === "result" || event.stage === "finished") {
         const values = [...results.values()];
-        this.testDetails = values.flatMap((result) => [
+        testDetails = values.flatMap((result) => [
           `${channelLabel(result.providerId)}：${result.skipped ? "未发送" : result.ok ? "服务已接受" : "发送失败"}`,
           ...(result.error ? [`诊断：${sanitizeError(result.error, Math.max(1, result.error.length))}`] : []),
         ]);
-        this.testDetails.push("服务接受不代表实际送达，请检查接收端。");
+        testDetails.push("服务接受不代表实际送达，请检查接收端。");
         const text = values.map((result) => `${channelLabel(result.providerId)}：${result.skipped ? "未发送" : result.ok ? "服务已接受" : "发送失败"}`).join("；");
         latest = { ok: values.length > 0 && values.every((result) => result.ok && !result.skipped),
           message: text || "测试已结束，未取得发送结果。",
-          feedback: { kind: values.some((result) => !result.ok) ? "recoverable" : "progress", details: this.testDetails } };
+          feedback: { kind: "delivery", details: testDetails } };
       }
       if (event.stage === "finished" && emailOnly && !results.has("email") && emailKey === this.emailStateKey()) {
         this.emailTestKey = emailKey; this.emailTestLabel = "结果未知";
@@ -353,13 +302,7 @@ export class NotifySettingsComponent {
   /** Rebuilds the setting list and the current page: Ctrl+R may have changed providers or values. */
   private refresh(): void {
     this.items = buildSettingItems(this.host.config());
-    if (this.view.kind === "menu") {
-      const key = this.view.rows[this.view.focus]?.key;
-      this.view = this.rebuildPage(this.view);
-      if (this.feedback) this.view.rows.push({ key: "feedback", kind: "feedback" });
-      const index = this.view.rows.findIndex((row) => row.key === key);
-      if (index >= 0) this.view.focus = index;
-    }
+    if (this.view.kind === "menu") this.view = this.rebuildPage(this.view);
     else if ((this.view.kind === "detail" || this.view.kind === "input" || this.view.kind === "help" || this.view.kind === "confirm")
       && this.itemById(this.view.itemId) === undefined) {
       // The field or provider disappeared (config edited on disk): return to a valid page rather
@@ -422,7 +365,7 @@ export class NotifySettingsComponent {
         const child = SETTING_CATEGORIES.find((candidate) => candidate.id === id);
         if (child) rows.push({ key: `category:${child.id}`, kind: "category", category: child });
       }
-      if (category.id === "more" && this.itemById("provider:email:from")) rows.push({ key: "email-config", kind: "emailConfig", label: "邮箱配置", summary: emailSetup(this.host.config(), this.host.credentialStatus() !== "未设置", undefined, 0).conditions });
+      if (category.id === "more" && this.itemById("provider:email:from")) rows.push({ key: "email-config", kind: "emailConfig", label: "邮箱配置", summary: emailSetup(this.host.config(), this.host.credentialStatus() !== "未设置").conditions });
       for (const action of category.actions ?? []) rows.push({ key: action.key, kind: "action", action: action.action });
       return { kind: "menu", id: `category:${category.id}`, title: category.label, rows, focus: 0 };
     }
@@ -431,8 +374,7 @@ export class NotifySettingsComponent {
       return { kind: "menu", id: `category:${category.id}`, title: category.label, rows, focus: 0 };
     }
     const { items, collapsed } = categoryPageItems(category, this.items, this.host.config());
-    const channelItems = items;
-    const rows: MenuRow[] = channelItems.map((item) => ({ key: `item:${item.id}`, kind: "field", item, label: item.label }));
+    const rows: MenuRow[] = items.map((item) => ({ key: `item:${item.id}`, kind: "field", item, label: item.label }));
     if (category.id === "channels" && !routingExceptions(this.host.config()).length) {
       const index = rows.findIndex((row) => row.key === "item:routes.unify");
       if (index >= 0) rows.splice(index, 1);
@@ -459,7 +401,7 @@ export class NotifySettingsComponent {
     return { kind: "menu", id: `subgroup:${category.id}`, title: label, rows, focus: 0 };
   }
 
-  private canManageCredentials(): boolean { return this.host.canManageCredentials?.() ?? process.platform === "win32"; }
+  private canManageCredentials(): boolean { return this.host.canManageCredentials(); }
 
   private buildEmailPage(): MenuPage {
     const rows: MenuRow[] = this.items.filter((item) => item.providerId === "email" && item.group === "邮箱")
@@ -507,6 +449,7 @@ export class NotifySettingsComponent {
       const rule = RULE_INFOS.find((candidate) => `rule:${candidate.key}` === page.id);
       rebuilt = rule ? this.buildRulePage(rule) : this.buildHomePage();
     }
+    if (this.feedback) rebuilt.rows.push({ key: "feedback", kind: "feedback" });
     const index = focusedKey === undefined ? -1 : rebuilt.rows.findIndex((row) => row.key === focusedKey);
     rebuilt.focus = index >= 0 ? index : Math.min(page.focus, Math.max(0, rebuilt.rows.length - 1));
     return rebuilt;
@@ -567,7 +510,7 @@ export class NotifySettingsComponent {
       }
       if (view.id === "email-config" && row.item.providerOptionPath) {
         const value = this.value(row.item);
-        this.push({ kind: "input", itemId: row.item.id, buffer: Array.isArray(value) ? value.join(", ") : String(value ?? "") });
+        this.push({ kind: "input", itemId: row.item.id, editor: textInput(Array.isArray(value) ? value.join(", ") : String(value ?? "")) });
       } else this.push({ kind: "detail", itemId: row.item.id, focus: this.initialDetailFocus(row.item) });
       return;
     }
@@ -618,9 +561,7 @@ export class NotifySettingsComponent {
       return;
     }
     if (row.action === "reload") {
-      const result = this.host.reload();
-      this.refresh();
-      this.report(result);
+      this.report(this.host.reload());
       return;
     }
     if (row.action === "search") {
@@ -638,7 +579,7 @@ export class NotifySettingsComponent {
   private feedbackLabel(): string {
     if (this.feedback?.feedback?.next === "email") return "配置邮箱";
     if (this.feedback?.feedback?.next === "home") return "返回通知设置";
-    return this.testDetails.length ? "测试结果与详情" : this.feedback?.feedback?.kind === "progress" ? "测试详情" : "查看问题详情";
+    return this.feedback?.feedback?.kind === "delivery" ? "测试结果与详情" : this.feedback?.feedback?.kind === "progress" ? "测试详情" : "查看问题详情";
   }
 
   private openFeedback(): void {
@@ -651,30 +592,28 @@ export class NotifySettingsComponent {
   }
 
   private openSearch(): void {
-    this.push({ kind: "search", query: "", focus: 0 });
+    this.push({ kind: "search", editor: textInput(""), focus: 0 });
   }
 
   /** A channel gate is never implemented by removing a unified destination: explicit rule routes
    * must stop too. Re-enabling is reviewed, and never rewrites any rule route. */
   private toggleChannel(item: SettingItem): void {
-    const config = this.host.config(), id = item.providerId!;
+    const id = item.providerId!;
     if (this.value(item) === true) { this.commit(item, false, false); return; }
-    if (this.host.runtimeState?.().channelIssues?.includes(id) || (id !== "email" && channelState(config, id, this.host.credentialStatus() !== "未设置") === "未配置")) {
-      this.report({ ok: false, message: "此接收方式暂不可用。请查看配置详情。", feedback: { kind: "blocked", next: "diagnostics" } });
+    const plan = this.host.channelActivation(id);
+    if (plan.kind === "blocked") {
+      this.report({ ok: false, message: plan.message, feedback: { kind: "blocked", next: "diagnostics" } });
       return;
     }
-    const missing = id === "email" && config.providers.find((entry) => entry.id === id)?.type === "email"
-      ? emailMissing(config, this.host.credentialStatus() !== "未设置") : undefined;
-    if (missing) {
+    if (plan.kind === "email") {
       if (this.view.kind === "menu" && this.view.id === "email-config") {
-        const target = missing.includes("发件") ? "item:provider:email:from" : missing.includes("收件") ? "item:provider:email:to" : "action:credential-save";
+        const target = plan.field === "credential" ? "action:credential-save" : `item:provider:email:${plan.field}`;
         const index = this.view.rows.findIndex((row) => row.key === target);
         if (index >= 0) { this.view.focus = index; this.openFocusedRow(); }
       } else this.push(this.buildEmailPage());
       return;
     }
-    this.push({ kind: "confirm", itemId: item.id, focus: 0, applyValue: true, channelId: id,
-      addUnified: !config.channels.includes(id) && !channelRules(config, id).length });
+    this.push({ kind: "confirm", itemId: item.id, focus: 0, action: { kind: "enableChannel", id, addUnified: plan.addUnified } });
   }
 
   /**
@@ -753,12 +692,12 @@ export class NotifySettingsComponent {
     const config = this.host.config();
     const lines: string[] = [];
     if (this.view.id === "home") {
-      const state = controlStatus(config, { ...this.host.runtimeState?.(), restrictions: this.host.restrictions(), hasCredential: this.host.credentialStatus() !== "未设置" });
+      const state = controlStatus(config, { ...this.host.runtimeState(), restrictions: this.host.restrictions(), hasCredential: this.host.credentialStatus() !== "未设置" });
       lines.push(...wrapTextWithAnsi(this.theme.fg(state.tone, state.label), width));
       if (this.pending().length) lines.push(...wrapTextWithAnsi(this.theme.fg("dim", "当前对话 · 有未保存修改"), width));
     }
     if (this.view.id === "email-config") {
-      const setup = emailSetup(config, this.host.credentialStatus() !== "未设置", this.emailTestKey === this.emailStateKey() ? this.emailTestLabel : undefined, this.pending("email").length);
+      const setup = emailSetup(config, this.host.credentialStatus() !== "未设置", this.emailTestKey === this.emailStateKey() ? this.emailTestLabel : undefined);
       for (const text of [setup.conditions, ...(setup.next ? [`下一步：${setup.next}`] : []), `测试：${setup.test}`]) lines.push(...wrapTextWithAnsi(this.theme.fg("muted", text), width));
       if (!this.canManageCredentials() && this.host.credentialStatus() === "未设置") lines.push(...wrapTextWithAnsi(this.theme.fg("dim", "此系统需在启动前配置授权码，详见帮助。"), width));
     }
@@ -815,7 +754,7 @@ export class NotifySettingsComponent {
     if (!item) return "通知";
     if (view.kind === "input") return `${item.providerOptionPath ? "填写" : "修改"}${item.label}`;
     if (view.kind === "help") return `字段说明 · ${item.label}`;
-    if (view.kind === "confirm") return `${view.followDefault ? "使用默认设置" : view.applyValue === undefined ? "恢复默认" : "确认应用"} · ${item.label}`;
+    if (view.kind === "confirm") return `${view.action.kind === "followDefault" ? "使用默认设置" : view.action.kind === "restoreBuiltin" ? "恢复默认" : "确认应用"} · ${item.label}`;
     return item.label;
   }
 
@@ -847,7 +786,7 @@ export class NotifySettingsComponent {
       lines.push(`接收方式配置：${fromUser ? "自定义配置" : "内置默认"}`);
       lines.push("连接凭据不在此界面显示，保存开关不会修改连接配置。");
     }
-    if (item.paths || item.destinations) lines.push(`影响范围：${(this.host.itemScope?.(item) ?? [item.label]).join("、")}`);
+    if (item.paths || item.destinations) lines.push(`影响范围：${this.host.itemScope(item).join("、")}`);
     if (item.destinations) lines.push(`自定义例外：${routingExceptions(this.host.config()).join("、") || "无"}；取消统一选择不会关闭例外使用的渠道。`);
     if (item.id === "reminders.completed") lines.push("执行完成只表示 Pi 停止自动执行，不保证业务目标成功。");
     if (item.id === "reminders.failed") lines.push("包含运行失败和上下文压缩失败，不包括每次可恢复工具失败。");
@@ -865,14 +804,9 @@ export class NotifySettingsComponent {
   /** Why an item is currently ignored, or undefined when it is live. */
   private inactiveReason(item: SettingItem): string | undefined {
     const config = this.host.config();
-    if (item.visible && !item.visible(config)) {
-      return item.id === "coalesce.toolFailureWindowMs"
-        ? "当前工具失败策略为“并入结果”，此参数只在“立即提醒”下生效"
-        : "当前配置下此参数不生效";
-    }
     if (item.rule) {
-      const rule = (config.rules as Record<string, { enabled?: boolean }>)[item.rule.key];
-      if (rule && rule.enabled !== true) return `所属规则“${item.rule.label}”已关闭，启用后生效`;
+      const rule = config.rules[item.rule.key];
+      if (!rule.enabled) return `所属规则“${item.rule.label}”已关闭，启用后生效`;
     }
     if (item.id.startsWith("quietHours.") && item.id !== "quietHours.enabled" && !config.quietHours.enabled) {
       return "免打扰未开启，启用后生效";
@@ -941,7 +875,7 @@ export class NotifySettingsComponent {
   private searchResults(): SettingItem[] {
     const view = this.view;
     if (view.kind !== "search") return [];
-    const query = view.query.trim().toLowerCase();
+    const query = view.editor.getValue().trim().toLowerCase();
     if (query === "") return this.items;
     return this.items.filter((item) => [item.id, item.group, item.label, item.providerId ?? "", item.rule?.label ?? "", item.inputHint ?? ""]
       .join(" ")
@@ -976,15 +910,16 @@ export class NotifySettingsComponent {
     if (view.kind !== "confirm") return [];
     const item = this.itemById(view.itemId);
     if (!item) return [];
-    if (view.followDefault) return [...wrapTextWithAnsi(`使用${item.label}的默认设置，可能恢复该接收方式的通知。`, width),
+    if (view.action.kind === "followDefault") return [...wrapTextWithAnsi(`使用${item.label}的默认设置，可能恢复该接收方式的通知。`, width),
       ...wrapTextWithAnsi(`适用规则：${channelRules(this.host.config(), item.providerId!).join("、") || "无"}。接收选择不变。`, width),
       `${FOCUS_CELL(view.focus === 0)}取消`, `${FOCUS_CELL(view.focus === 1)}确认使用默认设置`];
-    if (view.channelId) {
-      return [`${FOCUS_CELL(view.focus === 0)}关闭`, `${FOCUS_CELL(view.focus === 1)}开启`];
+    if (view.action.kind === "enableChannel") {
+      return [...(view.action.addUnified ? wrapTextWithAnsi("开启后加入统一接收选择；逐规则例外不变。", width) : []),
+        `${FOCUS_CELL(view.focus === 0)}关闭`, `${FOCUS_CELL(view.focus === 1)}开启`];
     }
-    if (view.applyValue !== undefined) {
+    if (view.action.kind === "apply") {
       const config = this.host.config();
-      const selected = Array.isArray(view.applyValue) ? view.applyValue.map(String) : [];
+      const selected = Array.isArray(view.action.value) ? view.action.value.map(String) : [];
       const restored = selected.filter((id) => !config.channels.includes(id) && config.providers.find((entry) => entry.id === id)?.enabled === false);
       const text = item.id === "routes.unify"
         ? [`将以下规则改为跟随统一接收选择：${routingExceptions(config).join("、") || "全部规则"}。`, "提醒时机和重要程度不变。"]
@@ -999,7 +934,7 @@ export class NotifySettingsComponent {
       `当前值：${item.format(this.value(item))}`,
       `恢复后：${item.format(builtinDefaultValue(item))}；重置此项的默认设置和当前对话修改`,
       ...(item.providerId && !item.providerOptionPath ? [`适用规则：${channelRules(this.host.config(), item.providerId).join("、") || "无"}。接收选择不变。`] : []),
-      `影响范围：${(this.host.itemScope?.(item) ?? [item.label]).join("、")}；其他设置不变`,
+      `影响范围：${this.host.itemScope(item).join("、")}；其他设置不变`,
       "",
       `${FOCUS_CELL(view.focus === 0)}取消`,
       `${FOCUS_CELL(view.focus === 1)}确认恢复`,
@@ -1130,7 +1065,7 @@ export class NotifySettingsComponent {
       return truncateToWidth(`${focus}${row.text}`, width);
     }
     if (row.kind === "feedback") return truncateToWidth(`${focus}${this.feedbackLabel()}${OPEN_MARK}`, width);
-    if (row.kind === "channel") return truncateToWidth(`${focus}${row.item.label}  ${channelState(this.host.config(), row.item.providerId!, this.host.credentialStatus() !== "未设置", this.host.runtimeState?.().terminalIssue, this.host.runtimeState?.().channelIssues)}${mark}`, width);
+    if (row.kind === "channel") return truncateToWidth(`${focus}${row.item.label}  ${channelState(this.host.config(), row.item.providerId!, this.host.credentialStatus() !== "未设置", this.host.runtimeState().terminalIssue, this.host.runtimeState().channelIssues)}${mark}`, width);
     const summary = row.kind === "field"
       ? row.item.format(this.value(row.item))
       : row.kind === "rule"
@@ -1288,9 +1223,7 @@ export class NotifySettingsComponent {
     if (matchesKey(data, Key.ctrl("r"))) {
       // Re-reading changes the effective config, so the page is rebuilt while the current view
       // and focus are preserved.
-      const result = this.host.reload();
-      this.refresh();
-      this.report(result);
+      this.report(this.host.reload());
       return;
     }
     if (matchesKey(data, Key.ctrl("o"))) {
@@ -1336,15 +1269,10 @@ export class NotifySettingsComponent {
     } else {
       const editor = this.editor();
       editor.handleInput(data);
-      this.setSearchQuery(editor.getValue());
+      view.focus = 0;
+      this.invalidate();
+      this.requestRender();
     }
-  }
-
-  private setSearchQuery(query: string): void {
-    if (this.view.kind !== "search") return;
-    this.view = { ...this.view, query, focus: 0 };
-    this.invalidate();
-    this.requestRender();
   }
 
   private moveSearch(next: number, total: number): void {
@@ -1372,20 +1300,16 @@ export class NotifySettingsComponent {
       const item = this.itemById(view.itemId);
       this.pop();
       if (item) {
-        if (view.followDefault) {
+        if (view.action.kind === "followDefault") {
           this.report(this.host.followUserDefault(item));
-        } else if (view.channelId) {
-          const target: SettingItem = { ...item, patch: () => ({ kind: "compound", operations: [
-            { kind: "providers", id: view.channelId!, value: true },
-            ...(view.addUnified ? [{ kind: "path" as const, path: "channels", value: [...new Set([...this.host.config().channels, view.channelId])] }] : []),
-          ] }) };
-          this.commit(target, true, false);
-        } else if (view.applyValue !== undefined) {
-          this.commit(item, view.applyValue, false);
-        } else {
-          const result = this.host.restoreBuiltinDefault(item);
-          this.refresh();
+        } else if (view.action.kind === "enableChannel") {
+          const result = this.host.enableChannel(view.action.id);
+          if (result.ok) this.summary.changed++;
           this.report(result);
+        } else if (view.action.kind === "apply") {
+          this.commit(item, view.action.value, false);
+        } else {
+          this.report(this.host.restoreBuiltinDefault(item));
         }
         this.requestRender();
       }
@@ -1419,10 +1343,7 @@ export class NotifySettingsComponent {
   }
 
   private report(result: ActionResult): void {
-    if (result.feedback?.details !== this.testDetails) this.testDetails = [];
     this.feedback = !result.ok || result.feedback ? result : undefined;
-    this.message = this.feedback ? { text: result.message, tone: result.ok ? "info" : "error" } : undefined;
-    if (!this.feedback) this.testDetails = [];
     this.refresh();
     this.requestRender();
   }
@@ -1460,7 +1381,7 @@ export class NotifySettingsComponent {
       const candidate = rows[view.focus];
       if (!candidate) return;
       if (candidate.custom) {
-        this.push({ kind: "input", itemId: item.id, buffer: String(this.value(item) ?? "") });
+        this.push({ kind: "input", itemId: item.id, editor: textInput(String(this.value(item) ?? "")) });
         return;
       }
       this.selectCandidate(item, candidate);
@@ -1478,20 +1399,20 @@ export class NotifySettingsComponent {
       return;
     }
     if (item.id === "routes.unify") {
-      this.push({ kind: "confirm", itemId: item.id, focus: 0, applyValue: value });
+      this.push({ kind: "confirm", itemId: item.id, focus: 0, action: { kind: "apply", value } });
       return;
     }
     if (item.destinations && Array.isArray(value)) {
       const added = value.filter((id) => !this.host.config().channels.includes(String(id)));
       if (added.includes("email")) {
         const email = this.host.config().providers.find((entry) => entry.id === "email");
-        if (!email?.options.from || !Array.isArray(email.options.to) || !email.options.to.length || this.host.credentialStatus() === "未设置") {
+        if (emailRequirement(email, this.host.credentialStatus() !== "未设置")) {
           this.push(this.buildEmailPage());
           return;
         }
       }
       if (added.length) {
-        this.push({ kind: "confirm", itemId: item.id, focus: 0, applyValue: value });
+        this.push({ kind: "confirm", itemId: item.id, focus: 0, action: { kind: "apply", value } });
         return;
       }
     }
@@ -1521,19 +1442,16 @@ export class NotifySettingsComponent {
       if (!item) return;
       if (item.providerId && !item.providerOptionPath && this.value(item) !== true
         && (this.hasDefault(item) ? this.defaultValue(item) : builtinDefaultValue(item)) === true) {
-        this.push({ kind: "confirm", itemId: item.id, focus: 0, followDefault: true });
+        this.push({ kind: "confirm", itemId: item.id, focus: 0, action: { kind: "followDefault" } });
         return;
       }
-      const result = this.host.followUserDefault(item);
-      this.refresh();
-      this.report(result);
-      this.requestRender();
+      this.report(this.host.followUserDefault(item));
       return;
     }
     if (data === "d") {
       // Destructive, so it goes through the confirmation page (default focus: cancel).
       if (!item) return;
-      this.push({ kind: "confirm", itemId: item.id, focus: 0 });
+      this.push({ kind: "confirm", itemId: item.id, focus: 0, action: { kind: "restoreBuiltin" } });
       return;
     }
     const maxOffset = Math.max(0, this.totalRows() - BODY_ROWS);
@@ -1556,7 +1474,6 @@ export class NotifySettingsComponent {
       const result = this.host.saveCredential(event.submitted);
       if (result.ok) this.credentialRevision++;
       this.pop();
-      this.refresh();
       this.report(result);
       return;
     }
@@ -1575,7 +1492,6 @@ export class NotifySettingsComponent {
       if (confirmed) {
         const result = this.host.deleteCredential();
         if (result.ok) this.credentialRevision++;
-        if (this.view.kind === "menu") this.view = this.rebuildPage(this.view);
         this.report(result);
       }
       return;
@@ -1596,7 +1512,7 @@ export class NotifySettingsComponent {
       return;
     }
     if (this.keybindings.matches(data, "tui.select.confirm") || data === "\n") {
-      const parsed = item.parseInput(view.buffer);
+      const parsed = item.parseInput(view.editor.getValue());
       if (!parsed.ok) {
         this.view = { ...view, error: parsed.message };
         this.invalidate();
@@ -1610,7 +1526,6 @@ export class NotifySettingsComponent {
     }
     const editor = this.editor();
     editor.handleInput(data);
-    view.buffer = editor.getValue();
     view.error = undefined;
     this.invalidate();
     this.requestRender();
@@ -1618,12 +1533,11 @@ export class NotifySettingsComponent {
 
   /** Enter: submits the value; collection kinds are turned into an array by the callers. */
   private commit(item: SettingItem, value: ItemValue, viaSave: boolean): void {
-    const result = viaSave ? this.host.saveDefault(item, value) : this.host.setValue(item, value);
+    const result = viaSave ? this.host.saveDefault(item) : this.host.setValue(item, value);
     if (result.ok) {
       if (viaSave) this.summary.savedDefaults += 1;
       else this.summary.changed += 1;
     }
-    this.refresh();
     this.report(result);
   }
 
@@ -1669,11 +1583,4 @@ export class NotifySettingsComponent {
       ...(this.message ? { message: this.message } : {}),
     };
   }
-}
-
-/** Factory handed to `ctx.ui.custom()` by the command layer. */
-export function createNotifySettingsComponent(
-  options: NotifySettingsComponentOptions,
-): NotifySettingsComponent {
-  return new NotifySettingsComponent(options);
 }

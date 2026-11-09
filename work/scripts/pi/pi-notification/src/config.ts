@@ -2,7 +2,7 @@
  * Configuration.
  *
  * Three layers: factory defaults, sparse user defaults on disk, and per-conversation
- * choices (an overlay owned by `settings.ts`). This module owns the first two plus the
+ * choices (an overlay owned by `settings-state.ts`). This module owns the first two plus the
  * degradation rules; there is no project-level layer.
  *
  * Writes validate first, then write a same-directory temporary file (0o600) and rename
@@ -578,7 +578,7 @@ function readJsonFile(file: string): { ok: true; value: unknown } | { ok: false;
  *
  * Notification errors degrade to the safe subset; API-only errors disable the API independently.
  * Reasons remain visible in the status view. The
- * per-conversation overlay is applied later by `settings.ts`.
+ * per-conversation overlay is applied later by `settings-state.ts`.
  */
 export function loadConfig(options: ReadConfigOptions): ConfigLoadResult {
   const errors: ConfigProblem[] = [];

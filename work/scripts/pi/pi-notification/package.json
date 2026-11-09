@@ -8,7 +8,7 @@
   "scripts": {
     "test:routing": "node test/routing-contract.mjs",
     "test:kiss": "npm run test:routing",
-    "test:unit": "node test/routing-contract.mjs && node test/config-validation.mjs && node test/settings-patch.mjs && node test/registry-log.mjs && node test/lifecycle-state.mjs && node test/terminal-channel.mjs && node test/service-coalesce.mjs && node test/webhook-channel.mjs && node test/message-api.mjs && node test/email-channel.mjs",
+    "test:unit": "node test/routing-contract.mjs && node test/config-validation.mjs && node test/settings-patch.mjs && node test/settings-actions.mjs && node test/registry-log.mjs && node test/lifecycle-state.mjs && node test/terminal-channel.mjs && node test/service-coalesce.mjs && node test/webhook-channel.mjs && node test/message-api.mjs && node test/email-channel.mjs",
     "test": "npm run test:unit && npm run test:ui && npm run test:host && npm run test:cli",
     "test:config": "node test/config-validation.mjs",
     "test:patch": "node test/settings-patch.mjs",

@@ -9,7 +9,7 @@ import { defaultConfig, loadConfig, userConfigPath, writeUserDefault } from "../
 import { createEnvelope } from "../src/messages.ts";
 import { createMessagePublisher } from "../src/api.ts";
 import { createRuntime } from "../src/runtime.ts";
-import { applyOverlay, overlayEntryData, overlayFromEntry } from "../src/settings.ts";
+import { applyOverlay, overlayEntryData, overlayFromEntry } from "../src/settings-state.ts";
 import { sendHttpBody, validateHttpOptions } from "../src/providers/http.ts";
 
 const log = { log() {}, record() {} };
@@ -101,7 +101,7 @@ try {
   });
 
   await step("API endpoint/凭据不进入会话 overlay", () => {
-    const raw = { patch: { enabled: false, api: { enabled: true, headers: { Authorization: "private-session-header" } } }, providers: {} };
+    const raw = { patch: { enabled: false, api: { enabled: true, headers: { Authorization: "private-session-header" } } }, providers: {}, providerOptions: {} };
     const overlay = overlayFromEntry(raw);
     assert.deepEqual(overlay.patch, { enabled: false });
     assert.equal(applyOverlay(defaultConfig(), raw).config.api.enabled, false);

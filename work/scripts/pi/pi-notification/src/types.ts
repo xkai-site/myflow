@@ -6,6 +6,7 @@
  */
 
 export type NotifyLevel = "info" | "warning" | "error";
+export const LEVEL_RANK: Record<NotifyLevel, number> = { info: 0, warning: 1, error: 2 };
 
 export type LogLevel = NotifyLevel | "debug";
 

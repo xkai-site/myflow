@@ -21,7 +21,6 @@ import type {
   NotificationService,
   Notifier,
   NotifierRegistry,
-  NotifyLevel,
   ServiceSnapshot,
   SubmitOptions,
   SubmissionResult,
@@ -36,7 +35,7 @@ export interface ServiceOptions {
   isSilenced?(): boolean;
 }
 
-const LEVEL_RANK: Record<NotifyLevel, number> = { info: 0, warning: 1, error: 2 };
+import { LEVEL_RANK } from "./types.ts";
 
 /** Cap on remembered dedupe keys, so a long-lived process cannot grow without bound. */
 const DEDUPE_LIMIT = 512;
@@ -177,16 +176,7 @@ export function createService(options: ServiceOptions): NotificationService {
     if (!provider.enabled) return createNoopNotifier(providerId, provider.type, "此接收方式已关闭");
     const cached = notifiers.get(providerId);
     if (cached) return cached;
-    let notifier: Notifier;
-    if (!provider) {
-      log.log("warning", `通知引用了未在配置中定义的渠道，已跳过: id=${providerId}`);
-      notifier = createNoopNotifier(providerId, "unknown", "未在配置中定义的渠道");
-    } else if (!provider.enabled) {
-      log.log("debug", `渠道在配置中被禁用，已跳过: id=${providerId}`);
-      notifier = createNoopNotifier(providerId, provider.type, "渠道已在配置中禁用");
-    } else {
-      notifier = registry.create(providerId, provider.type, provider.options);
-    }
+    const notifier = registry.create(providerId, provider.type, provider.options);
     notifiers.set(providerId, notifier);
     return notifier;
   }

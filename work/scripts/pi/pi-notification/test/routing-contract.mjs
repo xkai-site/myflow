@@ -2,6 +2,8 @@
 import assert from "node:assert/strict";
 import * as config from "../src/config.ts";
 import * as settings from "../src/settings.ts";
+import * as settingState from "../src/settings-state.ts";
+import * as channels from "../src/channels.ts";
 import * as rules from "../src/rules.ts";
 import { createService } from "../src/service.ts";
 
@@ -39,9 +41,9 @@ const harness = (c) => {
     assert.equal(config.defaultConfig().rules.runCompleted.channels, "inherit");
   });
   await step("old session arrays survive; changing unified destinations does not erase them", () => {
-    const overlay = settings.overlayFromEntry({ patch: { rules: { runCompleted: { channels: ["custom"] } } }, providers: {} });
+    const overlay = settingState.overlayFromEntry({ patch: { rules: { runCompleted: { channels: ["custom"] } } }, providers: {} });
     overlay.patch.channels = ["terminal", "email"];
-    const applied = settings.applyOverlay(config.defaultConfig(), overlay);
+    const applied = settingState.applyOverlay(config.defaultConfig(), overlay);
     assert.deepEqual(applied.problems, []);
     assert.deepEqual(rules.resolveChannels(applied.config, applied.config.rules.runCompleted), ["custom"]);
     assert.deepEqual(rules.resolveChannels(applied.config, applied.config.rules.runFailed), ["terminal", "email"]);
@@ -72,11 +74,11 @@ const harness = (c) => {
     const c = config.defaultConfig();
     const email = c.providers.find((p) => p.id === "email");
     email.enabled = true; email.options.from = "sender@qq.com"; email.options.to = ["reader@example.com"];
-    const state = settings.emailReadiness(c, true);
+    const state = channels.emailReadiness(c, true);
     assert.equal(state.usedBy, 0);
     assert.match(state.label, /尚无提醒使用/);
     c.channels = ["terminal", "email"];
-    assert.ok(settings.emailReadiness(c, true).usedBy > 0);
+    assert.ok(channels.emailReadiness(c, true).usedBy > 0);
   });
 }
 if (failures.length) process.exitCode = 1;

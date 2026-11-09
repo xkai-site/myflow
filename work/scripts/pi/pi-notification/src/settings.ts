@@ -1,301 +1,70 @@
-/**
- * Single source of truth for the notification settings.
- *
- * Three concerns live here so `commands` and `ui` never build path strings themselves:
- *  1. the setting description table: path, group, kind, candidates (including presets),
- *     formatting and input parsing per item;
- *  2. the session overlay: Enter changes the per-conversation value, which is deep-merged
- *     onto the config read from disk; provider switches live in a separate `providers` map
- *     so channel options (which may reference headers or credentials) are never copied
- *     into a session entry;
- *  3. sparse user defaults: Ctrl+S writes only the saved item, and `hasUserDefault()`
- *     decides by path presence in the raw JSON rather than by comparing against factory
- *     defaults, because a factory default is not something the user saved.
- *
- * No IO and no `ctx` here: writes live in `config.ts`, rendering and key handling in `ui.ts`.
+/** Setting descriptions: identity, presentation, input parsing and owned write operations.
+ * Session/default state and transaction semantics live in settings-state.ts. No IO here.
  */
-
-import { defaultConfig, mergeConfig, type ConfigProblem } from "./config.ts";
-import { getPathValue, hasPath, isPlainObject, mergePatch, removePath, setPatchPath, type ConfigPatch } from "./patch.ts";
-import type { NotificationConfig, NotifyLevel, ToolFailureMode } from "./types.ts";
+import { getPathValue } from "./patch.ts";
 import { resolveChannels } from "./rules.ts";
-
-// ---------------------------------------------------------------------------
-// Session overlay
-// ---------------------------------------------------------------------------
-
-export { getPathValue, hasPath, mergePatch, setPatchPath };
-export type { ConfigPatch };
-
-/**
- * Per-conversation choices. `patch` goes through the `mergeConfig` field validation;
- * `providers` stores only id to enabled and stays decoupled from the provider array
- * in the config.
- */
-export interface SessionOverlay {
-  patch: ConfigPatch;
-  providers: Record<string, boolean>;
-  providerOptions: Record<string, Record<string, unknown>>;
-  /** Provider switches last changed by the unified-destination item, never arbitrary paths. */
-  channelOwners?: string[];
-}
-
-/** Explain the first unmet prerequisite without conflating a missing credential with a closed switch. */
-export const QQ_MAIL_URL = "https://mail.qq.com/";
-
-export function testBlockMessage(reason: string): string {
-  const messages: Record<string, string> = {
-    silenced: "未发送：当前对话已强制静默，无法开启通知。",
-    disabled: "未发送：请先开启通知总开关。",
-    below_min_level: "未发送：此通知的重要程度低于接收范围。",
-    no_channels: "未发送：请先选择接收方式。",
-    no_available_channels: "未发送：选中的接收方式已关闭或不存在；请检查接收方式开关。",
-    duplicate: "未发送：该测试已提交。",
-    filtered: "未发送：该通知被当前设置筛选。",
-    queue_full: "未发送：等待发送的提醒已满，请稍后重试。",
-    queue_replaced: "未发送：等待期间被更重要的提醒替换，请重试。",
-    disposed: "未发送：设置已重载或对话已结束，请重新打开设置测试。",
-    internal_error: "测试未完成：请在状态与诊断中查看原因。",
-  };
-  return messages[reason] ?? "测试未完成。请查看诊断后重试。";
-}
-
-export function emailReadiness(config: NotificationConfig, hasAuthCode: boolean): { label: string; usedBy: number } {
-  const provider = config.providers.find((entry) => entry.id === "email" && entry.type === "email");
-  const usedBy = Object.values(config.rules).filter((rule) => rule.enabled && resolveChannels(config, rule).includes("email")).length;
-  const label = !provider ? "未配置" : !provider.options.from ? "缺发件地址" : !Array.isArray(provider.options.to) || !provider.options.to.length ? "缺收件地址"
-    : !hasAuthCode ? "缺授权码" : !provider.enabled ? "渠道未启用" : !config.enabled ? "总开关已关" : !usedBy ? "尚无提醒使用" : "配置已就绪";
-  return { label, usedBy };
-}
-
-export function routingExceptions(config: NotificationConfig): string[] {
-  return RULES.filter((rule) => config.rules[rule.key].channels !== "inherit").map((rule) => rule.label);
-}
-
-export function emailTestBlockReason(config: NotificationConfig, hasAuthCode: boolean): string | undefined {
-  if (!config.enabled) return "通知总开关已关闭，请先开启通知。";
-  const provider = config.providers.find((candidate) => candidate.id === "email" && candidate.type === "email");
-  if (!provider?.enabled) return "请先开启邮箱通知。";
-  if (typeof provider.options.from !== "string" || !provider.options.from || !Array.isArray(provider.options.to) || provider.options.to.length === 0) {
-    return "请填写发件和收件邮箱地址。";
-  }
-  if (!hasAuthCode) return "请设置 QQ 邮箱授权码（专用发送凭据，非登录密码）。";
-  return undefined;
-}
-
-export function emptyOverlay(): SessionOverlay {
-  return { patch: {}, providers: {}, providerOptions: {} };
-}
-
-/** Empty overlay means no session entry is written and the config is left as read. */
-export function isEmptyOverlay(overlay: SessionOverlay): boolean {
-  return Object.keys(overlay.patch).length === 0 && Object.keys(overlay.providers).length === 0 && Object.keys(overlay.providerOptions ?? {}).length === 0;
-}
-
-/**
- * Restores an overlay from session entry data; defensive because the session file can be edited by
- * hand. An entry with an empty patch/providers is a valid snapshot meaning “everything was cleared”
- * and is returned as such: dropping it would let a `/reload` resurrect the previous entry's choices.
- */
-function notificationPatch(patch: ConfigPatch): ConfigPatch {
-  const { api: _api, ...allowed } = structuredClone(patch);
-  return allowed;
-}
-
-export function overlayFromEntry(value: unknown): SessionOverlay | undefined {
-  if (!isPlainObject(value)) return undefined;
-  const patch = isPlainObject(value.patch) ? notificationPatch(value.patch as ConfigPatch) : {};
-  const providers: Record<string, boolean> = {};
-  if (isPlainObject(value.providers)) {
-    for (const [id, enabled] of Object.entries(value.providers)) {
-      if (typeof enabled === "boolean") providers[id] = enabled;
-    }
-  }
-  const providerOptions: Record<string, Record<string, unknown>> = {};
-  if (isPlainObject(value.providerOptions)) {
-    for (const [id, options] of Object.entries(value.providerOptions)) {
-      if (isPlainObject(options)) providerOptions[id] = options;
-    }
-  }
-  const channelOwners = Array.isArray(value.channelOwners)
-    ? [...new Set(value.channelOwners.filter((id): id is string => typeof id === "string" && Object.hasOwn(providers, id)))] : [];
-  return { patch, providers, providerOptions, ...(channelOwners.length ? { channelOwners } : {}) };
-}
-
-export const SESSION_OVERLAY_ENTRY = "notify-session-overlay";
-
-/** Session snapshot: only non-sensitive options are exposed by the settings items. */
-export function overlayEntryData(sessionId: string | undefined, overlay: SessionOverlay, at: number) {
-  return { sessionId, patch: notificationPatch(overlay.patch), providers: overlay.providers, providerOptions: overlay.providerOptions,
-    ...(overlay.channelOwners?.length ? { channelOwners: [...overlay.channelOwners] } : {}), at };
-}
-
-/**
- * Restores the overlay of **this** session from session entries.
- *
- * Filtering by sessionId is required: `/fork` and `/clone` copy entries into a new session
- * file, and since that session has a different id it must not inherit the temporary choices
- * of the previous conversation. Every overlay is a full snapshot, so the last one wins.
- */
-export function restoreOverlayFromEntries(entries: readonly unknown[], sessionId: string | undefined): SessionOverlay {
-  let overlay = emptyOverlay();
-  if (sessionId === undefined) return overlay;
-  for (const entry of entries) {
-    if (!isPlainObject(entry) || entry.type !== "custom" || entry.customType !== SESSION_OVERLAY_ENTRY) continue;
-    const data = entry.data;
-    if (!isPlainObject(data) || data.sessionId !== sessionId) continue;
-    const restored = overlayFromEntry(data);
-    if (restored) overlay = restored;
-  }
-  return overlay;
-}
-
-/**
- * Applies the overlay on top of `base` (factory plus user defaults).
- *
- * `mergeConfig` performs the per-field validation: one overlay or one saved setting touches
- * a single field, and every sibling must be inherited from `base`. When validation fails the
- * whole overlay is ignored and the problems are reported, because a stale self-made overlay
- * must never degrade delivery.
- */
-export function applyOverlay(
-  base: NotificationConfig,
-  overlay: SessionOverlay,
-): { config: NotificationConfig; problems: ConfigProblem[] } {
-  if (isEmptyOverlay(overlay)) return { config: base, problems: [] };
-  const raw: ConfigPatch = notificationPatch(overlay.patch);
-  if (Object.keys(overlay.providerOptions ?? {}).length > 0 || Object.keys(overlay.providers).length > 0) {
-    raw.providers = base.providers.map((provider) => {
-      const options = overlay.providerOptions?.[provider.id];
-      return {
-        ...provider,
-        ...(options ? { options: mergePatch(provider.options, options) } : {}),
-        ...(overlay.providers[provider.id] === undefined ? {} : { enabled: overlay.providers[provider.id] }),
-      };
-    });
-  }
-  const merged = mergeConfig(base, raw, SESSION_OVERLAY_ENTRY);
-  if (merged.errors.length > 0) return { config: base, problems: merged.errors };
-  return { config: merged.config, problems: [] };
-}
-
-// ---------------------------------------------------------------------------
-// Setting description table
-// ---------------------------------------------------------------------------
+import type { NotificationConfig, NotifyLevel } from "./types.ts";
 
 export type SettingKind = "boolean" | "enum" | "number" | "time" | "collection";
-
 export type SettingValue = string | number | boolean;
-
-export type SettingPatch = SimpleSettingPatch | { kind: "compound"; operations: SimpleSettingPatch[] };
 export type SimpleSettingPatch =
-  /** Plain field: one path serves both the session overlay and the sparse user file. */
   | { kind: "path"; path: string; value: unknown }
-  /** Provider switch: the overlay uses the provider map, the user file gets the whole array. */
   | { kind: "providers"; id: string; value: boolean }
   | { kind: "providerOption"; id: string; optionPath: string; value: unknown };
-
+export type SettingPatch = SimpleSettingPatch | { kind: "compound"; operations: SimpleSettingPatch[] };
 export interface SettingCandidate {
   value: SettingValue;
-  /** Candidate text without the marker column or the `default` suffix. */
   label: string;
 }
-
 export interface SettingItem {
   id: string;
   group: string;
   label: string;
   kind: SettingKind;
-  /** Current value, read from the effective config. */
   read(config: NotificationConfig): unknown;
-  /** Builds the write patch; collection items pass the whole array. */
   patch(value: SettingValue | readonly SettingValue[]): SettingPatch;
-  /** Candidates; number items return presets and the UI appends its own `custom…` row. */
   candidates(config: NotificationConfig): SettingCandidate[];
-  /** Value text rendered in the parent list. */
   format(value: unknown): string;
-  /** Path of this item inside the raw user JSON; provider items use `providerId` instead. */
   userPath: string;
-  /** Composite logical items own a small explicit field set. */
+  /** Composite items own these paths and combine their values consistently across all layers. */
   paths?: string[];
+  combine?(values: unknown[]): unknown;
   destinations?: boolean;
   snapshot?(config: NotificationConfig): SettingPatch;
   providerId?: string;
   providerOptionPath?: string;
-  /** Rule this item belongs to; the UI groups a rule's fields onto one page. */
-  rule?: { key: string; label: string };
-  /**
-   * False when the field has no effect in the current config, such as the immediate-only aggregation
-   * window; hidden fields are never offered as if they did something. Defaults to visible.
-   */
-  visible?(config: NotificationConfig): boolean;
-  /** Input parsing for number and time items, used by the `custom…` row. */
+  rule?: { key: keyof NotificationConfig["rules"]; label: string };
   parseInput?(text: string): { ok: true; value: SettingValue | SettingValue[] } | { ok: false; message: string };
-  /** Unit and range shown while editing a `custom…` value; undefined when the item has no free input. */
   inputHint?: string;
 }
-
 const LEVELS: NotifyLevel[] = ["info", "warning", "error"];
-
-/** Chinese text per level. Only the label changes; the stored value stays `info | warning | error`. */
-const LEVEL_LABELS: Record<NotifyLevel, string> = {
-  info: "提示",
-  warning: "警告",
-  error: "错误",
-};
-
-/**
- * The global threshold reads differently from a rule's own severity: `minLevel: warning` means
- * "warning and above", while a rule's `level: warning` describes the message itself. Using one
- * wording for both would make the two fields look like the same setting.
- */
-const THRESHOLD_LABELS: Record<NotifyLevel, string> = {
-  info: "所有等级",
-  warning: "警告及错误",
-  error: "仅错误",
-};
-
-const TOOL_FAILURE_MODE_LABELS: Record<ToolFailureMode, string> = {
-  aggregate: "并入结果",
-  immediate: "立即提醒",
-};
-
-const BUILTIN_CHANNEL_LABELS: Record<string, string> = {
+const LEVEL_LABELS = { info: "提示", warning: "警告", error: "错误" };
+const THRESHOLD_LABELS = { info: "所有等级", warning: "警告及错误", error: "仅错误" };
+const CHANNEL_LABELS: Record<string, string> = {
   terminal: "本机通知",
   email: "邮箱通知",
   hook: "Webhook",
   debug: "调试渠道",
   noop: "不投递",
 };
-
-/** Translate built-in destinations while leaving custom provider names intact. */
 export function channelLabel(id: string): string {
-  return BUILTIN_CHANNEL_LABELS[id] ?? id;
+  return CHANNEL_LABELS[id] ?? id;
 }
-
-const PROMPT_KIND_LABELS: Record<string, string> = {
-  select: "选择",
-  confirm: "确认",
-  input: "输入",
-  editor: "编辑器",
-};
-
-/** Boolean text used everywhere a boolean is displayed; the stored value stays `true`/`false`. */
 export function booleanLabel(value: unknown): string {
-  if (value === "mixed") return "部分开启 / 自定义";
-  if (value === "partial") return "部分已修改";
-  return value === true ? "开启" : "关闭";
+  return value === "mixed"
+    ? "部分开启 / 自定义"
+    : value === "partial"
+    ? "部分已修改"
+    : value === true
+    ? "开启"
+    : "关闭";
 }
-
 const BOOLEAN_CANDIDATES: SettingCandidate[] = [
   { value: true, label: "开启" },
   { value: false, label: "关闭" },
 ];
-
-/** Fixed label of the `custom…` candidate row, shared by the UI and the tests. */
 export const CUSTOM_ROW_LABEL = "自定义…";
-
-const RULES: Array<{ key: keyof NotificationConfig["rules"]; label: string }> = [
+export const RULE_INFOS: ReadonlyArray<{ key: keyof NotificationConfig["rules"]; label: string }> = [
   { key: "runCompleted", label: "运行完成" },
   { key: "runFailed", label: "运行失败" },
   { key: "runAborted", label: "运行中止" },
@@ -303,34 +72,9 @@ const RULES: Array<{ key: keyof NotificationConfig["rules"]; label: string }> = 
   { key: "compactFailed", label: "压缩失败" },
   { key: "waitingForUser", label: "等待输入" },
 ];
-
-function valuesToCandidates(values: SettingValue[], unit = ""): SettingCandidate[] {
-  return values.map((value) => ({ value, label: withUnit(value, unit) }));
+export function routingExceptions(config: NotificationConfig): string[] {
+  return RULE_INFOS.filter((rule) => config.rules[rule.key].channels !== "inherit").map((rule) => rule.label);
 }
-
-/** Renders a value with its unit; an empty unit renders the value itself. */
-function withUnit(value: unknown, unit: string): string {
-  return unit === "" ? String(value) : `${String(value)} ${unit}`;
-}
-
-/** Unit text as shown to the user; `ms` always reads as 毫秒, never as a bare symbol. */
-function unitText(unit: string): string {
-  return unit === "ms" ? "毫秒" : unit;
-}
-
-/**
- * Milliseconds to readable text: below one second stays in 毫秒, otherwise seconds with only
- * trailing zeros removed. The stored value keeps full millisecond precision, and a non-round
- * value such as 4321 ms therefore reads back as `4.321 秒` instead of a rounded number.
- */
-function formatDuration(value: unknown): string {
-  const ms = Number(value);
-  if (!Number.isFinite(ms)) return String(value);
-  if (ms < 1000) return `${ms} 毫秒`;
-  const seconds = (ms / 1000).toFixed(3).replace(/\.?0+$/, "");
-  return `${seconds} 秒`;
-}
-
 interface ItemSpec {
   id?: string;
   group: string;
@@ -339,274 +83,195 @@ interface ItemSpec {
   kind: SettingKind;
   candidates?: (config: NotificationConfig) => SettingCandidate[];
   presets?: number[];
-  unit?: string;
   min?: number;
   max?: number;
-  /** Empty-value label for collection fields. */
   emptyLabel?: string;
-  /** Value to display text; a value missing from the map falls back to its raw form. */
   labels?: Record<string, string>;
-  visible?: (config: NotificationConfig) => boolean;
 }
-
-function displayValue(value: unknown, labels?: Record<string, string>): string {
-  const raw = String(value);
-  return labels?.[raw] ?? raw;
-}
-
-function formatValue(
-  kind: SettingKind,
-  value: unknown,
-  options: { unit: string; emptyLabel: string; labels?: Record<string, string> },
-): string {
-  if (value === undefined) return "—";
-  if (kind === "collection") {
-    if (value === "inherit") return "跟随统一接收方式";
-    const members = Array.isArray(value) ? value.map((item) => displayValue(item, options.labels)) : [];
-    return members.length === 0 ? options.emptyLabel : members.join("、");
-  }
-  if (kind === "number") return options.unit === "ms" ? formatDuration(value) : withUnit(value, options.unit);
-  if (kind === "boolean") return booleanLabel(value);
-  return displayValue(value, options.labels);
-}
-
 function makeItem(spec: ItemSpec): SettingItem {
-  const kind = spec.kind;
-  const unit = spec.unit ?? "";
-  const emptyLabel = spec.emptyLabel ?? "（空）";
-  const labels = spec.labels;
-  const format = (value: unknown): string => formatValue(kind, value, { unit, emptyLabel, ...(labels ? { labels } : {}) });
-  const candidates = spec.candidates
-    ?? (kind === "boolean"
-      ? () => BOOLEAN_CANDIDATES.map((candidate) => ({ ...candidate }))
-      // Number presets go through the same formatter as the rows, so a duration preset is never
-      // shown as a raw `1500 ms` while the current value reads `1.5 秒`.
-      : () => (spec.presets ?? []).map((value) => ({ value, label: format(value) })));
-
+  const display = (value: unknown) => spec.labels?.[String(value)] ?? String(value);
+  const format = (value: unknown): string => {
+    if (value === undefined) return "—";
+    if (spec.kind === "collection") {
+      if (value === "inherit") return "跟随统一接收方式";
+      return Array.isArray(value) && value.length ? value.map(display).join("、") : spec.emptyLabel ?? "（空）";
+    }
+    return spec.kind === "boolean" ? booleanLabel(value) : display(value);
+  };
   const item: SettingItem = {
     id: spec.id ?? spec.path,
     group: spec.group,
     label: spec.label,
-    kind,
+    kind: spec.kind,
+    userPath: spec.path,
     read: (config) => getPathValue(config, spec.path),
     patch: (value) => ({ kind: "path", path: spec.path, value }),
-    candidates,
     format,
-    userPath: spec.path,
-    ...(spec.visible ? { visible: spec.visible } : {}),
+    candidates:
+      spec.candidates ??
+      (spec.kind === "boolean"
+        ? () => BOOLEAN_CANDIDATES.map((entry) => ({ ...entry }))
+        : () => (spec.presets ?? []).map((value) => ({ value, label: format(value) }))),
   };
-
-  if (kind === "number") {
-    const min = spec.min ?? 0;
-    const max = spec.max ?? Number.MAX_SAFE_INTEGER;
-    const range = `${min}..${max}`;
-    const unitSuffix = unit === "" ? "" : `（${unitText(unit)}）`;
-    item.inputHint = `整数 ${range}${unitSuffix}`;
+  if (spec.kind === "number") {
+    const min = spec.min!,
+      max = spec.max!,
+      range = `${min}..${max}`;
+    item.inputHint = `整数 ${range}`;
     item.parseInput = (text) => {
       const trimmed = text.trim();
-      if (!/^\d+$/.test(trimmed)) return { ok: false, message: `必须是整数${unitSuffix}` };
+      if (!/^\d+$/.test(trimmed)) return { ok: false, message: "必须是整数" };
       const value = Number(trimmed);
-      if (!Number.isInteger(value) || value < min || value > max) {
-        return { ok: false, message: `必须是 ${range} 的整数${unitSuffix}` };
-      }
-      return { ok: true, value };
+      return Number.isInteger(value) && value >= min && value <= max
+        ? { ok: true, value }
+        : { ok: false, message: `必须是 ${range} 的整数` };
     };
   }
-  if (kind === "time") {
+  if (spec.kind === "time") {
     item.inputHint = "HH:MM（00:00–23:59）";
-    item.parseInput = (text) => {
-      const trimmed = text.trim();
-      return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(trimmed)
-        ? { ok: true, value: trimmed }
+    item.parseInput = (text) =>
+      /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(text.trim())
+        ? { ok: true, value: text.trim() }
         : { ok: false, message: "必须是严格 HH:MM（00:00–23:59）" };
-    };
   }
   return item;
 }
-
-/** Time presets covering common schedules; everything else goes through `custom…`. */
-const TIME_PRESETS = ["00:00", "07:00", "08:00", "12:00", "18:00", "22:00", "23:00"];
-
-/**
- * Value this conversation set for the item, or undefined when Enter never touched it.
- * Presence, not equality: a session value equal to the user default is still a session override,
- * and comparing values would misreport "this conversation changed it" as "inherited".
- */
-export function sessionOverrideValue(overlay: SessionOverlay, item: SettingItem): unknown {
-  if (item.paths) {
-    const values = item.paths.map((path) => getPathValue(overlay.patch, path));
-    if (values.every((value) => value === undefined)) return undefined;
-    return values.some((value) => value === undefined) ? "partial" : compositeValue(item, values);
-  }
-  if (item.providerId !== undefined) {
-    if (item.providerOptionPath) {
-      const options = overlay.providerOptions?.[item.providerId];
-      return options ? getPathValue(options, item.providerOptionPath) : undefined;
-    }
-    // Own-property check: an id like `toString` or `constructor` would otherwise read an inherited
-    // Object.prototype member and be reported as a conversation override that does not exist.
-    return Object.prototype.hasOwnProperty.call(overlay.providers, item.providerId)
-      ? overlay.providers[item.providerId]
-      : undefined;
-  }
-  return hasPath(overlay.patch, item.userPath) ? getPathValue(overlay.patch, item.userPath) : undefined;
+function compositeItem(item: SettingItem, paths: string[], combine: (values: unknown[]) => unknown): SettingItem {
+  return {
+    ...item,
+    paths,
+    combine,
+    read: (config) => combine(paths.map((path) => getPathValue(config, path))),
+    patch: (value) => ({ kind: "compound", operations: paths.map((path) => ({ kind: "path", path, value })) }),
+    snapshot: (config) => ({
+      kind: "compound",
+      operations: paths.map((path) => ({ kind: "path", path, value: getPathValue(config, path) })),
+    }),
+  };
 }
-
-/** Factory-default value of an item; the lowest of the three layers.
- *
- * A channel switch is special: `checkProviders` treats a missing `enabled` as true, so every
- * channel switch has a built-in default of on even when the channel definition itself is
- * user-provided (and therefore absent from `defaultConfig().providers`).
- */
-export function builtinDefaultValue(item: SettingItem): unknown {
-  if (item.providerId !== undefined) {
-    if (item.providerOptionPath) {
-      const provider = defaultConfig().providers.find((candidate) => candidate.id === item.providerId);
-      return provider ? getPathValue(provider.options, item.providerOptionPath) : undefined;
-    }
-    return item.providerId === "email" ? false : true;
-  }
-  return item.read(defaultConfig());
-}
-
-/**
- * Where a channel's definition comes from. Providers are populated only by the factory defaults or
- * the user file, so an id that appears in the user file counts as user-provided even when it
- * happens to be named like a built-in channel (its type or options may differ); the id alone is
- * not evidence of the factory definition.
- */
-export function providerDefinitionSource(item: SettingItem, rawUser: unknown): "default" | "user" {
-  if (item.providerId === undefined) return "default";
-  const providers = getPathValue(rawUser, "providers");
-  const definedByUser = Array.isArray(providers)
-    && providers.some((candidate) => isPlainObject(candidate) && candidate.id === item.providerId);
-  return definedByUser ? "user" : "default";
-}
-
-function compositeValue(item: SettingItem, values: unknown[]): unknown {
-  if (item.id === "reminders.failed") return values.every((value) => value === true) ? true
-    : values.every((value) => value === false) ? false : "mixed";
-  return values.every((value) => value === "inherit") ? "inherit" : "custom";
-}
-
-export function settingSnapshot(item: SettingItem, config: NotificationConfig): SettingPatch {
-  return item.snapshot?.(config) ?? item.patch(item.read(config) as SettingValue | SettingValue[]);
-}
-export function patchOperations(patch: SettingPatch): SimpleSettingPatch[] {
-  return patch.kind === "compound" ? patch.operations : [patch];
-}
-
-/** Pure transaction candidate. The caller validates it before committing one session snapshot. */
-export function applySettingPatch(overlay: SessionOverlay, item: SettingItem, patch: SettingPatch): SessionOverlay {
-  const next: SessionOverlay = structuredClone({ ...overlay, providerOptions: overlay.providerOptions ?? {} });
-  const owners = new Set(next.channelOwners ?? []);
-  for (const operation of patchOperations(patch)) {
-    if (operation.kind === "path") next.patch = setPatchPath(next.patch, operation.path, operation.value);
-    else if (operation.kind === "providerOption") next.providerOptions[operation.id] = setPatchPath(next.providerOptions[operation.id] ?? {}, operation.optionPath, operation.value);
-    else {
-      next.providers[operation.id] = operation.value;
-      if (item.destinations) owners.add(operation.id); else owners.delete(operation.id);
-    }
-  }
-  if (owners.size) next.channelOwners = [...owners]; else delete next.channelOwners;
-  return next;
-}
-
-/** Rebuild the provider array from raw JSON inside writeUserDefault's transaction, not the effective config. */
-export function settingUserFilePatch(raw: unknown, config: NotificationConfig, patch: SettingPatch): ConfigPatch {
-  let sparse: ConfigPatch = isPlainObject(raw) ? structuredClone(raw) : {};
-  let result: ConfigPatch = {};
-  for (const operation of patchOperations(patch)) {
-    const provider = operation.kind !== "path" ? config.providers.find((entry) => entry.id === operation.id) : undefined;
-    const single = operation.kind === "path" ? setPatchPath({}, operation.path, operation.value)
-      : operation.kind === "providers" ? channelUserFilePatch(sparse, operation.id, provider?.type ?? "terminal", operation.value)
-        : providerOptionUserFilePatch(sparse, operation.id, provider?.type ?? "email", operation.optionPath, operation.value);
-    sparse = mergePatch(sparse, single);
-    result = mergePatch(result, single);
-  }
-  return result;
-}
-
-export function itemRemovals(item: SettingItem, config: NotificationConfig, overlay: SessionOverlay) {
-  if (item.paths) return item.paths.map((path) => ({ kind: "path" as const, path }));
-  if (item.destinations) {
-    const owned = new Set(overlay.channelOwners ?? []);
-    for (const id of config.channels) {
-      if (!Object.hasOwn(overlay.providers, id) || owned.has(id)) owned.add(id);
-    }
-    return [{ kind: "path" as const, path: item.userPath }, ...[...owned].map((id) => ({ kind: "provider" as const, id }))];
-  }
-  return [item.providerId ? (item.providerOptionPath
-    ? { kind: "providerOption" as const, id: item.providerId, optionPath: item.providerOptionPath }
-    : { kind: "provider" as const, id: item.providerId }) : { kind: "path" as const, path: item.userPath }];
-}
-
-/**
- * Builds the setting list for the current config, providers included.
- * Array order is render order and the group is the section shown in the UI; `config` is only
- * used to enumerate providers, every other candidate is config-independent.
- */
+/** Only settings reachable in the current product are constructed; JSON-only policies stay JSON-only. */
 export function buildSettingItems(config: NotificationConfig): SettingItem[] {
   const items: SettingItem[] = [];
-
-  items.push(makeItem({ group: "基础", label: "通知总开关", path: "enabled", kind: "boolean" }));
-  items.push(makeItem({ id: "reminders.completed", group: "提醒时机", label: "执行完成", path: "rules.runCompleted.enabled", kind: "boolean" }));
-  items.push(makeItem({
+  const add = (spec: ItemSpec) => items.push(makeItem(spec));
+  add({ group: "基础", label: "通知总开关", path: "enabled", kind: "boolean" });
+  add({
+    id: "reminders.completed",
+    group: "提醒时机",
+    label: "执行完成",
+    path: "rules.runCompleted.enabled",
+    kind: "boolean",
+  });
+  add({
     group: "基础",
     label: "接收哪些重要程度的提醒",
     path: "minLevel",
     kind: "enum",
     labels: THRESHOLD_LABELS,
-    candidates: () => LEVELS.map((level) => ({ value: level, label: THRESHOLD_LABELS[level] })),
-  }));
-
-  const channelCandidates = (): SettingCandidate[] => {
-    const ids = [...new Set([...config.providers.map((provider) => provider.id), ...config.channels,
-      ...Object.values(config.rules).flatMap((rule) => rule.channels === "inherit" ? [] : rule.channels)])];
-    return ids.map((id) => ({ value: id, label: `${channelLabel(id)}${config.providers.some((provider) => provider.id === id) ? "" : "（未找到，可取消选择）"}` }));
-  };
-  const channelLabels = Object.fromEntries(config.providers.map((provider) => [provider.id, channelLabel(provider.id)]));
-  const failurePaths = ["rules.runFailed.enabled", "rules.compactFailed.enabled"];
-  items.push({ ...makeItem({ id: "reminders.failed", group: "提醒时机", label: "执行失败", path: failurePaths[0], kind: "boolean" }),
-    paths: failurePaths,
-    read: (current) => compositeValue({ id: "reminders.failed" } as SettingItem, failurePaths.map((path) => getPathValue(current, path))),
-    patch: (value) => ({ kind: "compound", operations: failurePaths.map((path) => ({ kind: "path", path, value })) }),
-    snapshot: (current) => ({ kind: "compound", operations: failurePaths.map((path) => ({ kind: "path", path, value: getPathValue(current, path) })) }),
+    candidates: () => LEVELS.map((value) => ({ value, label: THRESHOLD_LABELS[value] })),
   });
-  items.push(makeItem({ id: "reminders.waiting", group: "提醒时机", label: "等待输入", path: "rules.waitingForUser.enabled", kind: "boolean" }));
-  items.push({ ...makeItem({ group: "接收", label: "统一接收选择", path: "channels", kind: "collection", candidates: channelCandidates, labels: channelLabels, emptyLabel: "不投递" }),
+  items.push(
+    compositeItem(
+      makeItem({
+        id: "reminders.failed",
+        group: "提醒时机",
+        label: "执行失败",
+        path: "rules.runFailed.enabled",
+        kind: "boolean",
+      }),
+      ["rules.runFailed.enabled", "rules.compactFailed.enabled"],
+      (values) =>
+        values.every((value) => value === true) ? true : values.every((value) => value === false) ? false : "mixed"
+    )
+  );
+  add({
+    id: "reminders.waiting",
+    group: "提醒时机",
+    label: "等待输入",
+    path: "rules.waitingForUser.enabled",
+    kind: "boolean",
+  });
+  const channelCandidates = (): SettingCandidate[] =>
+    [
+      ...new Set([
+        ...config.providers.map((provider) => provider.id),
+        ...config.channels,
+        ...Object.values(config.rules).flatMap((rule) => (rule.channels === "inherit" ? [] : rule.channels)),
+      ]),
+    ].map((id) => ({
+      value: id,
+      label: `${channelLabel(id)}${
+        config.providers.some((provider) => provider.id === id) ? "" : "（未找到，可取消选择）"
+      }`,
+    }));
+  const channelLabels = Object.fromEntries(
+    config.providers.map((provider) => [provider.id, channelLabel(provider.id)])
+  );
+  items.push({
+    ...makeItem({
+      group: "接收",
+      label: "统一接收选择",
+      path: "channels",
+      kind: "collection",
+      candidates: channelCandidates,
+      labels: channelLabels,
+      emptyLabel: "不投递",
+    }),
     destinations: true,
-    patch: (value) => ({ kind: "compound", operations: [
-      { kind: "path", path: "channels", value },
-      ...(Array.isArray(value) ? value.filter((id) => !config.channels.includes(String(id)) && config.providers.some((provider) => provider.id === id)) : [])
-        .map((id) => ({ kind: "providers" as const, id: String(id), value: true })),
-    ] }),
-    snapshot: (current) => ({ kind: "compound", operations: [
-      { kind: "path", path: "channels", value: [...current.channels] },
-      ...current.providers.filter((provider) => current.channels.includes(provider.id)).map((provider) => ({ kind: "providers" as const, id: provider.id, value: provider.enabled })),
-    ] }),
+    patch: (value) => ({
+      kind: "compound",
+      operations: [
+        { kind: "path", path: "channels", value },
+        ...(Array.isArray(value)
+          ? value.filter(
+              (id) => !config.channels.includes(String(id)) && config.providers.some((provider) => provider.id === id)
+            )
+          : []
+        ).map((id) => ({ kind: "providers" as const, id: String(id), value: true })),
+      ],
+    }),
+    snapshot: (current) => ({
+      kind: "compound",
+      operations: [
+        { kind: "path", path: "channels", value: [...current.channels] },
+        ...current.providers
+          .filter((provider) => current.channels.includes(provider.id))
+          .map((provider) => ({ kind: "providers" as const, id: provider.id, value: provider.enabled })),
+      ],
+    }),
   });
-  const routePaths = RULES.map((rule) => `rules.${rule.key}.channels`);
-  items.push({ ...makeItem({ id: "routes.unify", group: "接收", label: "让所有提醒跟随统一接收方式", path: routePaths[0], kind: "enum" }),
-    paths: routePaths,
+  const routes = compositeItem(
+    makeItem({
+      id: "routes.unify",
+      group: "接收",
+      label: "让所有提醒跟随统一接收方式",
+      path: "rules.runCompleted.channels",
+      kind: "enum",
+    }),
+    RULE_INFOS.map((rule) => `rules.${rule.key}.channels`),
+    (values) => (values.every((value) => value === "inherit") ? "inherit" : "custom")
+  );
+  items.push({
+    ...routes,
     candidates: () => [{ value: "inherit", label: "所有提醒使用统一接收方式（不改变提醒时机）" }],
-    read: (current) => compositeValue({ id: "routes.unify" } as SettingItem, routePaths.map((path) => getPathValue(current, path))),
-    format: (value) => value === "inherit" ? "全部使用统一接收方式" : value === "partial" ? "部分已修改" : "有提醒单独设置了接收方式",
-    patch: () => ({ kind: "compound", operations: routePaths.map((path) => ({ kind: "path", path, value: "inherit" })) }),
-    snapshot: (current) => ({ kind: "compound", operations: routePaths.map((path) => ({ kind: "path", path, value: getPathValue(current, path) })) }),
+    format: (value) =>
+      value === "inherit" ? "全部使用统一接收方式" : value === "partial" ? "部分已修改" : "有提醒单独设置了接收方式",
+    patch: () => ({
+      kind: "compound",
+      operations: routes.paths!.map((path) => ({ kind: "path", path, value: "inherit" })),
+    }),
   });
-  for (const rule of RULES) {
+  for (const rule of RULE_INFOS) {
     const base = `rules.${rule.key}`;
-    items.push(makeItem({ group: "通知规则", label: `${rule.label} · 开关`, path: `${base}.enabled`, kind: "boolean" }));
-    items.push(makeItem({
+    add({ group: "通知规则", label: `${rule.label} · 开关`, path: `${base}.enabled`, kind: "boolean" });
+    add({
       group: "通知规则",
       label: `${rule.label} · 重要程度`,
       path: `${base}.level`,
       kind: "enum",
       labels: LEVEL_LABELS,
-      candidates: () => LEVELS.map((level) => ({ value: level, label: LEVEL_LABELS[level] })),
-    }));
-    items.push(makeItem({
+      candidates: () => LEVELS.map((value) => ({ value, label: LEVEL_LABELS[value] })),
+    });
+    add({
       group: "通知规则",
       label: `${rule.label} · 接收方式`,
       path: `${base}.channels`,
@@ -614,50 +279,18 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
       candidates: channelCandidates,
       labels: channelLabels,
       emptyLabel: "（不发送提醒）",
-    }));
-    if (rule.key === "toolFailed") {
-      items.push(makeItem({
-        group: "通知规则",
-        label: "工具失败 · 策略",
-        path: `${base}.mode`,
-        kind: "enum",
-        labels: TOOL_FAILURE_MODE_LABELS,
-        candidates: () => (["aggregate", "immediate"] as ToolFailureMode[]).map((mode) => ({
-          value: mode,
-          label: TOOL_FAILURE_MODE_LABELS[mode],
-        })),
-      }));
-      items.push(makeItem({
-        group: "通知规则",
-        label: "工具失败 · 阈值",
-        path: `${base}.threshold`,
-        kind: "number",
-        presets: [1, 2, 3, 5, 10],
-        min: 1,
-        max: 100,
-      }));
-    }
-    if (rule.key === "waitingForUser") {
-      items.push(makeItem({
-        group: "通知规则",
-        label: "等待输入 · 类型",
-        path: `${base}.kinds`,
-        kind: "collection",
-        // `custom` is rejected by config.ts, so it is not a candidate here.
-        labels: PROMPT_KIND_LABELS,
-        candidates: () => valuesToCandidates(["select", "confirm", "input", "editor"])
-          .map((candidate) => ({ value: candidate.value, label: PROMPT_KIND_LABELS[String(candidate.value)] ?? candidate.label })),
-        emptyLabel: "（不等待任何类型）",
-      }));
-    }
+    });
+    for (const item of items.slice(-3)) item.rule = rule;
   }
-
-  items.push(makeItem({ group: "内容", label: "包含耗时", path: "content.includeDuration", kind: "boolean" }));
-  items.push(makeItem({ group: "内容", label: "包含失败工具名", path: "content.includeToolFailureNames", kind: "boolean" }));
-  items.push(makeItem({ group: "内容", label: "标题包含窗口标识", path: "content.includeSessionLabel", kind: "boolean" }));
-  items.push(makeItem({ group: "内容", label: "包含助手摘录", path: "content.includeAssistantExcerpt", kind: "boolean" }));
-  items.push(makeItem({ group: "内容", label: "包含成本与上下文", path: "content.includeCost", kind: "boolean" }));
-  items.push(makeItem({
+  for (const [path, label] of [
+    ["includeDuration", "包含耗时"],
+    ["includeToolFailureNames", "包含失败工具名"],
+    ["includeSessionLabel", "标题包含窗口标识"],
+    ["includeAssistantExcerpt", "包含助手摘录"],
+    ["includeCost", "包含成本与上下文"],
+  ])
+    add({ group: "内容", label, path: `content.${path}`, kind: "boolean" });
+  add({
     group: "内容",
     label: "正文最大长度",
     path: "content.maxMessageChars",
@@ -665,110 +298,29 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
     presets: [100, 300, 600, 1200],
     min: 20,
     max: 2000,
-  }));
-
-  items.push(makeItem({ group: "免打扰", label: "启用免打扰", path: "quietHours.enabled", kind: "boolean" }));
-  items.push(makeItem({
-    group: "免打扰",
-    label: "开始时间",
-    path: "quietHours.start",
-    kind: "time",
-    candidates: () => valuesToCandidates(TIME_PRESETS),
-  }));
-  items.push(makeItem({
-    group: "免打扰",
-    label: "结束时间",
-    path: "quietHours.end",
-    kind: "time",
-    candidates: () => valuesToCandidates(TIME_PRESETS),
-  }));
-  items.push(makeItem({
+  });
+  add({ group: "免打扰", label: "启用免打扰", path: "quietHours.enabled", kind: "boolean" });
+  for (const [path, label] of [
+    ["start", "开始时间"],
+    ["end", "结束时间"],
+  ])
+    add({
+      group: "免打扰",
+      label,
+      path: `quietHours.${path}`,
+      kind: "time",
+      candidates: () =>
+        ["00:00", "07:00", "08:00", "12:00", "18:00", "22:00", "23:00"].map((value) => ({ value, label: value })),
+    });
+  add({
     group: "免打扰",
     label: "免打扰期间仍要接收",
     path: "quietHours.exceptLevels",
     kind: "collection",
     labels: LEVEL_LABELS,
-    candidates: () => LEVELS.map((level) => ({ value: level, label: LEVEL_LABELS[level] })),
+    candidates: () => LEVELS.map((value) => ({ value, label: LEVEL_LABELS[value] })),
     emptyLabel: "（无例外）",
-  }));
-  for (const [label, path, visible] of [
-    ["同运行合并窗口", "coalesce.windowMs"],
-    // The immediate-mode aggregation window is only consumed by the immediate branch; in aggregate
-    // mode it changes nothing, so it is hidden instead of pretending to be configurable.
-    ["工具失败聚合窗口", "coalesce.toolFailureWindowMs", (config: NotificationConfig) => config.rules.toolFailed.mode === "immediate"],
-    ["同类型冷却", "coalesce.cooldownMs"],
-  ] as const) {
-    items.push(makeItem({
-      group: "高级设置",
-      label,
-      path,
-      kind: "number",
-      presets: [0, 1500, 3000, 10000, 60000],
-      unit: "ms",
-      min: 0,
-      max: 600000,
-      ...(visible ? { visible } : {}),
-    }));
-  }
-
-  items.push(makeItem({
-    group: "高级设置",
-    label: "单次投递超时",
-    path: "delivery.timeoutMs",
-    kind: "number",
-    presets: [1000, 3000, 5000, 8000, 30000],
-    unit: "ms",
-    min: 1,
-    max: 120000,
-  }));
-  items.push(makeItem({
-    group: "高级设置",
-    label: "最大重试次数",
-    path: "delivery.maxRetries",
-    kind: "number",
-    presets: [0, 1, 2, 3],
-    min: 0,
-    max: 10,
-  }));
-  items.push(makeItem({
-    group: "高级设置",
-    label: "并发投递数",
-    path: "delivery.concurrency",
-    kind: "number",
-    presets: [1, 2, 4],
-    min: 1,
-    max: 8,
-  }));
-  items.push(makeItem({
-    group: "高级设置",
-    label: "队列上限",
-    path: "delivery.queueLimit",
-    kind: "number",
-    presets: [10, 50, 100, 500],
-    min: 1,
-    max: 1000,
-  }));
-  items.push(makeItem({
-    group: "高级设置",
-    label: "熔断失败次数",
-    path: "delivery.circuitBreakerFailures",
-    kind: "number",
-    presets: [0, 3, 5, 10],
-    min: 0,
-    max: 100,
-  }));
-  items.push(makeItem({
-    group: "高级设置",
-    label: "退出收尾预算",
-    path: "shutdownFlushMs",
-    kind: "number",
-    presets: [0, 200, 500, 1000],
-    unit: "ms",
-    min: 0,
-    max: 5000,
-  }));
-
-  // Providers expose only their switch; options (url, headers, secret references) stay JSON-only.
+  });
   for (const provider of config.providers) {
     items.push({
       id: `provider:${provider.id}`,
@@ -776,142 +328,168 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
       label: channelLabel(provider.id),
       kind: "boolean",
       providerId: provider.id,
-      read: (current) => current.providers.find((item) => item.id === provider.id)?.enabled,
+      read: (current) => current.providers.find((entry) => entry.id === provider.id)?.enabled,
       patch: (value) => ({ kind: "providers", id: provider.id, value: value === true }),
-      candidates: () => BOOLEAN_CANDIDATES.map((candidate) => ({ ...candidate })),
-      format: (value) => booleanLabel(value),
+      candidates: () => BOOLEAN_CANDIDATES.map((entry) => ({ ...entry })),
+      format: booleanLabel,
       userPath: `providers.${provider.id}.enabled`,
     });
     if (provider.id === "email" && provider.type === "email") {
-      const emailOption = (optionPath: "from" | "to" | "subjectPrefix", label: string, list = false): SettingItem => ({
-        id: `provider:email:${optionPath}`,
-        group: optionPath === "subjectPrefix" ? "邮箱专业" : "邮箱",
-        label,
-        kind: list ? "collection" : "enum",
-        providerId: "email",
-        providerOptionPath: optionPath,
-        read: (current) => getPathValue(current.providers.find((entry) => entry.id === "email")?.options, optionPath),
-        patch: (value) => ({ kind: "providerOption", id: "email", optionPath, value: list ? (Array.isArray(value) ? value : []) : value }),
-        candidates: () => [],
-        format: (value) => Array.isArray(value) ? (value.length ? value.join(", ") : "（未配置）") : value === undefined || value === "" ? "（未配置）" : String(value),
-        userPath: `providers.email.options.${optionPath}`,
-        inputHint: list ? "最多 50 个收件地址，逗号分隔；留空清除" : optionPath === "from" ? "发件邮箱地址，最长 254 字符；留空清除" : "主题前缀，最长 254 字符；可留空",
-        parseInput: (text) => {
-          const value = text.trim();
-          if (value.length > (list ? 12700 : 254) || /[\r\n\0]/.test(value)) return { ok: false, message: "输入过长或包含换行" };
-          if (list) {
-            const addresses = [...new Set(value.split(/[,，]/).map((part) => part.trim()).filter(Boolean))];
-            if (addresses.length > 50 || addresses.some((address) => !/^[^\s@,，<>]+@[^\s@,，<>]+\.[^\s@,，<>]+$/.test(address))) {
-              return { ok: false, message: "请提供最多 50 个有效邮箱地址，以逗号分隔" };
-            }
-            return { ok: true, value: addresses };
-          }
-          if (optionPath === "from" && value && !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value)) return { ok: false, message: "请输入有效发件邮箱地址" };
-          return { ok: true, value };
-        },
-      });
-      items.push(emailOption("from", "发件 QQ 邮箱"));
-      items.push(emailOption("to", "收件邮箱（多个）", true));
-      items.push(emailOption("subjectPrefix", "主题前缀"));
+      items.push(
+        emailOption("from", "发件 QQ 邮箱"),
+        emailOption("to", "收件邮箱（多个）"),
+        emailOption("subjectPrefix", "主题前缀")
+      );
     }
   }
-
-  // Rule items are tagged by id so the UI can group one rule's fields onto a single page without
-  // re-parsing the label.
-  for (const item of items) {
-    const match = /^rules\.([^.]+)\./.exec(item.id);
-    if (!match) continue;
-    const rule = RULES.find((candidate) => candidate.key === match[1]);
-    if (rule) item.rule = { key: rule.key, label: rule.label };
-  }
-
-  // JSON-only reliability/policy parameters must not reappear through search.
-  return items.filter((item) => item.group !== "高级设置" && ![
-    "rules.toolFailed.mode", "rules.toolFailed.threshold", "rules.waitingForUser.kinds",
-  ].includes(item.id));
+  return items;
 }
-
-/** Rule rows of the home page's 通知规则 category, in the stable `RULES` order. */
-export const RULE_INFOS: ReadonlyArray<{ key: string; label: string }> = RULES.map((rule) => ({ key: rule.key, label: rule.label }));
-
-/**
- * One-line summary of a rule for its list row: switch, severity and channels, each formatted by
- * the same `format()` the field rows use, so the two views cannot drift apart.
- */
+function emailOption(optionPath: "from" | "to" | "subjectPrefix", label: string): SettingItem {
+  const list = optionPath === "to";
+  return {
+    id: `provider:email:${optionPath}`,
+    group: optionPath === "subjectPrefix" ? "邮箱专业" : "邮箱",
+    label,
+    kind: list ? "collection" : "enum",
+    providerId: "email",
+    providerOptionPath: optionPath,
+    userPath: `providers.email.options.${optionPath}`,
+    read: (config) => getPathValue(config.providers.find((entry) => entry.id === "email")?.options, optionPath),
+    patch: (value) => ({
+      kind: "providerOption",
+      id: "email",
+      optionPath,
+      value: list ? (Array.isArray(value) ? value : []) : value,
+    }),
+    candidates: () => [],
+    format: (value) =>
+      Array.isArray(value)
+        ? value.length
+          ? value.join(", ")
+          : "（未配置）"
+        : value === undefined || value === ""
+        ? "（未配置）"
+        : String(value),
+    inputHint: list
+      ? "最多 50 个收件地址，逗号分隔；留空清除"
+      : optionPath === "from"
+      ? "发件邮箱地址，最长 254 字符；留空清除"
+      : "主题前缀，最长 254 字符；可留空",
+    parseInput: (text) => {
+      const value = text.trim();
+      if (value.length > (list ? 12700 : 254) || /[\r\n\0]/.test(value))
+        return { ok: false, message: "输入过长或包含换行" };
+      if (list) {
+        const addresses = [
+          ...new Set(
+            value
+              .split(/[,，]/)
+              .map((part) => part.trim())
+              .filter(Boolean)
+          ),
+        ];
+        if (
+          addresses.length > 50 ||
+          addresses.some((address) => !/^[^\s@,，<>]+@[^\s@,，<>]+\.[^\s@,，<>]+$/.test(address))
+        )
+          return { ok: false, message: "请提供最多 50 个有效邮箱地址，以逗号分隔" };
+        return { ok: true, value: addresses };
+      }
+      return optionPath === "from" && value && !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value)
+        ? { ok: false, message: "请输入有效发件邮箱地址" }
+        : { ok: true, value };
+    },
+  };
+}
 export function ruleSummary(config: NotificationConfig, items: readonly SettingItem[], ruleKey: string): string {
-  const of = (suffix: string): SettingItem | undefined => items.find((item) => item.id === `rules.${ruleKey}.${suffix}`);
   return ["enabled", "level", "channels"]
-    .map((suffix) => of(suffix))
+    .map((suffix) => items.find((item) => item.id === `rules.${ruleKey}.${suffix}`))
     .filter((item): item is SettingItem => item !== undefined)
-    .map((item) => item.id.endsWith(".channels")
-      ? `${item.read(config) === "inherit" ? "跟随统一：" : "单独设置："}${resolveChannels(config, config.rules[ruleKey as keyof NotificationConfig["rules"]]).map((id) => `${channelLabel(id)}${config.providers.find((entry) => entry.id === id)?.enabled ? "" : "（关闭或不可用）"}`).join("、") || "不发送"}`
-      : item.format(item.read(config)))
+    .map((item) =>
+      item.id.endsWith(".channels")
+        ? `${item.read(config) === "inherit" ? "跟随统一：" : "单独设置："}${
+            resolveChannels(config, config.rules[item.rule!.key])
+              .map(
+                (id) =>
+                  `${channelLabel(id)}${
+                    config.providers.find((provider) => provider.id === id)?.enabled ? "" : "（关闭或不可用）"
+                  }`
+              )
+              .join("、") || "不发送"
+          }`
+        : item.format(item.read(config))
+    )
     .join(" · ");
 }
-
-/**
- * Home-page category: either one row per rule, or the fields of a group. `summary` is recomputed
- * from the effective config on every refresh, so a category row never shows a stale value.
- */
 export interface SettingCategory {
   id: string;
   label: string;
   kind: "rules" | "fields" | "sections";
-  /** Group whose items this category lists; only for `kind: "fields"`. */
   group?: string;
-  /** Child category ids, only for `kind: "sections"`. */
   sections?: readonly string[];
   summary(config: NotificationConfig): string;
-  /**
-   * Rows hidden behind one expandable row while `when` is true (a disabled feature's parameters).
-   * They stay reachable through that row instead of disappearing from the UI entirely.
-   */
   collapsed?: { when(config: NotificationConfig): boolean; label: string; note: string; ids: readonly string[] };
-  /** Extra action rows appended after the fields (e.g. preview and advanced maintenance actions). */
-  actions?: ReadonlyArray<{ key: string; action: "test" | "emailTest" | "status" | "reload" | "search" | "preview" }>;
+  actions?: ReadonlyArray<{ key: string; action: "status" | "reload" | "search" | "preview" }>;
 }
-
-/**
- * Rows of a category page: the visible fields of its group, or the always-shown ones plus the
- * expandable row for the parameters a disabled feature hides.
- */
 export function categoryPageItems(
   category: SettingCategory,
   items: readonly SettingItem[],
-  config: NotificationConfig,
+  config: NotificationConfig
 ): { items: SettingItem[]; collapsed: SettingItem[] } {
-  const ofGroup = items.filter((item) => item.group === category.group && (item.visible?.(config) ?? true));
-  const collapsed = category.collapsed;
-  if (!collapsed || !collapsed.when(config)) return { items: ofGroup, collapsed: [] };
-  const ids = new Set(collapsed.ids);
-  return { items: ofGroup.filter((item) => !ids.has(item.id)), collapsed: ofGroup.filter((item) => ids.has(item.id)) };
+  const fields = items.filter((item) => item.group === category.group);
+  if (!category.collapsed?.when(config)) return { items: fields, collapsed: [] };
+  const ids = new Set(category.collapsed.ids);
+  return { items: fields.filter((item) => !ids.has(item.id)), collapsed: fields.filter((item) => ids.has(item.id)) };
 }
-
-/**
- * Category catalog. The UI chooses the small home-page subset explicitly; `more` groups the
- * advanced sections so they are discoverable without crowding the common setup path.
- */
 export const SETTING_CATEGORIES: readonly SettingCategory[] = [
-  { id: "expertRules", label: "逐规则设置", kind: "rules", summary: (config) => `${routingExceptions(config).length} 类单独设置接收方式` },
-  { id: "providers", label: "接收方式开关", kind: "fields", group: "渠道", summary: (config) => config.providers.filter((entry) => entry.enabled).map((entry) => channelLabel(entry.id)).join("、") || "无启用渠道" },
+  {
+    id: "expertRules",
+    label: "逐规则设置",
+    kind: "rules",
+    summary: (config) => `${routingExceptions(config).length} 类单独设置接收方式`,
+  },
+  {
+    id: "providers",
+    label: "接收方式开关",
+    kind: "fields",
+    group: "渠道",
+    summary: (config) =>
+      config.providers
+        .filter((entry) => entry.enabled)
+        .map((entry) => channelLabel(entry.id))
+        .join("、") || "无启用渠道",
+  },
   { id: "emailAdvanced", label: "邮箱主题", kind: "fields", group: "邮箱专业", summary: () => "主题前缀" },
-
   {
     id: "rules",
     label: "提醒时机",
     kind: "fields",
     group: "提醒时机",
-    summary: (config) => [config.rules.runCompleted.enabled ? "完成" : "", config.rules.runFailed.enabled || config.rules.compactFailed.enabled ? "失败" : "", config.rules.waitingForUser.enabled ? "等待输入" : "", config.rules.toolFailed.enabled ? "工具失败" : "", config.rules.runAborted.enabled ? "中止" : ""].filter(Boolean).join("、") || "全部关闭",
+    summary: (config) =>
+      [
+        config.rules.runCompleted.enabled ? "完成" : "",
+        config.rules.runFailed.enabled || config.rules.compactFailed.enabled ? "失败" : "",
+        config.rules.waitingForUser.enabled ? "等待输入" : "",
+        config.rules.toolFailed.enabled ? "工具失败" : "",
+        config.rules.runAborted.enabled ? "中止" : "",
+      ]
+        .filter(Boolean)
+        .join("、") || "全部关闭",
   },
-  { id: "content", label: "内容与隐私", kind: "fields", group: "内容", summary: () => "耗时、会话名等", actions: [{ key: "action:preview", action: "preview" }] },
+  {
+    id: "content",
+    label: "内容与隐私",
+    kind: "fields",
+    group: "内容",
+    summary: () => "耗时、会话名等",
+    actions: [{ key: "action:preview", action: "preview" }],
+  },
   {
     id: "quietHours",
     label: "免打扰时段",
     kind: "fields",
     group: "免打扰",
     summary: (config) => (config.quietHours.enabled ? `${config.quietHours.start}–${config.quietHours.end}` : "未开启"),
-    // While quiet hours are off the times and exceptions change nothing, so they collapse behind one
-    // row that still opens them; turning the feature on reveals them in place.
     collapsed: {
       when: (config) => !config.quietHours.enabled,
       label: "静默时间与例外",
@@ -924,10 +502,15 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
     label: "接收方式",
     kind: "fields",
     group: "接收",
-    summary: (config) => `${config.channels.map((id) => {
-      const provider = config.providers.find((entry) => entry.id === id);
-      return `${channelLabel(id)}${!provider ? "（未找到）" : !provider.enabled ? "（已关闭）" : ""}`;
-    }).join("、") || "未选择"}${routingExceptions(config).length ? "（有提醒单独设置）" : ""}`,
+    summary: (config) =>
+      `${
+        config.channels
+          .map((id) => {
+            const provider = config.providers.find((entry) => entry.id === id);
+            return `${channelLabel(id)}${!provider ? "（未找到）" : !provider.enabled ? "（已关闭）" : ""}`;
+          })
+          .join("、") || "未选择"
+      }${routingExceptions(config).length ? "（有提醒单独设置）" : ""}`,
   },
   {
     id: "professional",
@@ -949,136 +532,13 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
     ],
   },
 ];
-
-/**
- * True when this item was explicitly saved in the user file.
- * Providers live in an array, so their entry is located by id and `enabled` is checked there.
- */
-export function hasUserDefault(rawUser: unknown, item: SettingItem): boolean {
-  if (item.paths) return item.paths.some((path) => hasPath(rawUser, path));
-  if (item.providerId !== undefined) {
-    const providers = getPathValue(rawUser, "providers");
-    if (!Array.isArray(providers)) return false;
-    const entry = providers.find((candidate) => isPlainObject(candidate) && candidate.id === item.providerId);
-    return entry !== undefined && (item.providerOptionPath
-      ? hasPath(entry, `options.${item.providerOptionPath}`)
-      : hasPath(entry, "enabled"));
-  }
-  return hasPath(rawUser, item.userPath);
-}
-
-/** Reads the value saved in the user file for this item, or undefined when it was never saved. */
-export function userDefaultValue(rawUser: unknown, item: SettingItem): unknown {
-  if (!hasUserDefault(rawUser, item)) return undefined;
-  if (item.paths) {
-    const values = item.paths.map((path) => getPathValue(rawUser, path));
-    return values.some((value) => value === undefined) ? "partial" : compositeValue(item, values);
-  }
-  if (item.providerId !== undefined) {
-    const providers = getPathValue(rawUser, "providers");
-    const entry = Array.isArray(providers)
-      ? providers.find((candidate) => isPlainObject(candidate) && candidate.id === item.providerId)
-      : undefined;
-    return isPlainObject(entry) ? (item.providerOptionPath
-      ? getPathValue(entry, `options.${item.providerOptionPath}`)
-      : entry.enabled) : undefined;
-  }
-  return getPathValue(rawUser, item.userPath);
-}
-
-/**
- * User-file patch that saves one channel switch (Ctrl+S on a provider item).
- *
- * `providers` is an array field and `mergePatch` replaces arrays as a whole, so the patch must
- * carry the complete array. Building it from the effective config would freeze everything else
- * into the user file — other channels' conversation switches and every channel's factory
- * `options` — so it is rebuilt from the **raw user file** instead, where only the target entry's
- * `enabled` changes. Existing entries keep their order, options, unknown fields and sibling
- * channels; a channel that only exists in the factory defaults gets a minimal new entry
- * (`id`, `type`, `enabled`) rather than a copy of its factory options.
- */
-export function providerOptionUserFilePatch(rawUser: unknown, providerId: string, providerType: string, optionPath: string, value: unknown): ConfigPatch {
-  const rawProviders = getPathValue(rawUser, "providers");
-  const entries: unknown[] = Array.isArray(rawProviders)
-    ? rawProviders.map((entry) => (isPlainObject(entry) ? structuredClone(entry) : entry))
-    : [];
-  let entry = entries.find((candidate) => isPlainObject(candidate) && candidate.id === providerId);
-  if (!isPlainObject(entry)) {
-    entry = { id: providerId, type: providerType, options: {} };
-    entries.push(entry);
-  }
-  entry.options = setPatchPath(isPlainObject(entry.options) ? entry.options : {}, optionPath, value);
-  return { providers: entries };
-}
-
-export function channelUserFilePatch(
-  rawUser: unknown,
-  providerId: string,
-  providerType: string,
-  value: boolean,
-): ConfigPatch {
-  const rawProviders = getPathValue(rawUser, "providers");
-  const entries: unknown[] = Array.isArray(rawProviders)
-    ? rawProviders.map((entry) => (isPlainObject(entry) ? { ...entry } : entry))
-    : [];
-  const index = entries.findIndex((entry) => isPlainObject(entry) && entry.id === providerId);
-  if (index >= 0) {
-    entries[index] = { ...(entries[index] as Record<string, unknown>), enabled: value };
-  } else {
-    entries.push({ id: providerId, type: providerType, enabled: value });
-  }
-  return { providers: entries };
-}
-
-/**
- * This conversation's overlay without the item's entry: “follow the user default again”. The
- * provider map is keyed by id; a plain field is removed by path with its empty ancestors pruned.
- */
-export function clearItemOverride(overlay: SessionOverlay, item: SettingItem): SessionOverlay {
-  if (item.paths || item.destinations) {
-    let next = { ...overlay, providers: { ...overlay.providers }, providerOptions: { ...(overlay.providerOptions ?? {}) } };
-    for (const path of item.paths ?? [item.userPath]) next.patch = removePath(next.patch, path);
-    if (item.destinations) {
-      for (const id of next.channelOwners ?? []) delete next.providers[id];
-      delete next.channelOwners;
-    }
-    return next;
-  }
-  if (item.providerId !== undefined) {
-    if (item.providerOptionPath) {
-      const providerOptions = { ...(overlay.providerOptions ?? {}) };
-      const nextOptions = removePath(providerOptions[item.providerId] ?? {}, item.providerOptionPath);
-      if (Object.keys(nextOptions).length === 0) delete providerOptions[item.providerId];
-      else providerOptions[item.providerId] = nextOptions;
-      return { ...overlay, patch: overlay.patch, providers: { ...overlay.providers }, providerOptions };
-    }
-    const providers = { ...overlay.providers };
-    delete providers[item.providerId];
-    return { ...overlay, patch: overlay.patch, providers, providerOptions: { ...overlay.providerOptions },
-      ...(overlay.channelOwners ? { channelOwners: overlay.channelOwners.filter((id) => id !== item.providerId) } : {}) };
-  }
-  return { ...overlay, patch: removePath(overlay.patch, item.userPath), providers: { ...overlay.providers }, providerOptions: { ...overlay.providerOptions } };
-}
-
-/** Compares a candidate against the current value; collection kinds match by membership. */
 export function isCurrentValue(kind: SettingKind, current: unknown, candidate: SettingValue): boolean {
-  if (kind === "collection") return Array.isArray(current) && current.some((item) => item === candidate);
-  return current === candidate;
+  return kind === "collection" ? Array.isArray(current) && current.includes(candidate) : current === candidate;
 }
-
-/**
- * Submit semantics of Enter: collection items toggle one member, every other kind replaces the
- * value. Member order is stable and new members are appended, so toggling never reorders candidates.
- */
 export function collectionValue(current: unknown, candidate: SettingValue): SettingValue[] {
-  const members: SettingValue[] = Array.isArray(current) ? [...current] as SettingValue[] : [];
-  const index = members.findIndex((item) => item === candidate);
+  const members: SettingValue[] = Array.isArray(current) ? [...current] : [];
+  const index = members.indexOf(candidate);
   if (index >= 0) members.splice(index, 1);
   else members.push(candidate);
   return members;
-}
-
-/** Candidate snapshot for the detail view, so rendering does not rebuild it on every frame. */
-export function candidatesOf(item: SettingItem, config: NotificationConfig): SettingCandidate[] {
-  return item.candidates(config);
 }

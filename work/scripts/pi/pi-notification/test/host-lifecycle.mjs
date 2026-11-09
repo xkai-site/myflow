@@ -1349,7 +1349,7 @@ await step("J13f 首页渠道 gate 约束逐规则投递：关闭、取消开启
     await drive([...channel, K.enter, K.down, K.enter, K.esc]);
     assert.equal((await host.prompt()).deliveries.length, 1);
     assert.equal(fs.readFileSync(host.userConfigPath, "utf8"), before);
-    assert.ok(driver.renders.some((frame) => /适用规则：运行完成/.test(frame.join(""))));
+    assert.ok(driver.renders.some((frame) => /关闭[\s\S]*开启/.test(frame.join(""))), "恢复已有接收方式保持简洁开关确认");
     await drive([...channel, K.enter, K.ctrlS, K.esc]);
     assert.equal(host.readUserConfigRaw().providers.find((p) => p.id === "terminal").enabled, false);
     assert.deepEqual(host.readUserConfigRaw().channels, []);

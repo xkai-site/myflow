@@ -179,7 +179,7 @@ await step("C6c 邮箱默认关闭、稀疏 options 继承，旧用户 providers
 });
 
 await step("C6d 逐项保存邮箱参数不丢本机渠道，显式关闭与自定义渠道语义保留", async () => {
-  const settings = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "settings.ts")).href);
+  const settings = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "settings-state.ts")).href);
   const agentDir = cleanAgentDir("email-sparse-save");
   for (const [field, value] of [["from", "sender@qq.com"], ["to", ["recipient@example.org"]]]) {
     const raw = config.readUserConfigRaw(agentDir).raw;

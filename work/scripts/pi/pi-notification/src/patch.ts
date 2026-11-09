@@ -2,7 +2,7 @@
  * Sparse patch helpers shared by all three config layers.
  *
  * Used by `config.ts` (merging a single Ctrl+S field into the raw user file),
- * by `settings.ts` (session overlay and per-setting path access) and by tests.
+ * by `settings-state.ts` (session/default transactions), `settings.ts` (field paths) and tests.
  *
  * Semantics are deliberate: arrays are replaced as a whole value while plain
  * objects merge field by field.

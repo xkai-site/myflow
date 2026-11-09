@@ -35,7 +35,7 @@ export function resolveChannels(config: NotificationConfig, rule: { channels: "i
   return [...(rule.channels === "inherit" ? config.channels : rule.channels)];
 }
 
-const LEVEL_RANK: Record<NotifyLevel, number> = { info: 0, warning: 1, error: 2 };
+import { LEVEL_RANK } from "./types.ts";
 
 /**
  * Assistant excerpt length in code points. Deliberately a constant, not a setting:

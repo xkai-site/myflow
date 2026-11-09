@@ -50,7 +50,7 @@ import {
   overlayEntryData,
   restoreOverlayFromEntries,
   type SessionOverlay,
-} from "../src/settings.ts";
+} from "../src/settings-state.ts";
 import type { AssistantStopReason, CompactionReason, Notifier, NotificationConfig, SignalEvent, UIPromptKind } from "../src/types.ts";
 
 function isAssistantStopReason(value: unknown): value is AssistantStopReason {

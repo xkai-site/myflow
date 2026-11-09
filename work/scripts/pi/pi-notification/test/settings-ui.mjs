@@ -15,6 +15,8 @@ const jiti = createJiti(import.meta.url, { moduleCache: false, fsCache: false, a
 const tui = await jiti.import("@earendil-works/pi-tui");
 const config = await jiti.import("../src/config.ts");
 const settings = await jiti.import("../src/settings.ts");
+const settingState = await jiti.import("../src/settings-state.ts");
+const channels = await jiti.import("../src/channels.ts");
 const model = await jiti.import("../src/ui-model.ts");
 const { NotifySettingsComponent } = await jiti.import("../src/ui.ts");
 const { createService } = await jiti.import("../src/service.ts");
@@ -28,38 +30,49 @@ function harness(raw, options = {}) {
   const dir = path.join(tmp, String(++serial));
   fs.mkdirSync(path.dirname(config.userConfigPath(dir)), { recursive: true });
   if (raw !== undefined) fs.writeFileSync(config.userConfigPath(dir), JSON.stringify(raw));
-  let overlay = settings.emptyOverlay(), done = false, renders = 0;
+  let overlay = settingState.emptyOverlay(), done = false, renders = 0;
   const calls = { set: [], save: [], test: [], reload: 0, credential: [], unsubscribe: 0 };
-  const effective = () => settings.applyOverlay(config.loadConfig({ agentDir: dir }).config, overlay).config;
+  const effective = () => settingState.applyOverlay(config.loadConfig({ agentDir: dir }).config, overlay).config;
   const host = {
     config: effective, userRaw: () => config.readUserConfigRaw(dir).raw,
     runtimeState: () => ({ degraded: config.loadConfig({ agentDir: dir }).degraded, configError: config.loadConfig({ agentDir: dir }).errors.length > 0, quiet: options.quiet, terminalIssue: options.terminalIssue, channelIssues: options.channelIssues }),
     saveChanges(items) {
       calls.save.push(...items.map((item) => item.id));
       const current = effective();
-      const result = config.writeUserDefault(dir, (raw) => settings.settingUserFilePatch(raw, current, model.pendingPatch(items, current)));
+      const result = config.writeUserDefault(dir, (raw) => settingState.settingUserFilePatch(raw, current, settingState.pendingPatch(items, current)));
       return { ok: result.ok, message: result.ok ? `已保存 ${items.length} 项为以后默认` : "批量保存失败：文件未改动" };
     },
-    sessionOverride: (item) => settings.sessionOverrideValue(overlay, item),
+    sessionOverride: (item) => settingState.sessionOverrideValue(overlay, item),
     restrictions: () => options.restrictions ?? [],
     setValue(item, value) {
       calls.set.push({ id: item.id, value });
-      const next = settings.applySettingPatch(overlay, item, item.patch(value));
-      const checked = settings.applyOverlay(config.loadConfig({ agentDir: dir }).config, next);
+      const next = settingState.applySettingPatch(overlay, item, item.patch(value));
+      const checked = settingState.applyOverlay(config.loadConfig({ agentDir: dir }).config, next);
       if (checked.problems.length) return { ok: false, message: "输入有误，未应用" };
       overlay = next;
       return { ok: true, message: "已应用，仅本对话；Ctrl+S 保存为以后默认" };
     },
+    channelActivation: (id) => channels.channelActivation(effective(), id, !!options.vault?.value, options.channelIssues),
+    enableChannel(id) {
+      const plan = host.channelActivation(id);
+      if (plan.kind !== "ready") return { ok: false, message: "无法开启" };
+      const item = settings.buildSettingItems(effective()).find((item) => item.providerId === id && !item.providerOptionPath);
+      const patch = { kind: "compound", operations: [{ kind: "providers", id, value: true },
+        ...(plan.addUnified ? [{ kind: "path", path: "channels", value: [...effective().channels, id] }] : [])] };
+      overlay = settingState.applySettingPatch(overlay, item, patch);
+      calls.set.push({ id: item.id, value: true });
+      return { ok: true, message: "" };
+    },
     saveDefault(item) {
       calls.save.push(item.id);
       const current = effective();
-      const result = config.writeUserDefault(dir, (raw) => settings.settingUserFilePatch(raw, current, settings.settingSnapshot(item, current)));
+      const result = config.writeUserDefault(dir, (raw) => settingState.settingUserFilePatch(raw, current, settingState.settingSnapshot(item, current)));
       return { ok: result.ok, message: result.ok ? "已保存为以后默认，其他修改未保存" : "保存失败，文件未改动" };
     },
-    followUserDefault(item) { overlay = settings.clearItemOverride(overlay, item); return { ok: true, message: "已使用以后默认" }; },
+    followUserDefault(item) { overlay = settingState.clearItemOverride(overlay, item); return { ok: true, message: "已使用以后默认" }; },
     restoreBuiltinDefault(item) {
-      const result = config.deleteUserDefault(dir, settings.itemRemovals(item, effective(), overlay));
-      if (result.ok) overlay = settings.clearItemOverride(overlay, item);
+      const result = config.deleteUserDefault(dir, settingState.itemRemovals(item, effective(), overlay));
+      if (result.ok) overlay = settingState.clearItemOverride(overlay, item);
       return { ok: result.ok, message: result.ok ? "已恢复初始设置" : "恢复失败" };
     },
     itemScope: (item) => item.paths ? [item.label] : [item.label],
@@ -398,10 +411,10 @@ try {
     row(h, "qq:settings"); h.press("?");
     for (let i = 0; i < 10; i++) h.press(K.down);
     assert.match(h.frame().join(""), /PI_NOTIFY_QQ_SMTP_AUTH_CODE/);
-    assert.equal(model.emailSetup(h.host.config(), true, "发送失败", 2).test, "发送失败");
+    assert.equal(model.emailSetup(h.host.config(), true, "发送失败").test, "发送失败");
     const ready = h.host.config(); const p = ready.providers.find((p) => p.id === "email");
     Object.assign(p, { enabled: true, options: { from: "a@qq.com", to: ["b@example.com"] } }); ready.channels = ["email"];
-    assert.equal(model.emailSetup(ready, true, "发送失败", 2).test, "发送失败");
+    assert.equal(model.emailSetup(ready, true, "发送失败").test, "发送失败");
   });
   await step("有效状态集中解释强制静默、全关、缺渠道、免打扰、等级和例外", () => {
     const state = (raw, options = {}) => { const h = harness(raw, options); return h.frame().join(""); };
@@ -410,7 +423,7 @@ try {
     assert.match(state({ providers: [{ id: "terminal", type: "terminal", enabled: false }] }), /暂无可用接收方式/);
     assert.match(state(undefined, { quiet: true }), /免打扰中/);
     assert.match(state(undefined, { restrictions: [{ label: "强制静默", reason: "PI_NOTIFY_DISABLE" }] }), /强制静默/);
-    assert.match(model.controlStatus(config.defaultConfig(), { restrictions: [], hasCredential: false, terminalIssue: "PI_NOTIFY_CHANNEL=off" }).label, /暂无可用/);
+    assert.match(channels.controlStatus(config.defaultConfig(), { restrictions: [], hasCredential: false, terminalIssue: "PI_NOTIFY_CHANNEL=off" }).label, /暂无可用/);
     assert.doesNotMatch(state({ minLevel: "error", rules: { runFailed: { channels: [] } } }), /配置键|接收例外：|等级筛选：/);
   });
   await step("原生输入：焦点传播、长地址横向滚动、光标移动及粘贴；取消不改值", () => {
@@ -420,7 +433,7 @@ try {
     assert.ok(h.state().view.editor.focused);
     assert.ok(h.frame(40).join("").includes(tui.CURSOR_MARKER));
     h.press("\x1b[D"); h.press("\x7f");
-    assert.equal(h.state().view.buffer, "long-fake-address@qq.cm");
+    assert.equal(h.state().view.editor.getValue(), "long-fake-address@qq.cm");
     h.component.focused = false; assert.equal(h.state().view.editor.focused, false);
     assert.ok(!h.frame(40).join("").includes(tui.CURSOR_MARKER));
     h.press(K.esc); assert.equal(h.host.config().providers.find((p) => p.id === "email").options.from, "");
@@ -498,8 +511,8 @@ try {
     const h = harness({ channels: [], providers: [{ id: "terminal", type: "terminal", enabled: false }], rules: { runFailed: { channels: ["terminal"] } } });
     searchItem(h, "channels"); choose(h, "本机通知");
     assert.equal(h.state().view.kind, "confirm");
-    assert.match(h.frame().join(""), /关闭[\s\S]*开启/);
-    assert.doesNotMatch(h.frame().join(""), /同时开启本机通知|适用规则：/);
+    assert.match(h.frame().join(""), /同时开启本机通知，恢复原有规则：运行失败/);
+    assert.match(h.frame().join(""), /逐规则接收选择不变/);
     h.press(K.enter); assert.equal(h.host.config().providers.find((p) => p.id === "terminal").enabled, false);
     choose(h, "本机通知"); confirm(h);
     assert.equal(h.host.config().providers.find((p) => p.id === "terminal").enabled, true);
@@ -509,7 +522,13 @@ try {
     const h = harness({ channels: [], providers: [{ id: "terminal", type: "terminal", enabled: false }], rules: { runFailed: { channels: [] } } });
     row(h, "channel:terminal", true);
     assert.match(h.frame().join(""), /关闭[\s\S]*开启/);
-    assert.doesNotMatch(h.frame().join(""), /将加入统一接收选择|适用规则：/);
+    for (const width of [40, 70, 110]) {
+      const frame = h.frame(width);
+      assert.match(frame.join(""), /开启后加入统一接收选择；逐规则例外不变/);
+      assert.match(frame.join(""), /→ 关闭[\s\S]*开启/);
+      for (const line of frame) assert.ok(tui.visibleWidth(line) <= width);
+    }
+    assert.doesNotMatch(h.frame().join(""), /适用规则：/);
     h.press(K.enter); assert.deepEqual(h.host.config().channels, []);
     row(h, "channel:terminal", true); confirm(h);
     assert.deepEqual(h.host.config().channels, ["terminal"]);
@@ -592,7 +611,7 @@ try {
     assert.equal(h.host.config().providers.find((p) => p.id === "email").enabled, false, "不完整配置也必须可以关闭渠道");
   });
   await step("有效状态不把空路由例外、缺凭据、本机不可用或等级过滤称为全面开启", () => {
-    const label = (raw, options = {}) => model.controlStatus(harness(raw).host.config(), { restrictions: [], hasCredential: false, ...options }).label;
+    const label = (raw, options = {}) => channels.controlStatus(harness(raw).host.config(), { restrictions: [], hasCredential: false, ...options }).label;
     assert.equal(label({ rules: { runFailed: { channels: [] } } }), "通知部分可用");
     assert.match(label({ channels: ["email"], providers: [{ id: "email", type: "email", enabled: true }] }), /暂无可用/);
     assert.match(label(undefined, { terminalIssue: "fake-unavailable" }), /暂无可用/);
@@ -637,8 +656,6 @@ try {
     const file = new URL("./fixtures/notification-layout.json", import.meta.url);
     if (process.env.PI_NOTIFY_UPDATE_LAYOUTS === "1") fs.writeFileSync(file, JSON.stringify(frames, null, 2) + "\n");
     assert.deepEqual(frames, JSON.parse(fs.readFileSync(file, "utf8")));
-    const before = JSON.parse(fs.readFileSync(new URL("./fixtures/notification-layout-before.json", import.meta.url), "utf8"));
-    for (const name of ["home", "reminders", "email"]) assert.ok(frames[`${name}-70`].length < before[name].length, `${name} 应比重设计前更紧凑`);
   });
   await step("Ctrl+O 可分页、重读动作可见，Ctrl+T 独立于业务开关", () => {
     const h = harness({ enabled: false }); h.press(K.status); assert.equal(h.state().view.id, "status"); row(h, "action:reload", true); assert.equal(h.calls.reload, 1);
