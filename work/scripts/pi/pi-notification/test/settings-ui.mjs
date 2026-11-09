@@ -473,7 +473,8 @@ try {
     assert.deepEqual(await deliver("failed"), ["hook"]);
     assert.match(h.frame().join(""), /通知部分可用/);
     row(h, "channel:terminal", true);
-    assert.match(h.frame().join(""), /适用规则：.*运行失败/);
+    assert.match(h.frame().join(""), /关闭[\s\S]*开启/);
+    assert.doesNotMatch(h.frame().join(""), /适用规则：/);
     h.press(K.enter); assert.equal(h.host.config().providers.find((p) => p.id === "terminal").enabled, false);
     row(h, "channel:terminal", true); confirm(h);
     assert.deepEqual(await deliver("failed"), ["terminal", "hook"]);
@@ -488,8 +489,8 @@ try {
     assert.equal(h.host.config().providers.find((p) => p.id === "terminal").enabled, true);
     assert.match(h.frame().join(""), /本机通知  开启/);
     row(h, "channel:terminal", true); row(h, "channel:terminal", true);
-    assert.doesNotMatch(h.frame().join(""), /将加入统一/);
-    assert.match(h.frame().join(""), /适用规则：运行失败/);
+    assert.doesNotMatch(h.frame().join(""), /将加入统一|适用规则：/);
+    assert.match(h.frame().join(""), /关闭[\s\S]*开启/);
     confirm(h); assert.deepEqual(h.host.config().channels, []);
     assert.deepEqual(h.host.config().rules.runFailed.channels, ["terminal"]);
   });
@@ -497,7 +498,8 @@ try {
     const h = harness({ channels: [], providers: [{ id: "terminal", type: "terminal", enabled: false }], rules: { runFailed: { channels: ["terminal"] } } });
     searchItem(h, "channels"); choose(h, "本机通知");
     assert.equal(h.state().view.kind, "confirm");
-    assert.match(h.frame().join(""), /同时开启本机通知，恢复原有规则：运行失败/);
+    assert.match(h.frame().join(""), /关闭[\s\S]*开启/);
+    assert.doesNotMatch(h.frame().join(""), /同时开启本机通知|适用规则：/);
     h.press(K.enter); assert.equal(h.host.config().providers.find((p) => p.id === "terminal").enabled, false);
     choose(h, "本机通知"); confirm(h);
     assert.equal(h.host.config().providers.find((p) => p.id === "terminal").enabled, true);
@@ -506,8 +508,8 @@ try {
   await step("未使用渠道开启需确认加入统一选择，不改逐规则空集合或关闭规则", () => {
     const h = harness({ channels: [], providers: [{ id: "terminal", type: "terminal", enabled: false }], rules: { runFailed: { channels: [] } } });
     row(h, "channel:terminal", true);
-    assert.match(h.frame().join(""), /将加入统一接收选择/);
-    assert.doesNotMatch(h.frame().join(""), /适用规则：[^\n]*运行失败/);
+    assert.match(h.frame().join(""), /关闭[\s\S]*开启/);
+    assert.doesNotMatch(h.frame().join(""), /将加入统一接收选择|适用规则：/);
     h.press(K.enter); assert.deepEqual(h.host.config().channels, []);
     row(h, "channel:terminal", true); confirm(h);
     assert.deepEqual(h.host.config().channels, ["terminal"]);

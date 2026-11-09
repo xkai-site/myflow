@@ -980,13 +980,7 @@ export class NotifySettingsComponent {
       ...wrapTextWithAnsi(`适用规则：${channelRules(this.host.config(), item.providerId!).join("、") || "无"}。接收选择不变。`, width),
       `${FOCUS_CELL(view.focus === 0)}取消`, `${FOCUS_CELL(view.focus === 1)}确认使用默认设置`];
     if (view.channelId) {
-      const config = this.host.config();
-      const rules = channelRules(config, view.channelId);
-      const scope = view.addUnified ? RULE_INFOS.filter((entry) => config.rules[entry.key as keyof NotificationConfig["rules"]].channels === "inherit").map((entry) => entry.label) : rules;
-      return [...wrapTextWithAnsi(`开启${channelLabel(view.channelId)}。${view.addUnified ? "将加入统一接收选择。" : "保持原有接收选择。"}`, width),
-        ...wrapTextWithAnsi(`适用规则：${scope.join("、") || "无"}（仅已开启的规则发送）。`, width),
-        ...wrapTextWithAnsi("单独设置的接收方式不变。", width),
-        `${FOCUS_CELL(view.focus === 0)}取消`, `${FOCUS_CELL(view.focus === 1)}确认开启`];
+      return [`${FOCUS_CELL(view.focus === 0)}关闭`, `${FOCUS_CELL(view.focus === 1)}开启`];
     }
     if (view.applyValue !== undefined) {
       const config = this.host.config();
