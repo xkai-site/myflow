@@ -46,9 +46,9 @@ export class SaveReview {
     return [
       ...wrapTextWithAnsi("将保存以下修改，用于以后对话。其他已打开对话不变。", width),
       ...this.wrappedRows.slice(this.offset, this.offset + 5),
-      ...(this.wrappedRows.length > 5 ? [theme.fg("dim", `${this.offset + 1}–${Math.min(this.offset + 5, this.wrappedRows.length)}/${this.wrappedRows.length} · PgUp/PgDn 查看全部`)] : []),
+      ...(this.wrappedRows.length > 5 ? [theme.fg("dim", `${this.offset + 1}–${Math.min(this.offset + 5, this.wrappedRows.length)}/${this.wrappedRows.length}  PgUp/PgDn 翻页`)] : []),
       ...menuList(["取消", `确认保存 ${this.labels.length} 项`], this.focus, width, 2, theme),
-      ...wrapTextWithAnsi(theme.fg("dim", "↑↓ 选择 · Enter 确认 · Esc 取消"), width),
+      ...wrapTextWithAnsi(theme.fg("dim", "↑↓ 选择   Enter 确认   Esc 取消"), width),
     ];
   }
 }

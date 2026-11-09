@@ -13,6 +13,8 @@ const jiti = createJiti(import.meta.url, { moduleCache: false, fsCache: false, a
   "@earendil-works/pi-tui": resolvePiPackageEntry("@earendil-works/pi-tui", { sdkEntry }),
 } });
 const tui = await jiti.import("@earendil-works/pi-tui");
+const { getThemeByName } = await jiti.import(path.join(path.dirname(sdkEntry), "modes/interactive/theme/theme.js"));
+const plain = (text) => text.replace(/\x1b\[[0-9;]*m/g, "");
 const config = await jiti.import("../src/config.ts");
 const settings = await jiti.import("../src/settings.ts");
 const settingState = await jiti.import("../src/settings-state.ts");
@@ -89,7 +91,7 @@ function harness(raw, options = {}) {
     testEmail(onProgress) { return host.test(["email"], onProgress); },
     reload() { calls.reload++; return { ok: true, message: "已重读，保留本对话修改" }; },
     statusLines: () => ["状态与诊断", ...Array.from({ length: 24 }, (_, i) => `诊断行 ${i}`)],
-    preview: () => ({ ok: true, message: "示例，不会发送", lines: ["任务完成 · 示例会话", "固定数据，不读取真实回复"] }),
+    preview: () => ({ ok: true, message: "示例，不会发送", lines: ["任务完成 / 示例会话", "固定数据，不读取真实回复"] }),
   };
   const bindings = { "tui.select.up": K.up, "tui.select.down": K.down, "tui.select.confirm": K.enter, "tui.select.cancel": K.esc, "tui.select.pageUp": "\x1b[5~", "tui.select.pageDown": "\x1b[6~" };
   const component = new NotifySettingsComponent({ host, theme: options.theme ?? { fg: (_, text) => text, bold: (text) => text },
@@ -103,7 +105,7 @@ function focus(h, label) {
   for (let i = 0; i < 80; i++) h.press(K.up);
   for (let i = 0; i < 100; i++) {
     const line = focusedLine(h).replace(/^→ [✓ ]*\s*/, "");
-    if (line === label || line.startsWith(`${label}  `) || line.startsWith(`${label} ·`) || line.startsWith(`${label} ›`)) return;
+    if (line === label || line.startsWith(`${label}  `) || line.startsWith(`${label} ›`)) return;
     h.press(K.down);
   }
   assert.fail(`Missing visible option ${label}:\n${h.frame().join("\n")}`);
@@ -160,7 +162,7 @@ try {
   await step("专业参数不在设置表或搜索，逐规则开关/等级/接收仍可编辑", () => {
     const h = harness();
     h.press("/"); h.press("delivery"); assert.match(h.frame().join(""), /没有匹配的设置/);
-    searchItem(h, "rules.toolFailed.channels"); assert.match(h.frame().join(""), /工具失败 · 接收方式/);
+    searchItem(h, "rules.toolFailed.channels"); assert.match(h.frame().join(""), /工具失败：接收方式/);
   });
   await step("返回保留焦点，重读保持本对话修改", () => {
     const h = harness(); row(h, "提醒时机", true); row(h, "执行失败", true);
@@ -205,7 +207,7 @@ try {
   });
   await step("邮箱启用步骤可以重新启用已选但关闭的邮箱", () => {
     const h = harness({ channels: ["terminal", "email"], providers: [{ id: "email", type: "email", enabled: false, options: { from: "sender@qq.com", to: ["reader@example.com"] } }] }, { vault: { value: "fake" } });
-    reception(h); row(h, "邮箱配置", true); row(h, "邮箱通知", true); confirm(h);
+    reception(h); row(h, "邮箱配置", true); row(h, "邮箱通知", true);
     assert.equal(h.host.config().providers.find((p) => p.id === "email").enabled, true);
   });
   await step("数字自定义及非法输入；时间自定义严格校验", () => {
@@ -461,7 +463,7 @@ try {
     h.press(K.down); h.press(K.enter);
     assert.equal(h.calls.save.length, 6); assert.doesNotMatch(h.frame().join(""), /保存为默认设置/);
   });
-  await step("首页渠道开关约束统一与逐规则真实投递，开启前确认且保留路由", async () => {
+  await step("首页渠道开关直接操作，约束统一与逐规则真实投递且保留路由", async () => {
     const h = harness({ channels: ["terminal"], providers: [{ id: "terminal", type: "terminal" }, { id: "hook", type: "debug" }],
       rules: { runFailed: { channels: ["terminal", "hook"] } }, coalesce: { windowMs: 0, cooldownMs: 0 } });
     const deliver = async (status) => {
@@ -484,10 +486,8 @@ try {
     assert.deepEqual(await deliver("failed"), ["hook"]);
     assert.match(h.frame().join(""), /通知部分可用/);
     row(h, "本机通知", true);
-    assert.match(h.frame().join(""), /关闭[\s\S]*开启/);
-    assert.doesNotMatch(h.frame().join(""), /适用规则：/);
-    h.press(K.enter); assert.equal(h.host.config().providers.find((p) => p.id === "terminal").enabled, false);
-    row(h, "本机通知", true); confirm(h);
+    assert.equal(h.frame()[0], "通知设置");
+    assert.equal(h.host.config().providers.find((p) => p.id === "terminal").enabled, true);
     assert.deepEqual(await deliver("failed"), ["terminal", "hook"]);
     assert.deepEqual(h.host.config().rules.runFailed.channels, ["terminal", "hook"]);
     assert.deepEqual(h.host.config().channels, ["terminal"]);
@@ -501,8 +501,9 @@ try {
     assert.match(h.frame().join(""), /本机通知  开启/);
     row(h, "本机通知", true); row(h, "本机通知", true);
     assert.doesNotMatch(h.frame().join(""), /将加入统一|适用规则：/);
-    assert.match(h.frame().join(""), /关闭[\s\S]*开启/);
-    confirm(h); assert.deepEqual(h.host.config().channels, []);
+    assert.equal(h.frame()[0], "通知设置");
+    assert.equal(h.host.config().providers.find((p) => p.id === "terminal").enabled, true);
+    assert.deepEqual(h.host.config().channels, []);
     assert.deepEqual(h.host.config().rules.runFailed.channels, ["terminal"]);
   });
   await step("统一选择重新开启关闭的渠道前审查逐规则恢复范围", () => {
@@ -519,11 +520,11 @@ try {
   await step("未使用渠道开启需确认加入统一选择，不改逐规则空集合或关闭规则", () => {
     const h = harness({ channels: [], providers: [{ id: "terminal", type: "terminal", enabled: false }], rules: { runFailed: { channels: [] } } });
     row(h, "本机通知", true);
-    assert.match(h.frame().join(""), /关闭[\s\S]*开启/);
+    assert.match(focusedLine(h), /取消/);
     for (const width of [40, 70, 110]) {
       const frame = h.frame(width);
-      assert.match(frame.join(""), /开启后加入统一接收选择，跟随统一设置的提醒将使用此渠道；逐规则例外不变/);
-      assert.match(frame.join(""), /→ 关闭[\s\S]*开启/);
+      assert.match(frame.join(""), /开启后加入统一接收选择。跟随统一设置的提醒将使用此渠道，单独设置不变/);
+      assert.match(frame.join(""), /→ 取消[\s\S]*开启并加入统一接收/);
       for (const line of frame) assert.ok(tui.visibleWidth(line) <= width);
     }
     assert.doesNotMatch(h.frame().join(""), /适用规则：/);
@@ -560,15 +561,16 @@ try {
       if (missing === "to") options.to = [];
       const h = harness({ channels: ["email"], providers: [{ id: "email", type: "email", enabled: true, options }] },
         { vault: missing === "credential" ? {} : { value: "fake" } });
-      assert.match(h.frame().join(""), /邮箱通知  开启 · 缺/);
+      assert.match(h.frame().join(""), /邮箱通知  开启（缺/);
       row(h, "邮箱通知"); h.press(key);
       assert.equal(h.frame()[0], "通知设置");
-      assert.match(h.frame().join(""), /邮箱通知  关闭 · 缺/);
+      assert.match(h.frame().join(""), /邮箱通知  关闭/);
+      assert.doesNotMatch(h.frame().join(""), /缺发件地址|缺收件地址|缺授权码/);
       assert.equal(h.host.config().providers.find((p) => p.id === "email").enabled, false);
       assert.deepEqual(h.host.config().channels, ["email"]);
       h.press(key);
       assert.equal(h.frame()[0], "邮箱通知");
-      assert.match(h.frame().join(""), /关闭 · 配置未完成/);
+      assert.match(h.frame().join(""), /配置未完成/);
       assert.equal(h.calls.set.length, 1); assert.equal(h.calls.test.length, 0);
     }
   });
@@ -674,6 +676,68 @@ try {
     assert.match(label(undefined, { restrictions: [{ label: "强制静默", reason: "fake" }] }), /通知已停止/);
     assert.match(label({ providers: [{ id: "terminal", type: "noop", enabled: true }] }), /暂无可用/);
   });
+  await step("普通渠道开关 Enter/Space 均直接恢复，Esc 不撤销；不夹带统一选择", () => {
+    for (const key of [K.enter, K.space]) {
+      const h = harness({ channels: [], providers: [{ id: "terminal", type: "terminal", enabled: false }],
+        rules: { runFailed: { channels: ["terminal"], enabled: false } } });
+      row(h, "本机通知"); h.press(key);
+      assert.equal(h.frame()[0], "通知设置");
+      assert.equal(h.host.config().providers.find((p) => p.id === "terminal").enabled, true);
+      assert.deepEqual(h.host.config().channels, []);
+      assert.equal(h.host.config().rules.runFailed.enabled, false);
+      assert.equal(h.calls.test.length, 0); assert.equal(h.calls.save.length, 0);
+      h.press(K.esc); assert.equal(h.done(), true);
+      assert.equal(h.host.config().providers.find((p) => p.id === "terminal").enabled, true);
+    }
+  });
+  await step("统一接收选择只在隐式开启渠道时确认；已开启渠道的增删直接应用", () => {
+    const h = harness({ channels: [] });
+    searchItem(h, "channels"); choose(h, "本机通知");
+    assert.equal(h.frame()[0], "统一接收选择");
+    assert.deepEqual(h.host.config().channels, ["terminal"]);
+    h.press(K.space); assert.deepEqual(h.host.config().channels, []);
+    assert.equal(h.host.config().providers.find((p) => p.id === "terminal").enabled, true);
+  });
+  await step("字段详情优先当前值、默认值和还原操作，全局帮助有独立入口", () => {
+    for (const width of [40, 70, 110]) {
+      const h = harness({ enabled: false });
+      row(h, "通知总开关"); h.press("?");
+      const details = h.frame(width).join("");
+      assert.match(details, /^设置详情：通知总开关当前值：关闭默认值：关闭内置默认：开启/);
+      assert.match(details, /a 使用默认值.*d 恢复内置默认/);
+      assert.doesNotMatch(details, /Ctrl\+|↑↓|Enter|邮箱授权码/);
+      h.press("?"); assert.equal(h.frame(width)[0], "操作帮助");
+      h.press(K.esc); assert.match(h.frame(width)[0], /设置详情/);
+      home(h); row(h, "更多设置", true); row(h, "操作帮助", true);
+      assert.equal(h.frame(width)[0], "操作帮助");
+      h.press(K.esc); assert.match(focusedLine(h), /操作帮助/);
+    }
+  });
+  await step("长邮箱与中英文混排保留页面标记，焦点不改变行宽", () => {
+    const h = harness({ providers: [{ id: "email", type: "email", options: { from: "long-sender-address@qq.com", to: ["long-reader-address@example.com"] } }] }, { vault: {} });
+    reception(h); row(h, "邮箱配置", true);
+    for (const width of [40, 70, 110]) {
+      const addressRows = h.frame(width).filter((line) => /发件 QQ 邮箱|收件邮箱（多个）/.test(line));
+      assert.equal(addressRows.length, 2);
+      for (const line of addressRows) {
+        assert.ok(line.endsWith(" ›"), `页面标记不应被原生列表二次裁切：${line}`);
+        assert.ok(tui.visibleWidth(line) <= width - 2);
+      }
+    }
+  });
+  await step("删除授权码明确说明全对话影响，默认取消且不外发", () => {
+    const h = harness(undefined, { vault: { value: "fake-delete-only" } });
+    reception(h); row(h, "邮箱配置", true); row(h, "移除已保存的邮箱授权码", true);
+    for (const width of [40, 70, 110]) {
+      const frame = h.frame(width);
+      assert.match(frame.join(""), /影响所有对话.*启动环境仍可提供授权码/);
+      for (const line of frame) assert.ok(tui.visibleWidth(line) <= width);
+    }
+    h.press(K.enter); assert.deepEqual(h.calls.credential, []);
+    row(h, "移除已保存的邮箱授权码", true); h.press(K.esc);
+    assert.match(focusedLine(h), /移除已保存/);
+    assert.equal(h.calls.test.length, 0);
+  });
   await step("40/70/110 列主要页面布局快照、重复渲染、焦点和滚动回归", () => {
     const frames = {};
     const h = harness(undefined, { vault: {} });
@@ -683,14 +747,15 @@ try {
         assert.deepEqual(h.frame(width), frame);
         h.component.invalidate(); assert.deepEqual(h.frame(width), frame);
         for (const line of frame) assert.ok(tui.visibleWidth(line) <= width, `${name}: ${line}`);
-        assert.ok(frame.some((line) => line.includes("→ ")), `${name} focus missing`);
+        assert.doesNotMatch(frame.join(""), /·/, `${name}: 不使用中点分隔文案`);
+        if (!["help", "field-details"].includes(name)) assert.ok(frame.some((line) => line.includes("→ ")), `${name} focus missing`);
         assert.ok(frame.every((line, index) => index === 0 || line !== "" || frame[index - 1] !== ""), "不应有固定空白");
         frames[`${name}-${width}`] = frame;
       }
     };
     capture("home");
     row(h, "通知总开关", true); capture("home-paused-pending"); h.press(K.enter);
-    row(h, "本机通知", true); capture("home-unavailable"); h.press(K.enter); confirm(h);
+    row(h, "本机通知", true); capture("home-unavailable"); h.press(K.enter);
     row(h, "提醒时机", true); capture("reminders"); home(h);
     reception(h); row(h, "邮箱配置", true); capture("email");
     row(h, "发件 QQ 邮箱", true); h.press("fake@qq.com"); h.press(K.enter);
@@ -706,9 +771,60 @@ try {
     h.calls.test[0].onProgress({ id: "snapshot", stage: "finished" }); capture("email-test-failed");
     h.host.saveChanges = () => ({ ok: false, message: "保存失败：默认设置未改动，当前对话修改仍保留。", feedback: { kind: "unknown", next: "diagnostics", details: ["模拟写入失败"] } });
     row(h, "保存为默认设置", true); h.press(K.down); h.press(K.enter); capture("save-failed");
+    home(h); row(h, "更多设置", true); row(h, "操作帮助", true); capture("help"); h.press(K.esc);
+    home(h); row(h, "通知总开关"); h.press("?"); capture("field-details"); h.press(K.esc);
+    searchItem(h, "content.maxMessageChars"); h.press(K.save); capture("candidates"); home(h);
+    const unused = harness({ channels: [], providers: [{ id: "terminal", type: "terminal", enabled: false }] });
+    row(unused, "本机通知", true);
+    for (const width of [40, 70, 110]) frames[`enable-review-${width}`] = unused.frame(width);
     const file = new URL("./fixtures/notification-layout.json", import.meta.url);
     if (process.env.PI_NOTIFY_UPDATE_LAYOUTS === "1") fs.writeFileSync(file, JSON.stringify(frames, null, 2) + "\n");
     assert.deepEqual(frames, JSON.parse(fs.readFileSync(file, "utf8")));
+  });
+  await step("Pi 亮色/暗色主题在 40/70/110 列保持相同可见布局，标题中性且焦点突出", () => {
+    const frames = JSON.parse(fs.readFileSync(new URL("./fixtures/notification-layout.json", import.meta.url), "utf8"));
+    for (const name of ["light", "dark"]) {
+      const theme = getThemeByName(name); assert.ok(theme, `Pi 内置主题 ${name}`);
+      const h = harness(undefined, { theme, vault: {} });
+      const check = (page, source = h) => {
+        for (const width of [40, 70, 110]) {
+          const frame = source.frame(width);
+          assert.deepEqual(frame.map(plain), frames[`${page}-${width}`].map(plain), `${name} ${page} ${width}`);
+          for (const line of frame) assert.ok(tui.visibleWidth(line) <= width);
+          assert.equal(frame[0], theme.bold(plain(frame[0])), "标题仅使用主题字重，不叠加强调色（非 TTY 时字重可为空）");
+          if (!["help", "field-details"].includes(page)) assert.ok(frame.some((line) => plain(line).startsWith("→ ") && line.includes("\x1b[")), "焦点保持主题样式");
+          assert.doesNotMatch(frame.join(""), /·/);
+        }
+      };
+      const themedRow = (label, open = false) => {
+        for (let i = 0; i < 80; i++) h.press(K.up);
+        for (let i = 0; i < 100; i++) {
+          const focused = h.frame().map(plain).find((line) => line.startsWith("→ ")) ?? "";
+          if (focused === `→ ${label}` || focused.startsWith(`→ ${label}  `) || focused.startsWith(`→ ${label} ›`)) {
+            if (open) h.press(K.enter); return;
+          }
+          h.press(K.down);
+        }
+        assert.fail(`Missing themed row ${label}`);
+      };
+      h.press(K.enter); h.press(K.enter); // Match the snapshot's explicit session override at its default value.
+      check("home"); themedRow("提醒时机", true); check("reminders"); h.press(K.esc);
+      themedRow("更多设置", true); themedRow("邮箱配置", true); check("email");
+      themedRow("发件 QQ 邮箱", true); h.press("fake@qq.com"); h.press(K.enter);
+      themedRow("保存为默认设置", true); check("save-review"); h.press(K.esc);
+      themedRow("收件邮箱（多个）", true); h.press("reader@example.com"); h.press(K.enter);
+      themedRow("QQ 邮箱授权码", true); h.press("fake-layout-only"); h.press(K.enter);
+      themedRow("邮箱通知", true); confirm(h); check("email-ready");
+      h.press(K.test);
+      h.calls.test[0].onProgress({ id: "themed", stage: "result", result: { providerId: "email", ok: false, error: "FAKE_FAILURE password=fake-layout-private" } });
+      h.calls.test[0].onProgress({ id: "themed", stage: "finished" }); check("email-test-failed");
+      assert.ok(h.frame().includes(theme.fg("error", "测试：发送失败")), "测试失败使用语义错误色");
+      h.press(K.esc); themedRow("操作帮助", true); check("help");
+      h.press(K.esc); h.press(K.esc); themedRow("通知总开关"); h.press("?"); check("field-details");
+      h.press(K.esc); h.press("/"); h.press("content.maxMessageChars"); h.press(K.enter); h.press(K.save); check("candidates");
+      const unused = harness({ channels: [], providers: [{ id: "terminal", type: "terminal", enabled: false }] }, { theme });
+      unused.press(K.down); unused.press(K.down); unused.press(K.enter); check("enable-review", unused);
+    }
   });
   await step("Ctrl+O 可分页、重读动作可见，Ctrl+T 独立于业务开关", () => {
     const h = harness({ enabled: false }); h.press(K.status); assert.equal(h.frame()[0], "状态与诊断"); row(h, "重新读取配置", true); assert.equal(h.calls.reload, 1);

@@ -52,7 +52,7 @@ export function channelLabel(id: string): string {
 }
 export function booleanLabel(value: unknown): string {
   return value === "mixed"
-    ? "部分开启 / 自定义"
+    ? "部分开启"
     : value === "partial"
     ? "部分已修改"
     : value === true
@@ -132,7 +132,7 @@ function makeItem(spec: ItemSpec): SettingItem {
     item.parseInput = (text) =>
       /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(text.trim())
         ? { ok: true, value: text.trim() }
-        : { ok: false, message: "必须是严格 HH:MM（00:00–23:59）" };
+        : { ok: false, message: "请输入 HH:MM 格式的时间（00:00–23:59）" };
   }
   return item;
 }
@@ -163,7 +163,7 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
   });
   add({
     group: "基础",
-    label: "接收哪些重要程度的提醒",
+    label: "提醒级别",
     path: "minLevel",
     kind: "enum",
     labels: THRESHOLD_LABELS,
@@ -262,10 +262,10 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
   });
   for (const rule of RULE_INFOS) {
     const base = `rules.${rule.key}`;
-    add({ group: "通知规则", label: `${rule.label} · 开关`, path: `${base}.enabled`, kind: "boolean" });
+    add({ group: "通知规则", label: `${rule.label}：开关`, path: `${base}.enabled`, kind: "boolean" });
     add({
       group: "通知规则",
-      label: `${rule.label} · 重要程度`,
+      label: `${rule.label}：重要程度`,
       path: `${base}.level`,
       kind: "enum",
       labels: LEVEL_LABELS,
@@ -273,7 +273,7 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
     });
     add({
       group: "通知规则",
-      label: `${rule.label} · 接收方式`,
+      label: `${rule.label}：接收方式`,
       path: `${base}.channels`,
       kind: "collection",
       candidates: channelCandidates,
@@ -402,7 +402,8 @@ function emailOption(optionPath: "from" | "to" | "subjectPrefix", label: string)
   };
 }
 export function ruleSummary(config: NotificationConfig, items: readonly SettingItem[], ruleKey: string): string {
-  return ["enabled", "level", "channels"]
+  if (!config.rules[ruleKey as keyof NotificationConfig["rules"]].enabled) return "关闭";
+  return ["level", "channels"]
     .map((suffix) => items.find((item) => item.id === `rules.${ruleKey}.${suffix}`))
     .filter((item): item is SettingItem => item !== undefined)
     .map((item) =>
@@ -419,7 +420,7 @@ export function ruleSummary(config: NotificationConfig, items: readonly SettingI
           }`
         : item.format(item.read(config))
     )
-    .join(" · ");
+    .join("，");
 }
 export interface SettingCategory {
   id: string;
@@ -429,7 +430,7 @@ export interface SettingCategory {
   sections?: readonly string[];
   summary(config: NotificationConfig): string;
   collapsed?: { when(config: NotificationConfig): boolean; label: string; note: string; ids: readonly string[] };
-  actions?: ReadonlyArray<{ key: string; action: "status" | "reload" | "search" | "preview" }>;
+  actions?: ReadonlyArray<{ key: string; action: "status" | "reload" | "search" | "preview" | "help" }>;
 }
 export function categoryPageItems(
   category: SettingCategory,
@@ -481,7 +482,7 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
     label: "内容与隐私",
     kind: "fields",
     group: "内容",
-    summary: () => "耗时、会话名等",
+    summary: () => "",
     actions: [{ key: "action:preview", action: "preview" }],
   },
   {
@@ -517,7 +518,7 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
     label: "专业设置",
     kind: "sections",
     sections: ["channels", "expertRules", "providers", "emailAdvanced"],
-    summary: () => "分别设置每类提醒",
+    summary: () => "",
   },
   {
     id: "more",
@@ -529,6 +530,7 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
       { key: "action:status", action: "status" },
       { key: "action:reload", action: "reload" },
       { key: "action:search", action: "search" },
+      { key: "action:help", action: "help" },
     ],
   },
 ];

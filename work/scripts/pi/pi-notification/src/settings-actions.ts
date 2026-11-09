@@ -121,15 +121,15 @@ function formatStatus(deps: SettingsDeps): string {
   if (forcedOff(deps)) lines.push(`  限制来源：${[deps.isSilenced() ? "--no-notify" : "", isDisabledByEnv() ? "PI_NOTIFY_DISABLE" : ""].filter(Boolean).join("、")}`);
   const readiness = emailReadiness(config, resolveQqCredential().source !== "missing");
   lines.push(`  邮箱：${readiness.label}；${readiness.usedBy} 类提醒使用邮箱。`);
-  lines.push("  技术详情（供进一步排查）：");
+  lines.push("  诊断详情：");
   for (const issue of channelProblems(config)) lines.push(`  ${channelLabel(issue.id)}：${issue.reason}`);
   lines.push(`  规则/渠道: ${describeConfig(config)}`);
-  if (deps.sessionId()) lines.push(`  会话: ${deps.sessionId()}${deps.isWaitingForUser?.() ? "（正在等你输入）" : ""}`);
+  if (deps.sessionId()) lines.push(`  会话: ${deps.sessionId()}${deps.isWaitingForUser?.() ? "（等待用户输入）" : ""}`);
   // “Rule enabled” only means “passes the filter”; it is never a promise that a notification was
   // delivered, and no enabled channel is a state worth spelling out.
   const enabledProviders = config.providers.filter((provider) => provider.enabled);
   lines.push(enabledProviders.length === 0
-    ? "  送达前提: 没有启用的渠道，通知不会到达任何地方"
+    ? "  送达前提: 没有启用的渠道，通知不会发送"
     : `  送达前提: ${enabledProviders.length} 个渠道启用；规则开启只表示通过筛选，实际送达取决于渠道可用性`);
   lines.push(
     `  合并/冷却: 同运行窗口 ${config.coalesce.windowMs}ms / 同 kind 冷却 ${config.coalesce.cooldownMs}ms`
@@ -137,7 +137,7 @@ function formatStatus(deps: SettingsDeps): string {
   );
   const quiet = config.quietHours;
   lines.push(`  静默时段: ${quiet.start}–${quiet.end}（${!quiet.enabled ? "未开启" : deps.service().isQuietHours() ? "当前生效" : "当前未生效"}；本地时间；例外 ${quiet.exceptLevels.join(",") || "无"}）`);  lines.push(`  配置来源: ${load.sources.join(" → ")}${load.degraded ? "（已降级）" : ""}`);
-  lines.push(`  用户默认: ${userConfigPath(deps.agentDir())}（单项保存，未保存的项跟随出厂默认）`);
+  lines.push(`  用户默认: ${userConfigPath(deps.agentDir())}（未单独保存的项使用内置默认）`);
   const credentialSource = resolveQqCredential().source;
   const credentialStatus = credentialSource === "vault" ? "Windows 凭据管理器已设置" : credentialSource === "environment" ? "环境变量已设置（回退）" : "未设置";
   lines.push(`  终端机制: ${selection.channel}${selection.reason ? `（${selection.reason}）` : ""}；邮箱 ${email?.enabled ? (emailConfigured ? "已启用且参数齐全" : "已启用但不可用") : "已关闭"}；QQ SMTP 授权码：${credentialStatus}`);
@@ -168,11 +168,9 @@ function formatStatus(deps: SettingsDeps): string {
   // The four diagnostic groups the status page keeps apart: config blocking, current silence, the
   // self-test submission and the real delivery counters. Placed after the session line so the
   // waiting state stays inside the first page.
-  lines.push("  测试提醒：Ctrl+T 测试当前接收方式。");
-  lines.push("  测试忽略重要程度和免打扰，不绕过强制静默或关闭的接收方式。");
-  lines.push("  接收服务接受不等于实际送达，请确认是否看到或收到。");
+  lines.push("  服务接受不代表实际送达，请检查接收端。");
   for (const problem of load.errors) lines.push(`  ⚠ 配置错误 ${problem.path}: ${problem.message}`);
-  for (const problem of load.warnings) lines.push(`  · 提示 ${problem.path}: ${problem.message}`);
+  for (const problem of load.warnings) lines.push(`  提示 ${problem.path}: ${problem.message}`);
   return lines.map((line) => sanitizeError(line, Math.max(1, line.length))).join("\n");
 }
 
@@ -227,7 +225,7 @@ export function createSettingsHost(deps: SettingsDeps): SettingsHost {
     const id = `manual:${randomUUID()}`;
     const sessionId = deps.sessionId();
     const result = deps.service().submit({
-      level: "info", kind: "run_completed", title: "Pi 测试提醒", body: "这是一条固定内容测试。请确认是否看到；发送接口接受不代表实际显示或进入收件箱。",
+      level: "info", kind: "run_completed", title: "Pi 测试提醒", body: "固定内容测试。请检查接收端；服务接受不代表实际送达。",
       dedupeKey: id, channels: [...channels], meta: { sessionId: sessionId ?? "manual", runId: id, level: "info" },
     }, { manualTest: true, onProgress: (event) => { if (deps.sessionId() === sessionId) onProgress?.(event); } });
     deps.log.record({ event: "notify_test", id, accepted: result.accepted, channels, ...(result.accepted ? {} : { reason: result.reason }) });
@@ -414,7 +412,7 @@ export function createSettingsHost(deps: SettingsDeps): SettingsHost {
 
     itemScope: (item) => itemRemovals(item, deps.config(), deps.overlay()).map((entry) => entry.kind === "path"
       ? buildSettingItems(deps.config()).find((candidate) => candidate.userPath === entry.path)?.label ?? "此设置项"
-      : `${channelLabel(entry.id)} · ${entry.kind === "provider" ? "开关" : "邮箱设置"}`),
+      : `${channelLabel(entry.id)}${entry.kind === "provider" ? "开关" : "设置"}`),
     statusLines: () => formatStatus(deps).split("\n"),
   };
 }

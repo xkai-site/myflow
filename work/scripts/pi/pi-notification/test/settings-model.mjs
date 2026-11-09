@@ -65,17 +65,16 @@ step("Settings table excludes unsupported professional fields without a UI snaps
   assert.ok(ids.includes("rules.toolFailed.channels"));
   for (const id of ["delivery.timeoutMs", "coalesce.windowMs", "rules.toolFailed.mode", "rules.toolFailed.threshold", "rules.waitingForUser.kinds"]) assert.ok(!ids.includes(id));
 });
-step("Email prerequisites and unavailable channels never obscure their enabled state", () => {
+step("Disabled channels show only their switch state; enabled channels expose missing prerequisites", () => {
   for (const enabled of [true, false]) {
     const config = mergeConfig(defaultConfig(), { providers: [{ id: "email", type: "email", enabled,
       options: { from: "fake@qq.com", to: ["reader@example.com"] } }] }, "test").config;
     const email = config.providers.find((p) => p.id === "email");
-    const prefix = enabled ? "开启" : "关闭";
-    assert.equal(channelState(config, "email", false), `${prefix} · 缺授权码`);
-    email.options.to = []; assert.equal(channelState(config, "email", true), `${prefix} · 缺收件地址`);
-    email.options.from = ""; assert.equal(channelState(config, "email", true), `${prefix} · 缺发件地址`);
+    assert.equal(channelState(config, "email", false), enabled ? "开启（缺授权码）" : "关闭");
+    email.options.to = []; assert.equal(channelState(config, "email", true), enabled ? "开启（缺收件地址）" : "关闭");
+    email.options.from = ""; assert.equal(channelState(config, "email", true), enabled ? "开启（缺发件地址）" : "关闭");
     config.providers.find((p) => p.id === "terminal").enabled = enabled;
-    assert.equal(channelState(config, "terminal", true, "fake"), `${prefix} · 不可用`);
+    assert.equal(channelState(config, "terminal", true, "fake"), enabled ? "开启（不可用）" : "关闭");
   }
 });
 step("Test result aggregation preserves partial results and redacts full diagnostics on cancellation", () => {

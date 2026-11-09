@@ -69,7 +69,7 @@ function formatDuration(ms: number): string {
 }
 
 function joinBody(parts: string[], config: NotificationConfig): string {
-  return sanitize(parts.filter((part) => part !== "").join(" · "), config.content.maxMessageChars);
+  return sanitize(parts.filter((part) => part !== "").join("，"), config.content.maxMessageChars);
 }
 
 /** Cost rendering preserves the difference between an explicit zero and a missing runtime report. */
@@ -131,7 +131,7 @@ function request(input: {
   return {
     level: input.level,
     kind: input.kind,
-    title: identity ? `${sanitize(input.title, titleBudget)} · ${identity}` : sanitize(input.title, 60),
+    title: identity ? `${sanitize(input.title, titleBudget)} / ${identity}` : sanitize(input.title, 60),
     body: sanitize(input.body, input.maxChars),
     dedupeKey: input.dedupeKey,
     ...(input.coalesceWindowMs !== undefined ? { coalesceWindowMs: input.coalesceWindowMs } : {}),

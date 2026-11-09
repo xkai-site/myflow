@@ -253,7 +253,7 @@ await step("I2 旧子命令在真实 CLI 下已移除：只给指路，不执行
   const usage = run.plugin.filter((row) => row.event === "notify_usage");
   assert.equal(usage.length, 1, "I2: /notify status 未被识别为旧子命令");
   assert.equal(usage[0].args, "status");
-  assert.match(run.stderr, /单一入口/);
+  assert.match(run.stderr, /请输入 \/notify 打开通知设置/);
   assert.equal(run.plugin.filter((row) => row.event === "delivery").length, 0);
   assert.ok(!fs.existsSync(path.join(AGENT_DIR, "pi-notification", "config.json")), "I2: 旧子命令不得写盘");
 });
@@ -328,7 +328,7 @@ await step("M 旧 /notify off 不再写盘（写盘只发生在设置界面的 C
   const seeded = { version: 1, coalesce: { windowMs: 0, cooldownMs: 0 } };
   const off = runPi({ label: "off-removed", userConfig: seeded, args: ["--no-session", "--approve", ...EXTENSIONS, "-p", "/notify off"] });
   assertCleanExit("M off", off);
-  assert.match(off.stderr, /单一入口/);
+  assert.match(off.stderr, /请输入 \/notify 打开通知设置/);
   assert.ok(!off.probe.some((r) => r.ev === "agent_start"));
   const file = path.join(AGENT_DIR, "pi-notification", "config.json");
   assert.equal(fs.readFileSync(file, "utf8"), JSON.stringify(seeded, null, 2), "M: 旧子命令改写了用户文件");

@@ -16,7 +16,7 @@ export async function handleNotifyCommand(args: string, ctx: ExtensionCommandCon
   const trimmed = args.trim();
   if (trimmed !== "") {
     deps.log.record({ event: "notify_usage", args: sanitize(trimmed, 100) });
-    report(ctx, "通知设置已收敛为单一入口：直接输入 /notify 打开设置。\n状态与诊断 Ctrl+O、测试通知 Ctrl+T、重读配置 Ctrl+R 都在设置界面里。", "warning");
+    report(ctx, "不支持此参数。请输入 /notify 打开通知设置。", "warning");
     return;
   }
   const settings: SettingsDeps = { ...deps, reload: () => deps.reload(ctx) };

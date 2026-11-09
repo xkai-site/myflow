@@ -954,7 +954,7 @@ await step("J2 旧子命令已移除：/notify status 只给单一入口指路�
   for (const args of ["status", "test", "on", "off", "config", "reload"]) {
     const delta = await commander.command(`/notify ${args}`);
     assert.equal(delta.notice.type, "warning", `${args} 应给 warning 指路`);
-    assert.match(delta.notice.message, /单一入口/);
+    assert.match(delta.notice.message, /请输入 \/notify 打开通知设置/);
     assert.equal(delta.deliveries.length, 0, `${args} 不该产生投递`);
     assert.ok(delta.plugin.some((row) => row.event === "notify_usage" && row.args === args));
   }
@@ -1006,8 +1006,8 @@ await step("J5 Enter 只改本对话：立即生效，但用户文件一个字�
   // press of down reaches false.
   const keys = await keysToItem("rules.runCompleted.enabled", [K.down, K.enter]);
   const delta = await driveSettings(keys);
-  const applied = settingsDriver.renders.map((frame) => frame.join("\n")).findLast((frame) => frame.startsWith("运行完成 · 开关\n"));
-  assert.match(applied, /运行完成 · 开关/);
+  const applied = settingsDriver.renders.map((frame) => frame.join("\n")).findLast((frame) => frame.startsWith("运行完成：开关\n"));
+  assert.match(applied, /运行完成：开关/);
   assert.match(applied, /✓ 关闭/);
   assert.doesNotMatch(applied, /已应用|Ctrl\+S|仅本对话/);
   assert.equal(fs.readFileSync(settings.userConfigPath, "utf8"), before, "Enter 不得写用户文件");
@@ -1036,8 +1036,8 @@ await step("J7 Ctrl+S：只写这一项到用户默认文件，且标记与状�
     saved.plugin.some((row) => row.event === "notify_default_saved" && row.item === "rules.runCompleted.enabled"),
     "缺少 notify_default_saved 记录",
   );
-  const frame = settingsDriver.renders.map((frame) => frame.join("\n")).findLast((frame) => frame.startsWith("运行完成 · 开关\n"));
-  assert.match(frame, /运行完成 · 开关/);
+  const frame = settingsDriver.renders.map((frame) => frame.join("\n")).findLast((frame) => frame.startsWith("运行完成：开关\n"));
+  assert.match(frame, /运行完成：开关/);
   assert.match(frame, /✓ 关闭.*默认/);
   assert.doesNotMatch(frame, /已保存为默认|仅本对话/);
   assert.deepEqual(
@@ -1068,7 +1068,7 @@ await step("J9 Ctrl+R 重读配置、Ctrl+O 状态与诊断可用且不产生副
   assert.match(frame, /配置来源/, `状态页应显示状态文本:\n${frame}`);
   assert.match(frame, /投递统计/);
   assert.match(frame, /送达前提/, `状态页应说明送达前提:\n${frame}`);
-  assert.match(frame, /请确认是否看到/, `状态页应区分“已提交”与“实际送达”:\n${frame}`);
+  assert.match(frame, /服务接受不代表实际送达/, `状态页应区分“已提交”与“实际送达”:\n${frame}`);
   assert.equal(status.deliveries.length, 0, "状态页只读，不得产生投递");
   assert.equal(status.notifies, 0);
   assert.deepEqual(settings.runtimeErrors, []);
@@ -1117,7 +1117,7 @@ await step("J12 写盘失败：状态行报错、标记不迁移、内存里当�
   assert.match(frame, /默认设置未改动/);
   assert.match(frame, /查看问题详情/);
   assert.doesNotMatch(frame, /JSON|notification\.json|SyntaxError/);
-  assert.ok(!frame.includes("· 默认") || !frame.includes("已保存为默认"));
+  assert.ok(!frame.includes("（默认）") || !frame.includes("已保存为默认"));
   assert.deepEqual(settings.runtimeErrors, []);
   fs.writeFileSync(settings.userConfigPath, before);
   // After the broken file is repaired the behaviour is normal again.
@@ -1245,7 +1245,7 @@ await step("J13c2 无效 Webhook 与未知类型不产生虚假的开启结论�
       userConfig: { channels: ["hook"], providers: [{ id: "hook", type, enabled: true, options: {} }] } });
     try {
       driver.setKeys([K.esc]); const delta = await host.command("/notify");
-      assert.match(driver.renders[0].join(""), /暂无可用接收方式.*Webhook  开启 · 不可用/);
+      assert.match(driver.renders[0].join(""), /暂无可用接收方式.*Webhook  开启（不可用）/);
       assert.doesNotMatch(driver.renders[0].join(""), /url|provider|fake-unknown/);
       assert.equal(delta.deliveries.length, 0);
       driver.setKeys([K.ctrlO, K.esc, K.esc]); await host.command("/notify");
@@ -1328,7 +1328,7 @@ await step("J13e 控制中心批量保存：真实命令事务、范围取消、
   } finally { await host.dispose(); }
 });
 
-await step("J13f 首页渠道 gate 约束逐规则投递：关闭、取消开启、确认恢复与单项保存", async () => {
+await step("J13f 首页渠道开关直接操作并约束逐规则投递，单项保存不改路由", async () => {
   const driver = createUiDriver();
   const host = await makeHost({ label: "home-channel-gate", extensions: [PROBE_ENTRY, PLUGIN_ENTRY], mode: "tui", driver,
     userConfig: { ...NO_COALESCE, channels: [], rules: { runCompleted: { channels: ["terminal"] } } } });
@@ -1344,12 +1344,10 @@ await step("J13f 首页渠道 gate 约束逐规则投递：关闭、取消开启
     assert.ok(stopped.deliveries.every((entry) => entry.skipped)); assert.equal(stopped.notifies, 0);
     assert.match(driver.renders.at(-1).join(""), /暂无可用接收方式/);
     assert.doesNotMatch(driver.renders.at(-1).join(""), /已应用|仅本对话|Ctrl\+/);
-    await drive([...channel, K.enter, K.enter, K.esc]);
-    assert.equal((await host.prompt()).notifies, 0, "默认取消不能重新开启");
-    await drive([...channel, K.enter, K.down, K.enter, K.esc]);
+    await drive([...channel, K.enter, K.esc]);
     assert.equal((await host.prompt()).deliveries.length, 1);
     assert.equal(fs.readFileSync(host.userConfigPath, "utf8"), before);
-    assert.ok(driver.renders.some((frame) => /关闭[\s\S]*开启/.test(frame.join(""))), "恢复已有接收方式保持简洁开关确认");
+    assert.ok(!driver.renders.some((frame) => frame[0].startsWith("确认应用")), "已有路由的普通开关无需确认");
     await drive([...channel, K.enter, K.ctrlS, K.esc]);
     assert.equal(host.readUserConfigRaw().providers.find((p) => p.id === "terminal").enabled, false);
     assert.deepEqual(host.readUserConfigRaw().channels, []);
@@ -1457,13 +1455,13 @@ await step("R1 内容字段默认值与字段替换：no-op 字段已删，新�
 await step("R2 窗口标识：标题显示项目/会话名，不暴露内部 session ID，可关闭人类可读名称", async () => {
   // This host's cwd is TMP/content, so an unnamed session title must fall back to the project basename.
   const fallback = await runNotification();
-  assert.equal(fallback.title, `任务完成 · ${contentHost.label}`, `未命名时应标出项目名: ${fallback.title}`);
+  assert.equal(fallback.title, `任务完成 / ${contentHost.label}`, `未命名时应标出项目名: ${fallback.title}`);
   assert.doesNotMatch(fallback.title, /session|#[A-Z0-9]{4,}/i, "标题不得暴露 session ID");
 
   contentHost.session.setSessionName("重构登录");
   await contentHost.drain(); // `session_info_changed` 是 void 发出的，先等 handler 落盘
   const named = await runNotification();
-  assert.equal(named.title, "任务完成 · 重构登录", "会话名应优先于项目目录名");
+  assert.equal(named.title, "任务完成 / 重构登录", "会话名应优先于项目目录名");
   const changed = findBy(readJsonl(contentHost.pluginFile), (row) => row.event === "session_name_changed", "session_name_changed");
   assert.equal(changed.hasName, true);
   assert.ok(!JSON.stringify(changed).includes("重构登录"), "日志不得记下会话名本身");
@@ -1722,20 +1720,20 @@ await step("K5 等待输入：真 select 触发一条；custom 永久排除；en
   // paired by kind.
   await s6.emit({ type: "ui_prompt_start", reason: "ui_prompt", kind: "confirm", title: "确认 X" });
   const waiting = await statusViaUi(s6);
-  assert.match(waiting, /正在等你输入/, "status 应反映 waiting 状态");
+  assert.match(waiting, /等待用户输入/, "status 应反映 waiting 状态");
   await s6.emit({ type: "ui_prompt_end", reason: "ui_prompt", kind: "confirm", title: "确认 X" });
   const afterEnd = await statusViaUi(s6);
-  assert.doesNotMatch(afterEnd, /正在等你输入/, "end 之后应复位");
+  assert.doesNotMatch(afterEnd, /等待用户输入/, "end 之后应复位");
 });
 
 await step("K6 shutdown/reload 兜底复位 waiting（强杀时可能收不到 end）", async () => {
   await s6.emit({ type: "ui_prompt_start", reason: "ui_prompt", kind: "input", title: "输入 Y" });
   const before = await statusViaUi(s6);
-  assert.match(before, /正在等你输入/);
+  assert.match(before, /等待用户输入/);
 
   await s6.during(() => s6.session.reload());
   const after = await statusViaUi(s6);
-  assert.doesNotMatch(after, /正在等你输入/, "reload 后不得还挂着等待状态");
+  assert.doesNotMatch(after, /等待用户输入/, "reload 后不得还挂着等待状态");
 });
 
 s6.setModelDelay(undefined);
@@ -1972,7 +1970,7 @@ await step("N6 强制静默零外发，但观察 waiting 仍更新", async () =>
   const before = machineRows().length;
   await silentMachineHost.emit({ type: "ui_prompt_start", reason: "ui_prompt", kind: "input", title: "PRIVATE_PROMPT_TITLE" });
   const status = await statusViaUi(silentMachineHost);
-  assert.match(status, /正在等你输入/);
+  assert.match(status, /等待用户输入/);
   assert.match(status, /机器 API/);
   assert.equal(machineRows().length, before);
 });

@@ -63,20 +63,19 @@ export function channelState(
 ): string {
   const provider = config.providers.find((entry) => entry.id === id);
   if (!provider) return "未配置";
-  const switchState = provider.enabled ? "开启" : "关闭";
+  if (!provider.enabled) return "关闭";
   if (provider.type === "email") {
     const missing = emailRequirement(provider, hasCredential);
-    if (missing) return `${switchState} · ${missing === "from" ? "缺发件地址" : missing === "to" ? "缺收件地址" : "缺授权码"}`;
+    if (missing) return `开启（${missing === "from" ? "缺发件地址" : missing === "to" ? "缺收件地址" : "缺授权码"}）`;
   }
-  if (channelIssues.includes(id) || (provider.type === "terminal" && terminalIssue)) return `${switchState} · 不可用`;
-  if (!provider.enabled) return "关闭";
+  if (channelIssues.includes(id) || (provider.type === "terminal" && terminalIssue)) return "开启（不可用）";
   if (provider.type === "noop") return "不发送";
-  return enabledChannelUsage(config, id) ? "开启" : "开启 · 未使用";
+  return enabledChannelUsage(config, id) ? "开启" : "开启（未使用）";
 }
 /** Effective availability summary; it is not a delivery receipt. */
 export interface ControlStatus {
   label: string;
-  tone: "success" | "warning" | "error";
+  tone: "text" | "warning" | "error";
 }
 export function controlStatus(
   config: NotificationConfig,
@@ -91,8 +90,8 @@ export function controlStatus(
   }
 ): ControlStatus {
   const state = (label: string, tone: ControlStatus["tone"] = "warning"): ControlStatus => ({ label, tone });
-  if (options.restrictions.length) return state("强制静默 · 通知已停止");
-  if (options.degraded || options.configError) return state("配置异常 · 请查看诊断", "error");
+  if (options.restrictions.length) return state("强制静默，通知已停止");
+  if (options.degraded || options.configError) return state("配置异常，请查看诊断", "error");
   if (!config.enabled) return state("通知已暂停");
   const enabled = Object.values(config.rules).filter((rule) => rule.enabled);
   if (!enabled.length) return state("没有开启的提醒时机");
@@ -112,9 +111,9 @@ export function controlStatus(
   const deliverable = eligible.filter((rule) => resolveChannels(config, rule).some((id) => available.includes(id)));
   if (!deliverable.length) return state("符合等级的通知无可用接收方式");
   if (options.quiet)
-    return state(config.quietHours.exceptLevels.length ? "免打扰中 · 仅保留例外等级" : "免打扰中 · 通知已暂停");
+    return state(config.quietHours.exceptLevels.length ? "免打扰中，仅接收例外等级" : "免打扰中，通知已暂停");
   const partial = available.length < used.length || deliverable.length < enabled.length;
-  return state(partial ? "通知部分可用" : "通知已开启", partial ? "warning" : "success");
+  return state(partial ? "通知部分可用" : "通知已开启", partial ? "warning" : "text");
 }
 
 export type ChannelActivation =

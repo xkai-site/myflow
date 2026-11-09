@@ -225,7 +225,7 @@ try {
     assert.equal(messages.length, 1, "正常 AI 完成必须产生邮件");
     const toastTitle = Buffer.from(toasts[0].env.PI_NOTIFY_TOAST_TITLE, "base64").toString("utf8");
     const toastBody = Buffer.from(toasts[0].env.PI_NOTIFY_TOAST_BODY, "base64").toString("utf8");
-    assert.equal(toastTitle, "任务完成 · myflow");
+    assert.equal(toastTitle, "任务完成 / myflow");
     assert.equal(messages[0].subject, `[Pi]${toastTitle}`);
     assert.equal(messages[0].text, toastBody, "邮件正文与本机通知正文完全一致");
     assert.match(toastBody, /2\.5s.*0\.0123.*12%/);
