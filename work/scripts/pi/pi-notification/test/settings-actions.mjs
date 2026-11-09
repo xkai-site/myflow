@@ -81,6 +81,20 @@ try {
     assert.equal(h.commits(), 0);
     assert.doesNotMatch(JSON.stringify(h.overlay()) + JSON.stringify(h.host.userRaw()), /fake-test-only/);
   });
+  step("Disabling an incomplete email channel needs no activation prerequisites and preserves routing", () => {
+    const h = harness({ channels: ["email"], providers: [{ id: "email", type: "email", enabled: true }],
+      rules: { runFailed: { channels: ["email"] } } });
+    const before = fs.readFileSync(h.file, "utf8"), rules = structuredClone(h.current().rules);
+    assert.equal(h.host.setValue(h.item("provider:email"), false).ok, true);
+    assert.equal(h.commits(), 1);
+    assert.equal(h.current().providers.find((provider) => provider.id === "email").enabled, false);
+    assert.deepEqual(h.current().channels, ["email"]);
+    assert.deepEqual(h.current().rules, rules);
+    assert.equal(fs.readFileSync(h.file, "utf8"), before);
+    assert.deepEqual(h.host.channelActivation("email"), { kind: "email", field: "from" });
+    assert.equal(h.host.enableChannel("email").ok, false);
+    assert.equal(h.commits(), 1);
+  });
   step("Failed atomic save/restore preserves session choices and malformed file bytes", () => {
     const h = harness({});
     const item = h.item("enabled");

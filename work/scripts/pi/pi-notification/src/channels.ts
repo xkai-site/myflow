@@ -62,9 +62,14 @@ export function channelState(
   channelIssues: readonly string[] = []
 ): string {
   const provider = config.providers.find((entry) => entry.id === id);
-  if (!provider || (provider.type === "email" && emailRequirement(provider, hasCredential))) return "未配置";
+  if (!provider) return "未配置";
+  const switchState = provider.enabled ? "开启" : "关闭";
+  if (provider.type === "email") {
+    const missing = emailRequirement(provider, hasCredential);
+    if (missing) return `${switchState} · ${missing === "from" ? "缺发件地址" : missing === "to" ? "缺收件地址" : "缺授权码"}`;
+  }
+  if (channelIssues.includes(id) || (provider.type === "terminal" && terminalIssue)) return `${switchState} · 不可用`;
   if (!provider.enabled) return "关闭";
-  if (channelIssues.includes(id) || (provider.type === "terminal" && terminalIssue)) return "不可用";
   if (provider.type === "noop") return "不发送";
   return enabledChannelUsage(config, id) ? "开启" : "开启 · 未使用";
 }

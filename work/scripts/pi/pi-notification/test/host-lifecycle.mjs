@@ -1245,7 +1245,7 @@ await step("J13c2 无效 Webhook 与未知类型不产生虚假的开启结论�
       userConfig: { channels: ["hook"], providers: [{ id: "hook", type, enabled: true, options: {} }] } });
     try {
       driver.setKeys([K.esc]); const delta = await host.command("/notify");
-      assert.match(driver.renders[0].join(""), /暂无可用接收方式.*Webhook  不可用/);
+      assert.match(driver.renders[0].join(""), /暂无可用接收方式.*Webhook  开启 · 不可用/);
       assert.doesNotMatch(driver.renders[0].join(""), /url|provider|fake-unknown/);
       assert.equal(delta.deliveries.length, 0);
       driver.setKeys([K.ctrlO, K.esc, K.esc]); await host.command("/notify");
