@@ -45,26 +45,26 @@ export const QQ_MAIL_URL = "https://mail.qq.com/";
 
 export function testBlockMessage(reason: string): string {
   const messages: Record<string, string> = {
-    silenced: "未发送：本对话已强制静默，无法从这里开启提醒。",
-    disabled: "未发送：请先开启提醒总开关。",
-    below_min_level: "未发送：此提醒的重要程度低于接收范围。",
-    no_channels: "未发送：请先选择在哪里接收。",
+    silenced: "未发送：当前对话已强制静默，无法开启通知。",
+    disabled: "未发送：请先开启通知总开关。",
+    below_min_level: "未发送：此通知的重要程度低于接收范围。",
+    no_channels: "未发送：请先选择接收方式。",
     no_available_channels: "未发送：选中的接收方式已关闭或不存在；请检查接收方式开关。",
-    duplicate: "未发送：这条测试已经提交过。",
-    filtered: "未发送：当前提醒设置暂时不接收这条提醒。",
+    duplicate: "未发送：该测试已提交。",
+    filtered: "未发送：该通知被当前设置筛选。",
     queue_full: "未发送：等待发送的提醒已满，请稍后重试。",
     queue_replaced: "未发送：等待期间被更重要的提醒替换，请重试。",
     disposed: "未发送：设置已重载或对话已结束，请重新打开设置测试。",
     internal_error: "测试未完成：请在状态与诊断中查看原因。",
   };
-  return messages[reason] ?? "测试已取消：设置已重载或对话已切换，请重新测试。";
+  return messages[reason] ?? "测试未完成。请查看诊断后重试。";
 }
 
 export function emailReadiness(config: NotificationConfig, hasAuthCode: boolean): { label: string; usedBy: number } {
   const provider = config.providers.find((entry) => entry.id === "email" && entry.type === "email");
   const usedBy = Object.values(config.rules).filter((rule) => rule.enabled && resolveChannels(config, rule).includes("email")).length;
   const label = !provider ? "未配置" : !provider.options.from ? "缺发件地址" : !Array.isArray(provider.options.to) || !provider.options.to.length ? "缺收件地址"
-    : !hasAuthCode ? "缺授权码" : !provider.enabled ? "渠道未启用" : !config.enabled ? "总开关已关" : !usedBy ? "尚无提醒使用" : "配置就绪未测试";
+    : !hasAuthCode ? "缺授权码" : !provider.enabled ? "渠道未启用" : !config.enabled ? "总开关已关" : !usedBy ? "尚无提醒使用" : "配置已就绪";
   return { label, usedBy };
 }
 
@@ -75,11 +75,11 @@ export function routingExceptions(config: NotificationConfig): string[] {
 export function emailTestBlockReason(config: NotificationConfig, hasAuthCode: boolean): string | undefined {
   if (!config.enabled) return "通知总开关已关闭，请先开启通知。";
   const provider = config.providers.find((candidate) => candidate.id === "email" && candidate.type === "email");
-  if (!provider?.enabled) return "请先在「接收方式 → 邮箱」开启邮箱提醒。";
+  if (!provider?.enabled) return "请先开启邮箱通知。";
   if (typeof provider.options.from !== "string" || !provider.options.from || !Array.isArray(provider.options.to) || provider.options.to.length === 0) {
-    return "邮箱提醒还没配完整，请填写发件和收件邮箱地址。";
+    return "请填写发件和收件邮箱地址。";
   }
-  if (!hasAuthCode) return "还没有设置 QQ 邮箱授权码（不是 QQ 登录密码），请到邮箱设置中添加。";
+  if (!hasAuthCode) return "请设置 QQ 邮箱授权码（专用发送凭据，非登录密码）。";
   return undefined;
 }
 
@@ -261,8 +261,8 @@ const TOOL_FAILURE_MODE_LABELS: Record<ToolFailureMode, string> = {
 };
 
 const BUILTIN_CHANNEL_LABELS: Record<string, string> = {
-  terminal: "本机提醒",
-  email: "邮箱",
+  terminal: "本机通知",
+  email: "邮箱通知",
   hook: "Webhook",
   debug: "调试渠道",
   noop: "不投递",
@@ -549,7 +549,7 @@ export function itemRemovals(item: SettingItem, config: NotificationConfig, over
 export function buildSettingItems(config: NotificationConfig): SettingItem[] {
   const items: SettingItem[] = [];
 
-  items.push(makeItem({ group: "基础", label: "启用提醒", path: "enabled", kind: "boolean" }));
+  items.push(makeItem({ group: "基础", label: "通知总开关", path: "enabled", kind: "boolean" }));
   items.push(makeItem({ id: "reminders.completed", group: "提醒时机", label: "执行完成", path: "rules.runCompleted.enabled", kind: "boolean" }));
   items.push(makeItem({
     group: "基础",
@@ -573,8 +573,8 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
     patch: (value) => ({ kind: "compound", operations: failurePaths.map((path) => ({ kind: "path", path, value })) }),
     snapshot: (current) => ({ kind: "compound", operations: failurePaths.map((path) => ({ kind: "path", path, value: getPathValue(current, path) })) }),
   });
-  items.push(makeItem({ id: "reminders.waiting", group: "提醒时机", label: "需要我回复", path: "rules.waitingForUser.enabled", kind: "boolean" }));
-  items.push({ ...makeItem({ group: "接收", label: "在哪里接收", path: "channels", kind: "collection", candidates: channelCandidates, labels: channelLabels, emptyLabel: "不投递" }),
+  items.push(makeItem({ id: "reminders.waiting", group: "提醒时机", label: "等待输入", path: "rules.waitingForUser.enabled", kind: "boolean" }));
+  items.push({ ...makeItem({ group: "接收", label: "统一接收选择", path: "channels", kind: "collection", candidates: channelCandidates, labels: channelLabels, emptyLabel: "不投递" }),
     destinations: true,
     patch: (value) => ({ kind: "compound", operations: [
       { kind: "path", path: "channels", value },
@@ -844,7 +844,7 @@ export function ruleSummary(config: NotificationConfig, items: readonly SettingI
     .map((suffix) => of(suffix))
     .filter((item): item is SettingItem => item !== undefined)
     .map((item) => item.id.endsWith(".channels")
-      ? `${item.read(config) === "inherit" ? "跟随统一：" : "自定义："}${resolveChannels(config, config.rules[ruleKey as keyof NotificationConfig["rules"]]).map(channelLabel).join("、") || "不投递"}`
+      ? `${item.read(config) === "inherit" ? "跟随统一：" : "单独设置："}${resolveChannels(config, config.rules[ruleKey as keyof NotificationConfig["rules"]]).map((id) => `${channelLabel(id)}${config.providers.find((entry) => entry.id === id)?.enabled ? "" : "（关闭或不可用）"}`).join("、") || "不发送"}`
       : item.format(item.read(config)))
     .join(" · ");
 }
@@ -901,7 +901,7 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
     label: "提醒时机",
     kind: "fields",
     group: "提醒时机",
-    summary: (config) => [config.rules.runCompleted.enabled ? "完成" : "", config.rules.runFailed.enabled || config.rules.compactFailed.enabled ? "失败" : "", config.rules.waitingForUser.enabled ? "等我回复" : "", config.rules.toolFailed.enabled ? "工具失败" : "", config.rules.runAborted.enabled ? "中止" : ""].filter(Boolean).join("、") || "全部关闭",
+    summary: (config) => [config.rules.runCompleted.enabled ? "完成" : "", config.rules.runFailed.enabled || config.rules.compactFailed.enabled ? "失败" : "", config.rules.waitingForUser.enabled ? "等待输入" : "", config.rules.toolFailed.enabled ? "工具失败" : "", config.rules.runAborted.enabled ? "中止" : ""].filter(Boolean).join("、") || "全部关闭",
   },
   { id: "content", label: "内容与隐私", kind: "fields", group: "内容", summary: () => "耗时、会话名等", actions: [{ key: "action:preview", action: "preview" }] },
   {
@@ -933,7 +933,7 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
     id: "professional",
     label: "专业设置",
     kind: "sections",
-    sections: ["expertRules", "providers", "emailAdvanced"],
+    sections: ["channels", "expertRules", "providers", "emailAdvanced"],
     summary: () => "分别设置每类提醒",
   },
   {
@@ -941,7 +941,7 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
     label: "更多设置",
     kind: "sections",
     sections: ["content", "quietHours", "professional"],
-    summary: () => "内容、免打扰与其它选项",
+    summary: () => "",
     actions: [
       { key: "action:status", action: "status" },
       { key: "action:reload", action: "reload" },

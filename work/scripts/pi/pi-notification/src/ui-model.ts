@@ -1,6 +1,6 @@
 /** Task-oriented view models. No IO, terminal styling, or delivery side effects. */
 import { defaultConfig, mergeConfig } from "./config.ts";
-import { buildSettingItems, channelLabel, patchOperations, routingExceptions, type SettingItem, type SettingPatch, type SettingValue } from "./settings.ts";
+import { buildSettingItems, RULE_INFOS, patchOperations, type SettingItem, type SettingPatch, type SettingValue } from "./settings.ts";
 import { resolveChannels } from "./rules.ts";
 import type { NotificationConfig } from "./types.ts";
 
@@ -31,47 +31,67 @@ export function pendingPatch(items: readonly SettingItem[], config: Notification
     : patchOperations(item.patch(item.read(config) as SettingValue | SettingValue[]))) };
 }
 
-export interface ControlStatus { label: string; tone: "success" | "warning" | "error"; notes: string[] }
-export function controlStatus(config: NotificationConfig, options: { restrictions: { label: string; reason: string }[]; degraded?: boolean; configError?: boolean; quiet?: boolean; terminalIssue?: string; hasCredential: boolean }): ControlStatus {
-  const notes: string[] = [];
-  const enabledRules = Object.values(config.rules).filter((rule) => rule.enabled);
-  const used = [...new Set(enabledRules.flatMap((rule) => resolveChannels(config, rule)))];
-  const available = used.filter((id) => config.providers.some((provider) => provider.id === id && provider.enabled));
-  let label = "提醒已开启", tone: ControlStatus["tone"] = "success";
-  if (options.restrictions.length) { label = "强制静默 · 所有外发已停止"; tone = "warning"; }
-  else if (!config.enabled) { label = "提醒已暂停"; tone = "warning"; }
-  else if (!enabledRules.length) { label = "没有开启的提醒时机"; tone = "warning"; }
-  else if (!used.length) { label = "没有提醒使用接收方式"; tone = "warning"; }
-  else if (!available.length) { label = "接收方式已关闭或不存在"; tone = "error"; }
-  else if (options.quiet) { label = "免打扰中 · 仅接收例外等级"; tone = "warning"; }
-  if (options.degraded || options.configError) {
-    notes.push(options.degraded ? "配置损坏：默认已降级，本对话修改仍优先；拒绝覆盖默认，请修复后重读。" : "配置有错误：保存可能被阻止；请到诊断查看并修复。");
-    tone = "error";
-    if (options.degraded && !options.restrictions.length) label = "配置降级 · 安全默认";
-  }
-  const unavailable = used.filter((id) => !available.includes(id));
-  if (config.enabled && unavailable.length) notes.push(`不可用：${unavailable.map(channelLabel).join("、")}；检查接收方式开关。`);
-  if (available.includes("terminal") && options.terminalIssue) notes.push(`本机不可用：${options.terminalIssue}。`);
-  if (available.includes("email")) {
-    const email = config.providers.find((provider) => provider.id === "email");
-    if (!email?.options.from || !Array.isArray(email.options.to) || !email.options.to.length || !options.hasCredential) {
-      notes.push("邮箱尚未就绪：进入接收方式完成地址与授权码设置。");
-      if (config.enabled && !options.restrictions.length && !options.degraded && available.length === 1) { label = "邮箱尚未就绪 · 暂不能投递"; tone = "warning"; }
-    }
-  }
-  if (config.minLevel !== "info") notes.push(`等级筛选：${config.minLevel === "error" ? "仅错误" : "警告及错误"}；开启的低等级提醒仍会被过滤。`);
-  if (routingExceptions(config).length) notes.push(`接收例外：${routingExceptions(config).join("、")}单独设置，不随统一选择变化。`);
-  return { label, tone, notes };
+/** Ordinary success has no banner. Problems carry a safe summary, an optional direct next step,
+ * and separate diagnostic lines. No rendering or raw exceptions in the ordinary message. */
+export interface ActionResult {
+  ok: boolean;
+  message: string;
+  feedback?: {
+    kind: "blocked" | "recoverable" | "unknown" | "progress";
+    next?: "email" | "diagnostics" | "home";
+    details?: string[];
+  };
 }
 
-export function emailSetup(config: NotificationConfig, hasCredential: boolean, testLabel: string | undefined, pending: number) {
-  const email = config.providers.find((provider) => provider.id === "email" && provider.type === "email");
-  const from = !!email?.options.from, to = Array.isArray(email?.options.to) && email.options.to.length > 0;
-  const enabled = !!email?.enabled && config.channels.includes("email");
-  const mark = (ready: boolean) => ready ? "✓" : "—";
-  const next = !from ? "填写发件 QQ 邮箱" : !to ? "填写收件邮箱" : !hasCredential ? "设置 QQ 邮箱授权码（不是登录密码）"
-    : !enabled ? "明确确认启用邮箱" : !config.enabled ? "开启通知总开关后再测试" : !testLabel ? "手动发送邮箱测试并检查收件箱"
-      : testLabel.includes("未成功") ? "检查测试结果，修复后重试" : pending ? "确认收件后，保存邮箱设置为以后默认" : "默认已同步；服务接受仍需你确认收件";
-  return { conditions: `就绪条件：地址 ${mark(from && to)}  授权码 ${mark(hasCredential)}  启用 ${mark(enabled)}`, next,
+export function emailMissing(config: NotificationConfig, hasCredential: boolean): string | undefined {
+  const email = config.providers.find((provider) => provider.id === "email");
+  if (email && email.type !== "email") return undefined;
+  return !email?.options.from ? "填写发件 QQ 邮箱" : !Array.isArray(email.options.to) || !email.options.to.length ? "填写收件邮箱"
+    : !hasCredential ? "设置 QQ 邮箱授权码" : undefined;
+}
+
+/** Includes disabled rules: re-enabling a channel must not silently change their future routing. */
+export function channelRules(config: NotificationConfig, id: string): string[] {
+  return RULE_INFOS.filter((rule) => resolveChannels(config, config.rules[rule.key as keyof NotificationConfig["rules"]]).includes(id)).map((rule) => rule.label);
+}
+
+export function channelState(config: NotificationConfig, id: string, hasCredential: boolean, terminalIssue?: string, channelIssues: readonly string[] = []): string {
+  const provider = config.providers.find((entry) => entry.id === id);
+  if (!provider) return "未配置";
+  if (provider.type === "email" && (!provider.options.from || !Array.isArray(provider.options.to) || !provider.options.to.length || !hasCredential)) return "未配置";
+  if (!provider.enabled) return "关闭";
+  if (channelIssues.includes(id) || (provider.type === "terminal" && terminalIssue)) return "不可用";
+  if (provider.type === "noop") return "不发送";
+  const used = Object.values(config.rules).some((rule) => rule.enabled && resolveChannels(config, rule).includes(id));
+  return used ? "开启" : "开启 · 未使用";
+}
+
+export interface ControlStatus { label: string; tone: "success" | "warning" | "error"; notes: string[] }
+export function controlStatus(config: NotificationConfig, options: { restrictions: { label: string; reason: string }[]; degraded?: boolean; configError?: boolean; quiet?: boolean; terminalIssue?: string; channelIssues?: readonly string[]; hasCredential: boolean }): ControlStatus {
+  const state = (label: string, tone: ControlStatus["tone"] = "warning", notes: string[] = []): ControlStatus => ({ label, tone, notes });
+  if (options.restrictions.length) return state("强制静默 · 通知已停止");
+  if (options.degraded || options.configError) return state("配置异常 · 请查看诊断", "error");
+  if (!config.enabled) return state("通知已暂停");
+  const enabled = Object.values(config.rules).filter((rule) => rule.enabled);
+  if (!enabled.length) return state("没有开启的提醒时机");
+  const used = [...new Set(enabled.flatMap((rule) => resolveChannels(config, rule)))];
+  if (!used.length) return state("未选择接收方式");
+  const available = used.filter((id) => channelState(config, id, options.hasCredential, options.terminalIssue, options.channelIssues) === "开启");
+  if (!available.length) return state("暂无可用接收方式", "error");
+  const rank = { info: 0, warning: 1, error: 2 };
+  // Completion can be promoted to warning for truncated output; do not claim it is fully filtered.
+  const eligible = enabled.filter((rule) => rank[rule.level] >= rank[config.minLevel] || (rule === config.rules.runCompleted && config.minLevel === "warning"));
+  if (!eligible.length) return state("当前通知均被等级筛选暂停");
+  const deliverable = eligible.filter((rule) => resolveChannels(config, rule).some((id) => available.includes(id)));
+  if (!deliverable.length) return state("符合等级的通知无可用接收方式");
+  if (options.quiet) return state(config.quietHours.exceptLevels.length ? "免打扰中 · 仅保留例外等级" : "免打扰中 · 通知已暂停");
+  const partial = available.length < used.length || deliverable.length < enabled.length;
+  return state(partial ? "通知部分可用" : "通知已开启", partial ? "warning" : "success");
+}
+
+export function emailSetup(config: NotificationConfig, hasCredential: boolean, testLabel: string | undefined, _pending: number) {
+  const missing = emailMissing(config, hasCredential);
+  const enabled = !!config.providers.find((provider) => provider.id === "email")?.enabled;
+  return { conditions: missing ? "配置未完成" : "配置已就绪", next: missing,
     test: testLabel ?? "未测试", enabled };
 }

@@ -30,21 +30,24 @@ export function textInput(value: string): Input {
 export class SaveReview {
   private focus = 0;
   private offset = 0;
+  private wrappedRows: string[] = [];
   constructor(readonly labels: string[], private readonly bindings: SettingsKeybindings, private readonly complete: (save: boolean) => void) {}
   handleInput(data: string): void {
     if (this.bindings.matches(data, "tui.select.cancel")) { this.complete(false); return; }
     if (this.bindings.matches(data, "tui.select.up")) this.focus = 0;
     else if (this.bindings.matches(data, "tui.select.down")) this.focus = 1;
     else if (this.bindings.matches(data, "tui.select.pageUp")) this.offset = Math.max(0, this.offset - 5);
-    else if (this.bindings.matches(data, "tui.select.pageDown")) this.offset = Math.min(Math.max(0, this.labels.length - 5), this.offset + 5);
+    else if (this.bindings.matches(data, "tui.select.pageDown")) this.offset = Math.min(Math.max(0, this.wrappedRows.length - 5), this.offset + 5);
     else if (this.bindings.matches(data, "tui.select.confirm")) this.complete(this.focus === 1);
   }
   render(width: number, theme: SettingsTheme): string[] {
+    this.wrappedRows = this.labels.flatMap((label) => wrapTextWithAnsi(`  ${label}`, width));
+    this.offset = Math.min(this.offset, Math.max(0, this.wrappedRows.length - 5));
     return [
-      ...wrapTextWithAnsi("将更新以后对话的用户默认；本对话继续生效，其他已打开对话不变。只保存下列修改，不包含授权码、消息 API 或其它 JSON 专业参数。", width),
-      ...this.labels.slice(this.offset, this.offset + 5).map((label) => truncateToWidth(`  ${label}`, width)),
-      ...(this.labels.length > 5 ? [theme.fg("dim", `${this.offset + 1}–${Math.min(this.offset + 5, this.labels.length)}/${this.labels.length} · PgUp/PgDn 查看全部`)] : []),
-      ...menuList(["取消", `确认保存 ${this.labels.length} 项为以后默认`], this.focus, width, 2, theme),
+      ...wrapTextWithAnsi("将保存以下修改，用于以后对话。其他已打开对话不变。", width),
+      ...this.wrappedRows.slice(this.offset, this.offset + 5),
+      ...(this.wrappedRows.length > 5 ? [theme.fg("dim", `${this.offset + 1}–${Math.min(this.offset + 5, this.wrappedRows.length)}/${this.wrappedRows.length} · PgUp/PgDn 查看全部`)] : []),
+      ...menuList(["取消", `确认保存 ${this.labels.length} 项`], this.focus, width, 2, theme),
       ...wrapTextWithAnsi(theme.fg("dim", "↑↓ 选择 · Enter 确认 · Esc 取消"), width),
     ];
   }

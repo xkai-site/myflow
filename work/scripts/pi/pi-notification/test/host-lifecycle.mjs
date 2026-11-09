@@ -252,8 +252,8 @@ function stubUiContext(notices) {
  * Drives `ctx.ui.custom()` headlessly: the settings UI is treated as an ordinary component fed with
  * real terminal bytes.
  *
- * The command layer hands `custom()` an `{ render, handleInput, invalidate }` wrapper, so only the
- * rendered result is observable here, which is exactly what is asserted. Key matching uses a minimal
+ * The command layer hands `custom()` the focusable component; only the rendered result is observed
+ * here. Key matching uses a minimal
  * stub; the real `matchesKey` behaviour is covered with the actual library in test/settings-ui.mjs.
  */
 const KEY_SEQUENCES = {
@@ -868,52 +868,11 @@ const K = {
 /** Keys pressed in order; the trailing Escapes close the component, one level per page. */
 const CLOSE = [K.esc, K.esc, K.esc, K.esc, K.esc, K.esc];
 
-/**
- * Key sequence that walks the task-oriented home page to a setting. Home rows and nested section
- * positions mirror buildHomePage/buildCategoryPage; field ordering still comes from settings.ts.
- */
-function routeToItem(settingsModule, items, id, config) {
-  const item = items.find((candidate) => candidate.id === id);
-  assert.ok(item, `未知配置项: ${id}`);
-  if (id === "enabled") return [0];
-  if (item.rule) {
-    const ruleIndex = settingsModule.RULE_INFOS.findIndex((rule) => rule.key === item.rule.key);
-    const rowIndex = items.filter((candidate) => candidate.rule?.key === item.rule.key).findIndex((candidate) => candidate.id === id);
-    return [4, 2, 1, ruleIndex, rowIndex]; // more → professional → individual rules
-  }
-  if (id === "minLevel") return [4, 2, 0];
-  if (item.group === "邮箱") return [2, 2, items.filter((candidate) => candidate.group === "邮箱").findIndex((candidate) => candidate.id === id)];
-  const category = settingsModule.SETTING_CATEGORIES.find((candidate) => candidate.group === item.group);
-  assert.ok(category, `不可达设置项: ${id}`);
-  const rowIndex = items.filter((candidate) => candidate.group === item.group).findIndex((candidate) => candidate.id === id);
-  if (category.id === "providers") return [4, 2, 2, rowIndex];
-  if (category.id === "emailAdvanced") return [4, 2, 3, rowIndex];
-  if (category.id === "rules") return [1, rowIndex];
-  if (category.id === "channels") return [2, rowIndex];
-  const more = settingsModule.SETTING_CATEGORIES.find((candidate) => candidate.id === "more");
-  const sectionIndex = more.sections.indexOf(category.id);
-  if (category.collapsed?.when(config) && category.collapsed.ids.includes(id)) return [4, sectionIndex, 1, category.collapsed.ids.indexOf(id)];
-  return [4, sectionIndex, rowIndex];
-}
-
-/** Down-presses per page, with Enter between pages; `open` adds the Enter that opens the field. */
+/** Search opens the expert candidate view; ordinary home controls have separate navigation tests. */
 function keysAlongRoute(settingsModule, items, id, { open, after, close = true, config = configModule.defaultConfig() }) {
-  const keys = [];
-  const item = items.find((candidate) => candidate.id === id);
-  // Daily switches now toggle in place. Use the expert search path when a regression specifically
-  // needs to hover a candidate without applying it (e.g. the Ctrl+S isolation contract).
-  if (open && (id === "enabled" || item?.group === "提醒时机")) {
-    keys.push("/", id, K.enter, ...after);
-    if (close) keys.push(...CLOSE);
-    return keys;
-  }
-  const route = routeToItem(settingsModule, items, id, config);
-  route.forEach((downs, index) => {
-    for (let step = 0; step < downs; step += 1) keys.push(K.down);
-    const isLast = index === route.length - 1;
-    if (!isLast || open) keys.push(K.enter);
-  });
-  keys.push(...after);
+  // Expert candidate/save contract; daily navigation is exercised separately below.
+  assert.ok(items.some((item) => item.id === id));
+  const keys = ["/", id, K.enter, ...after];
   if (close) keys.push(...CLOSE);
   return keys;
 }
@@ -976,7 +935,7 @@ await step("J1 非 TUI：/notify 只打印状态与配置路径（凭据隐藏�
   const before = fs.existsSync(commander.userConfigPath) ? fs.readFileSync(commander.userConfigPath, "utf8") : undefined;
   const delta = await commander.command("/notify");
   assert.ok(delta.notice, "命令没有回显");
-  assert.match(delta.notice.message, /pi-notification: 开启/);
+  assert.match(delta.notice.message, /pi-notification: 通知已开启/);
   assert.match(delta.notice.message, /用户默认: /, "状态里应给出用户默认文件路径");
   assert.match(delta.notice.message, /设置界面仅 TUI 可用/);
   assert.match(delta.notice.message, /当前生效值/);
@@ -1032,25 +991,13 @@ await step("J3 TUI：/notify 打开设置；Esc 关闭不改磁盘与内存", as
   assert.deepEqual(settings.runtimeErrors, []);
 });
 
-await step("J4 footer 按焦点提示操作：字段可保存，导航/测试行给出对应快捷键", async () => {
-  const field = await driveSettings([K.esc]);
-  let tail = settingsDriver.renders.at(-1).slice(-4).join("\n");
-  assert.match(tail, /Ctrl\+S 设为以后默认/, `字段行 footer 丢了 Ctrl+S 提示:\n${tail}`);
-  assert.ok(!/Ctrl\+O 状态与诊断/.test(tail), `首页字段行不应堆叠诊断快捷键:\n${tail}`);
-  assert.equal(field.deliveries.length, 0);
-
-  await driveSettings([K.down, K.esc]); // focus 提醒时机, then close
-  tail = settingsDriver.renders.at(-1).slice(-4).join("\n");
-  assert.ok(!/Ctrl\+S 设为以后默认/.test(tail), `分类行不应提示保存字段:\n${tail}`);
-  assert.match(tail, /Enter 打开/, `分类行应提示导航操作:\n${tail}`);
-  assert.match(tail, /Ctrl\+T 测试通知/, `测试快捷键仍应可见:\n${tail}`);
-
-  await driveSettings([K.down, K.down, K.down, K.esc]); // focus the direct test action without running it
-  const testFrame = settingsDriver.renders.at(-1).join("\n");
-  tail = settingsDriver.renders.at(-1).slice(-4).join("\n");
-  assert.match(testFrame, /发送测试通知/, `首页测试入口缺失:\n${testFrame}`);
-  assert.match(tail, /Enter 打开 \/ 执行/, `测试行应说明 Enter 的用途:\n${tail}`);
-  assert.ok(!/save as default/.test(tail), `footer 不应再是英文:\n${tail}`);
+await step("J4 普通列表没有动态快捷键提示，移动焦点高度稳定", async () => {
+  const delta = await driveSettings([K.down, K.down, K.down, K.down, K.esc]);
+  const frames = settingsDriver.renders;
+  assert.equal(new Set(frames.map((frame) => frame.length)).size, 1);
+  for (const frame of frames) assert.doesNotMatch(frame.join(""), /Ctrl\+|Enter|↑↓|仅本对话/);
+  assert.match(frames.at(-1).join(""), /接收方式.*本机通知.*邮箱通知.*发送测试通知/);
+  assert.equal(delta.deliveries.length, 0);
 });
 
 await step("J5 Enter 只改本对话：立即生效，但用户文件一个字节都不写", async () => {
@@ -1059,11 +1006,10 @@ await step("J5 Enter 只改本对话：立即生效，但用户文件一个字�
   // press of down reaches false.
   const keys = await keysToItem("rules.runCompleted.enabled", [K.down, K.enter]);
   const delta = await driveSettings(keys);
-  const applied = settingsDriver.renders.at(-3).join("\n");
-  assert.match(applied, /已应用（仅本对话）/, "缺少轻量确认");
-  assert.match(applied, /通知规则 · 运行完成 · 开关/, `反馈应写明配置项名称:\n${applied}`);
-  assert.match(applied, /= 关闭/, `反馈应写明当前值:\n${applied}`);
-  assert.match(applied, /本对话/, `反馈应写明作用范围:\n${applied}`);
+  const applied = settingsDriver.renders.map((frame) => frame.join("\n")).findLast((frame) => frame.startsWith("运行完成 · 开关\n"));
+  assert.match(applied, /运行完成 · 开关/);
+  assert.match(applied, /✓ 关闭/);
+  assert.doesNotMatch(applied, /已应用|Ctrl\+S|仅本对话/);
   assert.equal(fs.readFileSync(settings.userConfigPath, "utf8"), before, "Enter 不得写用户文件");
   const run = await settings.prompt();
   assert.equal(run.deliveries.length, 0, "本对话选择未立即生效");
@@ -1090,11 +1036,10 @@ await step("J7 Ctrl+S：只写这一项到用户默认文件，且标记与状�
     saved.plugin.some((row) => row.event === "notify_default_saved" && row.item === "rules.runCompleted.enabled"),
     "缺少 notify_default_saved 记录",
   );
-  const frame = settingsDriver.renders.at(-1).join("\n");
-  assert.match(frame, /已保存为默认/, "缺少保存确认");
-  assert.match(frame, /通知规则 · 运行完成 · 开关/, `保存确认应写明配置项名称:\n${frame}`);
-  assert.match(frame, /= 关闭/, `保存确认应写明当前值:\n${frame}`);
-  assert.match(frame, /以后默认/, `保存确认应写明作用范围:\n${frame}`);
+  const frame = settingsDriver.renders.map((frame) => frame.join("\n")).findLast((frame) => frame.startsWith("运行完成 · 开关\n"));
+  assert.match(frame, /运行完成 · 开关/);
+  assert.match(frame, /✓ 关闭.*默认/);
+  assert.doesNotMatch(frame, /已保存为默认|仅本对话/);
   assert.deepEqual(
     readSparse(settings),
     { rules: { runCompleted: { enabled: false } } },
@@ -1115,7 +1060,7 @@ await step("J8 Ctrl+S 再保存另一项：两项并存，其余字段不出现"
 await step("J9 Ctrl+R 重读配置、Ctrl+O 状态与诊断可用且不产生副作用", async () => {
   const reload = await driveSettings([K.ctrlR, K.esc]);
   assert.ok(reload.plugin.some((row) => row.event === "notify_reload"));
-  assert.match(settingsDriver.renders[0].join("\n"), /已重新读取配置/);
+  assert.doesNotMatch(settingsDriver.renders[0].join("\n"), /已重新读取配置/);
   assert.equal(reload.deliveries.length, 0);
 
   const status = await driveSettings([K.ctrlO, ...Array(20).fill(K.down), K.esc, K.esc]);
@@ -1138,7 +1083,7 @@ await step("J9b 状态与诊断：可见“重新读取配置”动作触发真�
 
 await step("J10 Ctrl+T 真的走一遍投递链路（折叠的旧 /notify test）", async () => {
   const delta = await driveSettings([K.ctrlT, K.esc]);
-  assert.match(settingsDriver.renders[0].join("\n"), /测试发送中|已排队/);
+  assert.match(settingsDriver.renders[0].join("\n"), /发送中|等待发送/);
   assert.equal(delta.deliveries.length, 1, `自检通知未投递: ${JSON.stringify(delta.deliveries)}`);
   assert.equal(delta.deliveries[0].kind, "run_completed");
   assert.equal(delta.notifies, 1, "自检通知应真的写出 OSC");
@@ -1168,8 +1113,10 @@ await step("J12 写盘失败：状态行报错、标记不迁移、内存里当�
   const delta = await driveSettings([K.ctrlS, K.esc]);
   const frame = settingsDriver.renders.at(-1).join("\n");
   assert.match(frame, /保存失败/, `状态行应报错:\n${frame}`);
-  assert.match(frame, /基础 · 启用提醒/, `保存失败应写明配置项名称:\n${frame}`);
-  assert.match(frame, /用户文件未改动/, `保存失败应说明用户文件没有被改动:\n${frame}`);
+  assert.match(frame, /通知总开关/);
+  assert.match(frame, /默认设置未改动/);
+  assert.match(frame, /查看问题详情/);
+  assert.doesNotMatch(frame, /JSON|notification\.json|SyntaxError/);
   assert.ok(!frame.includes("· 默认") || !frame.includes("已保存为默认"));
   assert.deepEqual(settings.runtimeErrors, []);
   fs.writeFileSync(settings.userConfigPath, before);
@@ -1243,17 +1190,17 @@ await step("J13b 渠道保存隔离：Ctrl+S 只改目标渠道，不固化其�
   await driveChannels(route("provider:debug", { open: true, after: [K.down, K.enter] }));
   const toggled = channelsDriver.renders.map((frame) => frame.join("\n"));
   assert.ok(
-    toggled.some((frame) => /渠道 · 调试渠道/.test(frame) && /关闭/.test(frame)),
+    toggled.some((frame) => /调试渠道/.test(frame) && /✓ 关闭/.test(frame)),
     `debug 的本对话选择未生效:\n${toggled.at(-1)}`,
   );
 
   // 2) 本对话把 terminal 也关掉，再 Ctrl+S 固化它（此时已生效值是关闭）。
   await driveChannels(route("provider:terminal", { open: true, after: [K.down, K.enter] }));
   await driveChannels(route("provider:terminal", { open: false, after: [K.ctrlS] }));
-  const savedFrame = channelsDriver.renders.at(-1).join("\n");
-  assert.match(savedFrame, /已保存为默认/, `缺少保存确认:\n${savedFrame}`);
-  assert.match(savedFrame, /渠道 · 本机提醒/, savedFrame);
-  assert.match(savedFrame, /以后默认/, savedFrame);
+  const savedFrame = channelsDriver.renders.map((frame) => frame.join("\n")).findLast((frame) => /✓ 关闭.*默认/.test(frame));
+  assert.match(savedFrame, /本机通知/, savedFrame);
+  assert.match(savedFrame, /✓ 关闭.*默认/, savedFrame);
+  assert.doesNotMatch(savedFrame, /已保存为默认/);
 
   const raw = channels.readUserConfigRaw();
   assert.equal(Array.isArray(raw.providers), true, `providers 应保留为数组: ${JSON.stringify(raw.providers)}`);
@@ -1283,12 +1230,29 @@ await step("J13c 无启用渠道：首页与状态页都直说是送达前提问
   });
   noChannelDriver.setKeys([K.esc]);
   await noChannel.command("/notify");
-  assert.match(noChannelDriver.renders[0].join("\n"), /已关闭/, "首页应显示选中的接收方式已关闭");
+  assert.match(noChannelDriver.renders[0].join("\n"), /暂无可用接收方式/);
 
   noChannelDriver.setKeys([K.ctrlO, K.esc, K.esc]);
   await noChannel.command("/notify");
   assert.match(noChannelDriver.renders[0].join("\n"), /没有启用的渠道/, "状态页应解释送达前提");
   assert.deepEqual(noChannel.runtimeErrors, []);
+});
+
+await step("J13c2 无效 Webhook 与未知类型不产生虚假的开启结论，详情保留诊断", async () => {
+  for (const type of ["webhook", "fake-unknown"]) {
+    const driver = createUiDriver();
+    const host = await makeHost({ label: `unusable-${type}`, extensions: [PROBE_ENTRY, PLUGIN_ENTRY], mode: "tui", driver,
+      userConfig: { channels: ["hook"], providers: [{ id: "hook", type, enabled: true, options: {} }] } });
+    try {
+      driver.setKeys([K.esc]); const delta = await host.command("/notify");
+      assert.match(driver.renders[0].join(""), /暂无可用接收方式.*Webhook  不可用/);
+      assert.doesNotMatch(driver.renders[0].join(""), /url|provider|fake-unknown/);
+      assert.equal(delta.deliveries.length, 0);
+      driver.setKeys([K.ctrlO, K.esc, K.esc]); await host.command("/notify");
+      assert.match(driver.renders.map((frame) => frame.join("")).join(""), type === "webhook" ? /缺少 url/ : /未注册的接收方式类型/);
+      assert.deepEqual(host.runtimeErrors, []);
+    } finally { await host.dispose(); }
+  }
 });
 
 await step("J13d 清空最后一个覆盖后 /reload 不复活旧值", async () => {
@@ -1330,7 +1294,7 @@ await step("J13e 控制中心批量保存：真实命令事务、范围取消、
   const driver = createUiDriver();
   const host = await makeHost({ label: "batch-defaults", extensions: [PROBE_ENTRY, PLUGIN_ENTRY], mode: "tui", userConfig: NO_COALESCE, driver });
   const drive = async (keys) => { driver.setKeys(keys); return host.command("/notify"); };
-  const saveRow = Array(5).fill(K.down);
+  const saveRow = Array(6).fill(K.down);
   const module = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "settings.ts")).href);
   const items = module.buildSettingItems(configModule.loadConfig({ agentDir: host.agentDir }).config);
   try {
@@ -1342,7 +1306,7 @@ await step("J13e 控制中心批量保存：真实命令事务、范围取消、
     assert.equal(host.readUserConfigRaw().content.includeCost, false);
     assert.ok(saved.plugin.some((entry) => entry.event === "notify_defaults_saved"));
     assert.equal(saved.deliveries.length, 0);
-    assert.match(driver.renders.at(-1).join(""), /0 项尚未保存/);
+    assert.doesNotMatch(driver.renders.at(-1).join(""), /项更改|保存为默认设置/);
     await drive(keysAlongRoute(module, items, "enabled", { open: true, after: [K.down, K.enter] }));
     const savedFile = fs.readFileSync(host.userConfigPath, "utf8");
     const previousSilence = process.env.PI_NOTIFY_DISABLE;
@@ -1359,7 +1323,38 @@ await step("J13e 控制中心批量保存：真实命令事务、范围取消、
     fs.writeFileSync(host.userConfigPath, "{broken-config");
     await drive([...saveRow, K.enter, K.down, K.enter, K.esc]);
     assert.equal(fs.readFileSync(host.userConfigPath, "utf8"), "{broken-config");
-    assert.match(driver.renders.map((frame) => frame.join("")).join(""), /批量保存失败/);
+    assert.match(driver.renders.map((frame) => frame.join("")).join(""), /保存失败/);
+    assert.deepEqual(host.runtimeErrors, []);
+  } finally { await host.dispose(); }
+});
+
+await step("J13f 首页渠道 gate 约束逐规则投递：关闭、取消开启、确认恢复与单项保存", async () => {
+  const driver = createUiDriver();
+  const host = await makeHost({ label: "home-channel-gate", extensions: [PROBE_ENTRY, PLUGIN_ENTRY], mode: "tui", driver,
+    userConfig: { ...NO_COALESCE, channels: [], rules: { runCompleted: { channels: ["terminal"] } } } });
+  const drive = async (keys) => { driver.setKeys(keys); return host.command("/notify"); };
+  const channel = [K.down, K.down];
+  try {
+    await host.useModel("probe-fake", "fake-model");
+    assert.equal((await host.prompt()).deliveries.length, 1);
+    const before = fs.readFileSync(host.userConfigPath, "utf8");
+    await drive([...channel, K.enter, K.esc]);
+    const stopped = await host.prompt();
+    assert.equal(stopped.deliveries.filter((entry) => entry.ok && !entry.skipped).length, 0, "逐规则显式渠道必须同样停止");
+    assert.ok(stopped.deliveries.every((entry) => entry.skipped)); assert.equal(stopped.notifies, 0);
+    assert.match(driver.renders.at(-1).join(""), /暂无可用接收方式/);
+    assert.doesNotMatch(driver.renders.at(-1).join(""), /已应用|仅本对话|Ctrl\+/);
+    await drive([...channel, K.enter, K.enter, K.esc]);
+    assert.equal((await host.prompt()).notifies, 0, "默认取消不能重新开启");
+    await drive([...channel, K.enter, K.down, K.enter, K.esc]);
+    assert.equal((await host.prompt()).deliveries.length, 1);
+    assert.equal(fs.readFileSync(host.userConfigPath, "utf8"), before);
+    assert.ok(driver.renders.some((frame) => /适用规则：运行完成/.test(frame.join(""))));
+    await drive([...channel, K.enter, K.ctrlS, K.esc]);
+    assert.equal(host.readUserConfigRaw().providers.find((p) => p.id === "terminal").enabled, false);
+    assert.deepEqual(host.readUserConfigRaw().channels, []);
+    assert.deepEqual(host.readUserConfigRaw().rules.runCompleted.channels, ["terminal"]);
+    assert.equal((await host.prompt()).notifies, 0);
     assert.deepEqual(host.runtimeErrors, []);
   } finally { await host.dispose(); }
 });

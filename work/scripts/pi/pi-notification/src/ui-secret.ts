@@ -52,7 +52,8 @@ export class SecretPrompt {
   }
   render(width: number, focused: boolean): string[] {
     return [
-      ...wrapTextWithAnsi("仅存 Windows 凭据管理器，所有对话可用；不写配置、会话或日志。", width),
+      ...wrapTextWithAnsi("QQ 邮箱生成的专用发送凭据，不是登录密码。", width),
+      ...wrapTextWithAnsi("安全保存到此设备，供所有对话使用。", width),
       `› ${"●".repeat(Math.min(this.#value.length, Math.max(0, width - 3)))}${focused ? CURSOR_MARKER : ""}${renderFakeCursor(" ")}`,
       ...(this.#error ? wrapTextWithAnsi(this.#error, width) : []),
     ];

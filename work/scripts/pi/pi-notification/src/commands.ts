@@ -35,9 +35,10 @@ import {
 import { sanitize, sanitizeError } from "./log.ts";
 import { resolveQqCredential, saveQqCredential, deleteQqCredential } from "./mail/credentials.ts";
 import { createDefaultTerminalIo, selectTerminalChannel } from "./providers/terminal.ts";
-import { evaluateRunOutcome, resolveChannels } from "./rules.ts";
+import { evaluateRunOutcome } from "./rules.ts";
+import { validateHttpOptions } from "./providers/http.ts";
 import { testBlockMessage, emailReadiness, buildSettingItems, channelLabel, patchOperations, applyOverlay, applySettingPatch, settingSnapshot, settingUserFilePatch, itemRemovals, builtinDefaultValue, clearItemOverride, emailTestBlockReason, QQ_MAIL_URL, sessionOverrideValue, type SessionOverlay } from "./settings.ts";
-import { pendingPatch } from "./ui-model.ts";
+import { controlStatus, pendingPatch, type ActionResult } from "./ui-model.ts";
 import { NotifySettingsComponent, type ItemValue, type NotifySettingsSummary, type SettingsHost, type SettingsRestriction } from "./ui.ts";
 import type { ApiSnapshot, Logger, NotificationConfig, NotificationService, RunOutcome, RunSummary, TestProgress } from "./types.ts";
 
@@ -64,6 +65,16 @@ export interface CommandDeps {
   userRaw(): unknown;
 }
 
+/** Local preflight only: no probe, channel creation, or network request. Technical reasons stay
+ * in diagnostics, while the model receives only the unusable ids. */
+function channelProblems(config: NotificationConfig): Array<{ id: string; reason: string }> {
+  return config.providers.flatMap((provider) => {
+    const reason = provider.type === "webhook" ? validateHttpOptions(provider.options)
+      : !["terminal", "email", "debug"].includes(provider.type) ? "未注册的接收方式类型" : undefined;
+    return reason ? [{ id: provider.id, reason }] : [];
+  });
+}
+
 function formatStatus(deps: CommandDeps): string {
   const config = deps.config();
   const load = deps.configLoad();
@@ -75,16 +86,16 @@ function formatStatus(deps: CommandDeps): string {
     && typeof email.options.from === "string" && email.options.from !== ""
     && Array.isArray(email.options.to) && email.options.to.length > 0;
   const lines: string[] = [];
-  lines.push(`pi-notification: ${config.enabled && !deps.isSilenced() ? "开启" : "关闭"}${deps.isSilenced() ? "（--no-notify）" : ""}`);
-  const activeChannels = [...new Set(Object.values(config.rules).filter((rule) => rule.enabled).flatMap((rule) => resolveChannels(config, rule)))];
-  const issue = forcedOff(deps) ? "本对话已强制静默，请检查启动参数或环境变量。" : !config.enabled ? "提醒已暂停，请开启首页的提醒总开关。"
-    : !activeChannels.length ? "没有提醒使用任何接收方式，请选择在哪里接收。"
-      : !activeChannels.some((id) => config.providers.some((provider) => provider.id === id && provider.enabled)) ? "提醒使用的接收方式已关闭或不存在，请检查接收方式开关。"
-        : deps.service().isQuietHours() ? "当前为免打扰时段，部分提醒暂停；显式测试不受影响。" : "提醒已启用。没有收到时，请先发送测试查看具体结果。";
-  lines.push(`  当前情况：${issue}`);
+  const effective = controlStatus(config, { restrictions: forcedOff(deps) ? [{ label: "强制静默", reason: "" }] : [],
+    hasCredential: resolveQqCredential().source !== "missing", configError: load.errors.length > 0, degraded: load.degraded,
+    quiet: deps.service().isQuietHours(), terminalIssue: selection.channel === "none" ? selection.reason ?? "不可用" : undefined,
+    channelIssues: channelProblems(config).map((entry) => entry.id) });
+  lines.push(`pi-notification: ${effective.label}`);
+  if (forcedOff(deps)) lines.push(`  限制来源：${[deps.isSilenced() ? "--no-notify" : "", isDisabledByEnv() ? "PI_NOTIFY_DISABLE" : ""].filter(Boolean).join("、")}`);
   const readiness = emailReadiness(config, resolveQqCredential().source !== "missing");
   lines.push(`  邮箱：${readiness.label}；${readiness.usedBy} 类提醒使用邮箱。`);
   lines.push("  技术详情（供进一步排查）：");
+  for (const issue of channelProblems(config)) lines.push(`  ${channelLabel(issue.id)}：${issue.reason}`);
   lines.push(`  规则/渠道: ${describeConfig(config)}`);
   if (deps.sessionId()) lines.push(`  会话: ${deps.sessionId()}${deps.isWaitingForUser?.() ? "（正在等你输入）" : ""}`);
   // “Rule enabled” only means “passes the filter”; it is never a promise that a notification was
@@ -135,7 +146,7 @@ function formatStatus(deps: CommandDeps): string {
   lines.push("  接收服务接受不等于实际送达，请确认是否看到或收到。");
   for (const problem of load.errors) lines.push(`  ⚠ 配置错误 ${problem.path}: ${problem.message}`);
   for (const problem of load.warnings) lines.push(`  · 提示 ${problem.path}: ${problem.message}`);
-  return lines.join("\n");
+  return lines.map((line) => sanitizeError(line, Math.max(1, line.length))).join("\n");
 }
 
 /** print/json notify is a no-op, so stderr keeps the stdout protocol clean. */
@@ -165,8 +176,11 @@ function forcedOff(deps: CommandDeps): boolean {
  * re-reads the config so both the current value and the user default are fresh.
  */
 function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): SettingsHost {
-  /** Item name used by every feedback message, so a confirmation names what it changed. */
-  const name = (item: Parameters<SettingsHost["setValue"]>[0]): string => `${item.group} · ${item.label}`;
+  /** Short user-facing summaries and separate, redacted diagnostics. */
+  const blocked = (message: string, next: "email" | "diagnostics" | "home" = "diagnostics"): ActionResult =>
+    ({ ok: false, message, feedback: { kind: "blocked", next } });
+  const failed = (message: string, details: string[] = []): ActionResult => ({ ok: false, message,
+    feedback: { kind: details.length ? "recoverable" : "unknown", next: "diagnostics", details: (details.length ? details : ["此操作未返回详细错误信息，无法确定原因。"]).map((text) => sanitizeError(text, Math.max(1, text.length))) } });
 
   /** Session-level restrictions that override the user's own setting; shown as extra limits, never as a user default. */
   const restrictions = (): SettingsRestriction[] => {
@@ -176,20 +190,20 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
     return list;
   };
 
-  const applyPatch = (item: Parameters<SettingsHost["setValue"]>[0], value: ItemValue): { ok: true; message: string } | { ok: false; message: string } => {
+  const applyPatch = (item: Parameters<SettingsHost["setValue"]>[0], value: ItemValue): ActionResult => {
     const patch = item.patch(value);
     if (forcedOff(deps) && patchOperations(patch).some((operation) => operation.kind === "providers" && operation.value)) {
-      return { ok: false, message: "本对话已强制静默，不能开启接收方式。" };
+      return blocked("强制静默期间无法开启通知。");
     }
     const next = applySettingPatch(deps.overlay(), item, patch);
     const checked = applyOverlay(deps.config(), next);
-    if (checked.problems.length) return { ok: false, message: `未应用「${name(item)}」：${checked.problems.map((problem) => sanitizeError(`${problem.path}: ${problem.message}`)).join(";")}` };
+    if (checked.problems.length) return failed(`未应用${item.label}。请检查配置。`, checked.problems.map((problem) => `${problem.path}: ${problem.message}`));
     deps.setOverlay(next);
-    return { ok: true, message: `已应用（仅本对话）「${name(item)}」= ${item.format(item.read(deps.config()))}` };
+    return { ok: true, message: "" };
   };
 
   const sendTest = (channels: string[], onProgress?: (progress: TestProgress) => void) => {
-    if (forcedOff(deps)) return { ok: false, message: testBlockMessage("silenced") };
+    if (forcedOff(deps)) return blocked(testBlockMessage("silenced"));
     const id = `manual:${randomUUID()}`;
     const sessionId = deps.sessionId();
     const result = deps.service().submit({
@@ -197,8 +211,9 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
       dedupeKey: id, channels: [...channels], meta: { sessionId: sessionId ?? "manual", runId: id, level: "info" },
     }, { manualTest: true, onProgress: (event) => { if (deps.sessionId() === sessionId) onProgress?.(event); } });
     deps.log.record({ event: "notify_test", id, accepted: result.accepted, channels, ...(result.accepted ? {} : { reason: result.reason }) });
-    return result.accepted ? { ok: true, message: "已排队；尚不代表已经收到。", unsubscribe: result.unsubscribe }
-      : { ok: false, message: testBlockMessage(result.reason) };
+    if (!result.accepted && result.reason === "internal_error") return failed("无法完成测试。请查看诊断后重试。");
+    return result.accepted ? { ok: true, message: "测试：等待发送", feedback: { kind: "progress" as const }, unsubscribe: result.unsubscribe }
+      : blocked(testBlockMessage(result.reason), result.reason === "disabled" || result.reason === "no_channels" || result.reason === "no_available_channels" ? "home" : "diagnostics");
   };
 
   return {
@@ -206,22 +221,22 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
     userRaw: () => deps.userRaw(),
     runtimeState: () => {
       const terminal = selectTerminalChannel(createDefaultTerminalIo().environment());
-      return { degraded: deps.configLoad().degraded, configError: deps.configLoad().errors.length > 0, quiet: deps.service().isQuietHours(),
-        terminalIssue: terminal.channel === "none" ? terminal.reason : undefined };
+      return { degraded: deps.configLoad().degraded, configError: deps.configLoad().errors.length > 0, quiet: deps.service().isQuietHours(), channelIssues: channelProblems(deps.config()).map((entry) => entry.id),
+        terminalIssue: terminal.channel === "none" ? terminal.reason ?? "不可用" : undefined };
     },
     sessionOverride: (item) => sessionOverrideValue(deps.overlay(), item),
     restrictions,
 
     setValue(item, value) {
       if (item.id === "enabled" && forcedOff(deps) && value === true) {
-        return { ok: false, message: `已拒绝「${name(item)}」= 开启：本会话被 --no-notify / PI_NOTIFY_DISABLE 强制静默（额外限制，不是你的默认值），界面无法开启通知` };
+        return blocked("强制静默期间无法开启通知。");
       }
       return applyPatch(item, value);
     },
 
     saveDefault(item, value) {
       if (item.id === "enabled" && forcedOff(deps)) {
-        return { ok: false, message: `不能保存「${name(item)}」：本对话已强制静默；这项临时限制不会保存成以后默认。` };
+        return blocked("强制静默期间不能保存通知总开关。");
       }
       const current = deps.config();
       const patch = settingSnapshot(item, current);
@@ -229,34 +244,34 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
       if (!result.ok) {
         const problems = result.problems.map((problem) => sanitizeError(`${problem.path}: ${problem.message}`));
         deps.log.record({ event: "notify_default_write_failed", item: item.id, problems });
-        return { ok: false, message: `保存失败「${name(item)}」：用户文件未改动（${problems.join("; ")}）` };
+        return failed(`保存失败：${item.label}。默认设置未改动，当前对话修改仍保留。`, result.problems.map((problem) => `${problem.path}: ${problem.message}`));
       }
       deps.reload(ctx); // Re-read only after a successful write, so both layers refresh together.
       deps.log.record({ event: "notify_default_saved", item: item.id, path: item.paths ?? item.userPath });
-      return { ok: true, message: `已保存为默认「${name(item)}」= ${item.format(item.read(deps.config()))}（以后默认；其他本对话修改未保存）` };
+      return { ok: true, message: "" };
     },
 
     saveChanges(items) {
-      if (!items.length) return { ok: true, message: "没有尚未保存的修改。" };
+      if (!items.length) return { ok: true, message: "" };
       if (forcedOff(deps) && items.some((item) => item.id === "enabled" || (item.providerId && !item.providerOptionPath && item.read(deps.config()) === true))) {
-        return { ok: false, message: "未保存：强制静默期间不能保存总开关或开启渠道；其他修改仍只对本对话生效。" };
+        return blocked("强制静默期间不能保存通知总开关或开启接收方式。");
       }
       const current = deps.config();
       const patch = pendingPatch(items, current);
       const result = writeUserDefault(deps.agentDir(), (raw) => settingUserFilePatch(raw, current, patch));
       if (!result.ok) {
-        deps.log.record({ event: "notify_defaults_write_failed", items: items.map((item) => item.id) });
-        return { ok: false, message: "批量保存失败：用户文件未改动，本对话修改仍保留。请修复配置或写入权限后重试（Ctrl+O 诊断）。" };
+        deps.log.record({ event: "notify_defaults_write_failed", items: items.map((item) => item.id), problems: result.problems.map((problem) => sanitizeError(`${problem.path}: ${problem.message}`)) });
+        return failed("保存失败：默认设置未改动，当前对话修改仍保留。请查看详情后重试。", result.problems.map((problem) => `${problem.path}: ${problem.message}`));
       }
       deps.reload(ctx);
       deps.log.record({ event: "notify_defaults_saved", items: items.map((item) => item.id) });
-      return { ok: true, message: `已保存 ${items.length} 项为以后默认；本对话继续生效，其他已打开对话不变。` };
+      return { ok: true, message: "" };
     },
 
     testEmail(onProgress) {
-      if (forcedOff(deps)) return { ok: false, message: testBlockMessage("silenced") };
+      if (forcedOff(deps)) return blocked(testBlockMessage("silenced"));
       const reason = emailTestBlockReason(deps.config(), resolveQqCredential().source !== "missing");
-      if (reason) return { ok: false, message: `邮箱测试未发送：${reason}` };
+      if (reason) return blocked(`邮箱测试未发送：${reason}`, !deps.config().enabled ? "home" : "email");
       return sendTest(["email"], onProgress);
     },
 
@@ -264,34 +279,36 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
 
     credentialStatus() {
       const source = resolveQqCredential().source;
-      return source === "vault" ? "已保存于 Windows 凭据管理器" : source === "environment" ? "使用环境变量（兼容回退）" : "未设置";
+      return source === "vault" ? "已安全保存" : source === "environment" ? "由启动环境提供" : "未设置";
     },
 
     saveCredential(value) {
       const ok = saveQqCredential(value);
       deps.log.record({ event: "notify_qq_credential_saved", ok });
       return ok
-        ? { ok: true, message: "QQ SMTP 授权码已保存到 Windows 凭据管理器（未写入配置或会话）。" }
-        : { ok: false, message: "保存授权码失败：当前系统的 Windows 凭据管理器不可用，或输入不符合要求。" };
+        ? { ok: true, message: "" }
+        : failed("无法保存授权码。请重试或查看系统凭据存储状态。");
     },
 
     deleteCredential() {
       const ok = deleteQqCredential();
       deps.log.record({ event: "notify_qq_credential_deleted", ok });
       return ok
-        ? { ok: true, message: resolveQqCredential().source === "environment" ? "已从 Windows 凭据管理器移除；仍会使用环境变量中的授权码。" : "已从 Windows 凭据管理器移除授权码。" }
-        : { ok: false, message: "移除失败：Windows 凭据管理器不可用或没有可移除的授权码。" };
+        ? { ok: true, message: "" }
+        : failed("无法移除授权码。请查看系统凭据存储状态。");
     },
 
-    openQqSettings() {
-      if (process.platform !== "win32") return { ok: false, message: `请在浏览器中打开 ${QQ_MAIL_URL}，登录后进入「设置 → 帐户」。` };
+    async openQqSettings() {
+      if (process.platform !== "win32") return blocked(`请在浏览器访问 ${QQ_MAIL_URL}，进入「设置 → 帐户」获取授权码。`);
       try {
-        const child = spawn("explorer.exe", [QQ_MAIL_URL], { detached: true, stdio: "ignore" });
-        child.on("error", () => {});
-        child.unref();
-        return { ok: true, message: "正在打开 QQ 邮箱官网；登录后进入「设置 → 帐户」，开启 SMTP 并生成授权码。" };
-      } catch {
-        return { ok: false, message: `未能打开浏览器，请手动访问 ${QQ_MAIL_URL}` };
+        await new Promise<void>((resolve, reject) => {
+          const child = spawn("explorer.exe", [QQ_MAIL_URL], { detached: true, stdio: "ignore" });
+          child.once("error", reject);
+          child.once("spawn", () => { child.unref(); resolve(); });
+        });
+        return { ok: true, message: "" };
+      } catch (error) {
+        return failed(`无法打开浏览器。请手动访问 ${QQ_MAIL_URL}。`, [String(error)]);
       }
     },
 
@@ -303,16 +320,16 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
       deps.reload(ctx);
       const load = deps.configLoad();
       deps.log.record({ event: "notify_reload", degraded: load.degraded });
-      return load.degraded
-        ? { ok: false, message: "已重新读取配置：配置有问题，当前是降级后的安全子集（Ctrl+O 看状态）" }
-        : { ok: true, message: "已重新读取配置（未重载扩展）" };
+      return load.degraded || load.errors.length > 0
+        ? failed("配置异常。请修复后重新读取。", load.errors.map((problem) => `${problem.path}: ${problem.message}`))
+        : { ok: true, message: "" };
     },
 
     /** “沿用以后默认”: drop only this conversation's override, so the user default applies again. */
     followUserDefault(item) {
       deps.setOverlay(clearItemOverride(deps.overlay(), item));
       deps.log.record({ event: "notify_override_cleared", item: item.id });
-      return { ok: true, message: `已沿用以后默认「${name(item)}」：本对话不再覆盖（当前 ${item.format(item.read(deps.config()))}）` };
+      return { ok: true, message: "" };
     },
 
     /** “恢复此项内置默认”: clear the user default and the conversation override for one item. */
@@ -321,7 +338,7 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
       if (!result.ok) {
         const problems = result.problems.map((problem) => sanitizeError(`${problem.path}: ${problem.message}`));
         deps.log.record({ event: "notify_default_delete_failed", item: item.id, problems });
-        return { ok: false, message: `恢复失败「${name(item)}」：用户文件未改动（${problems.join("; ")}）` };
+        return failed(`恢复失败：${item.label}。默认设置未改动。`, result.problems.map((problem) => `${problem.path}: ${problem.message}`));
       }
       // Only after the file is clean does the conversation override go away: a failed write must not
       // silently drop this conversation's value.
@@ -329,9 +346,9 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
       deps.log.record({ event: "notify_default_removed", item: item.id, path: item.userPath });
       if (item.id === "enabled" && forcedOff(deps) && builtinDefaultValue(item) === true) {
         // The default really is back to on, but the session-level silence still wins; never bypass it.
-        return { ok: true, message: `已恢复「${name(item)}」内置默认（开启）；但本会话仍被强制静默，界面无法绕过` };
+        return { ok: true, message: "默认设置已恢复；当前仍强制静默。", feedback: { kind: "blocked", next: "diagnostics" } };
       }
-      return { ok: true, message: `已恢复「${name(item)}」内置默认（当前 ${item.format(item.read(deps.config()))}）` };
+      return { ok: true, message: "" };
     },
 
     /**
@@ -354,13 +371,9 @@ function createSettingsHost(ctx: ExtensionCommandContext, deps: CommandDeps): Se
       };
       const request = evaluateRunOutcome({ outcome, summary }, config);
       const lines = [
-        "示例（不会发送）：以下内容用固定数据生成，不读取你的真实对话，也不会提交投递。",
-        request
-          ? `规则：${request.kind} · 级别：${request.level} · 渠道：${request.channels.join("、") || "（无）"}`
-          : "“运行完成”规则当前被关闭，无法生成示例正文；可先开启该规则。",
-        request ? `标题：${request.title}` : "",
+        "固定数据示例，不读取当前对话，不发送通知。",
+        request ? `标题：${request.title}` : "无法生成示例。",
         request ? `正文：${request.body}` : "",
-        "说明：实际送达取决于渠道可用性、静默时段与总开关；上面这条只是内容示意，不代表已送达。",
       ].filter((line) => line !== "");
       deps.log.record({ event: "notify_preview" });
       return { ok: true, message: "通知预览（内容示意，不会发送）", lines };
