@@ -1404,6 +1404,40 @@ await step("J13g 真实 Pi 宿主复用凭据核心，缺码/写入失败/重新
   } finally { delete process.env.PI_NOTIFY_QQ_SMTP_AUTH_CODE; await host.dispose(); }
 });
 
+await step("J13h 邮箱被运行时关闭后，恢复无关字段不被邮箱不可用牵连", async () => {
+  const driver = createUiDriver();
+  // The file declares email on, but there is no credential: startup must close only the runtime copy.
+  const raw = { ...NO_COALESCE, channels: [], providers: [{ id: "email", type: "email", enabled: true,
+    options: { from: "fake@qq.com", to: ["reader@example.com"] } }], content: { includeCost: false } };
+  const host = await makeHost({ label: "email-runtime-downgrade", extensions: [PROBE_ENTRY, PLUGIN_ENTRY], mode: "tui", driver, userConfig: raw });
+  const module = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "settings.ts")).href);
+  const items = module.buildSettingItems(configModule.loadConfig({ agentDir: host.agentDir }).config);
+  const drive = async (keys) => { driver.setKeys(keys); const delta = await host.command("/notify"); assert.equal(delta.deliveries.length, 0); return delta; };
+  try {
+    assert.equal(host.readUserConfigRaw().providers[0].enabled, true, "文件仍是用户的邮箱声明");
+    await drive([K.esc]);
+    assert.match(driver.lastLines.join("\n"), /邮箱通知  关闭/, "缺少授权码时运行时邮箱必须关闭");
+    // Enter changes an unrelated field for this conversation only.
+    await drive(keysAlongRoute(module, items, "content.includeCost", { open: true, after: [K.down, K.enter] }));
+    // “a” follows the disk default again; the untouched email declaration must not be read as an activation.
+    const followed = await drive(keysAlongRoute(module, items, "content.includeCost", { open: false, after: ["?", "a"] }));
+    assert.ok(followed.plugin.some((row) => row.event === "notify_override_cleared" && row.item === "content.includeCost"),
+      `恢复无关默认被邮箱牵连: ${JSON.stringify(followed.plugin.filter((row) => row.event === "log"))}`);
+    assert.equal(host.readUserConfigRaw().providers[0].enabled, true, "恢复无关默认不得改写邮箱声明");
+    await drive([K.esc]);
+    assert.match(driver.lastLines.join("\n"), /邮箱通知  关闭/, "恢复无关默认后邮箱仍必须不可用");
+    // “d” restores an unrelated built-in default through the file transaction, with the same guard.
+    const restored = await drive(keysAlongRoute(module, items, "content.includeCost", { open: false, after: ["?", "d", K.down, K.enter] }));
+    assert.ok(restored.plugin.some((row) => row.event === "notify_default_removed" && row.item === "content.includeCost"),
+      `恢复无关内置默认被邮箱牵连: ${JSON.stringify(restored.plugin.filter((row) => row.event === "log"))}`);
+    assert.equal(host.readUserConfigRaw().content?.includeCost, undefined, "无关字段的用户默认应被移除");
+    assert.equal(host.readUserConfigRaw().providers[0].enabled, true, "恢复无关默认不得改写邮箱声明");
+    await drive([K.esc]);
+    assert.match(driver.lastLines.join("\n"), /邮箱通知  关闭/, "恢复无关内置默认后邮箱仍必须不可用");
+    assert.deepEqual(host.runtimeErrors, []);
+  } finally { await host.dispose(); }
+});
+
 await step("J14 非 TUI 模式守卫：print/json/rpc 都不打开组件、不写盘、凭据不外泄", async () => {
   for (const mode of ["print", "json", "rpc"]) {
     const host = await makeHost({

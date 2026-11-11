@@ -12,20 +12,24 @@ import { applyOverlay, emptyOverlay } from "../src/settings-state.ts";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "notify-actions-"));
 let serial = 0, passed = 0;
-function harness(raw, credentials = createQqCredentials({ status: () => ({ available: true }), get: () => undefined, set() {}, delete() {} }, () => process.env[QQ_AUTH_ENV]), openUrl) {
+function harness(raw, credentials = createQqCredentials({ status: () => ({ available: true }), get: () => undefined, set() {}, delete() {} }, () => process.env[QQ_AUTH_ENV]), openUrl, runtimeGuard) {
   const dir = path.join(tmp, String(++serial));
   const file = userConfigPath(dir);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(raw));
   let overlay = emptyOverlay(), commits = 0, silenced = false;
-  const current = () => applyOverlay(loadConfig({ agentDir: dir }).config, overlay).config;
+  const declared = () => applyOverlay(loadConfig({ agentDir: dir }).config, overlay).config;
+  // The declaration is snapshotted at load time, like the host: an external file edit only becomes
+  // visible after a successful reload. `runtimeGuard` models a host downgrade that never touches it.
+  let declaration = structuredClone(declared());
+  const current = () => { const config = declared(); return runtimeGuard ? runtimeGuard(config) : config; };
   const host = createSettingsHost({
     credentials, openUrl,
-    config: current, configLoad: () => loadConfig({ agentDir: dir }), agentDir: () => dir,
+    config: current, configLoad: () => loadConfig({ agentDir: dir }), agentDir: () => dir, declared: () => declaration,
     log: { log() {}, record() {} }, sessionId: () => "test", isSilenced: () => silenced,
     service: () => { throw new Error("Configuration operations must not access delivery service"); },
-    reload() {}, overlay: () => overlay,
-    setOverlay(next) { overlay = next; commits++; },
+    reload() { declaration = structuredClone(declared()); }, overlay: () => overlay,
+    setOverlay(next) { overlay = next; commits++; declaration = structuredClone(declared()); },
     userRaw: () => readUserConfigRaw(dir).raw,
   });
   return { host, file, current, overlay: () => structuredClone(overlay), commits: () => commits,
@@ -227,6 +231,39 @@ try {
     credentials.status = () => { throw new Error("Closing must not inspect credentials"); };
     assert.equal(h.host.followUserDefault(item).ok, true);
     assert.equal(h.current().providers.find((p) => p.id === "email").enabled, false);
+  });
+  step("Runtime email downgrade never blocks an unrelated restore, reload or setting change", () => {
+    const options = { from: "fake@qq.com", to: ["reader@example.com"] };
+    const credentials = createQqCredentials({ status: () => ({ available: true }), get: () => undefined, set() {}, delete() {} }, () => undefined);
+    // The host guard only closes the runtime copy when the credential is missing; the file keeps declaring it on.
+    const guard = (config) => ({ ...config, providers: config.providers.map((provider) =>
+      provider.id === "email" ? { ...provider, enabled: false } : provider) });
+    const raw = { channels: [], providers: [{ id: "email", type: "email", enabled: true, options }], content: { includeCost: false } };
+    const h = harness(raw, credentials, undefined, guard);
+    const emailEnabled = () => h.current().providers.find((provider) => provider.id === "email").enabled;
+    assert.equal(emailEnabled(), false, "runtime email must start closed");
+    assert.equal(h.host.reload().ok, true, "reloading the same declaration must not look like an activation");
+    // Enter on an unrelated field, then “a”: drop only this conversation's value.
+    assert.equal(h.host.setValue(h.item("content.includeCost"), true).ok, true);
+    assert.equal(h.host.followUserDefault(h.item("content.includeCost")).ok, true);
+    assert.equal(h.current().content.includeCost, false);
+    assert.equal(emailEnabled(), false, "email must stay unavailable after following an unrelated default");
+    // “d”: restore the built-in default of another unrelated field.
+    assert.equal(h.host.setValue(h.item("content.includeCost"), true).ok, true);
+    assert.equal(h.host.setValue(h.item("content.includeDuration"), true).ok, true);
+    assert.equal(h.host.restoreBuiltinDefault(h.item("content.includeCost")).ok, true);
+    assert.equal(h.host.userRaw().content?.includeCost, undefined);
+    assert.equal(h.current().content.includeCost, true);
+    assert.equal(emailEnabled(), false, "email must stay unavailable after restoring an unrelated built-in default");
+    // A real activation still asks for the credential, and a changed declaration still guards a reload.
+    assert.equal(h.host.setValue(h.item("provider:email"), false).ok, true);
+    assert.equal(h.host.followUserDefault(h.item("provider:email")).ok, false);
+    const reopened = harness({ ...raw, providers: [{ ...raw.providers[0], enabled: false }] }, credentials);
+    fs.writeFileSync(reopened.file, JSON.stringify(raw));
+    const blocked = reopened.host.reload();
+    assert.equal(blocked.ok, false, "a file edit that opens email still needs a credential");
+    assert.match(blocked.message, /授权码/);
+    assert.equal(reopened.host.userRaw().providers[0].enabled, true, "only the activation is blocked, never the file");
   });
   step("d validates the real post-delete gate and keeps sparse persistence and unrelated overlay semantics", () => {
     const h = harness({ channels: [], providers: [{ id: "custom", type: "debug", enabled: false, options: { label: "keep" } }],

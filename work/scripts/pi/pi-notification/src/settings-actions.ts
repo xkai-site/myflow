@@ -78,6 +78,10 @@ export interface SettingsDeps {
   log: Logger;
   config(): NotificationConfig;
   configLoad(): ConfigLoadResult;
+  /** Declaration last read from disk plus this conversation's overlay, before any runtime guard.
+   * Activation checks compare against it so a downgrade already in effect (email closed for a
+   * missing credential) is never mistaken for a channel this operation opens. */
+  declared(): NotificationConfig;
   service(): NotificationService;
   agentDir(): string;
   /** Re-reads the config and applies the current session overlay, without rebuilding the extension. */
@@ -215,13 +219,18 @@ export function createSettingsHost(deps: SettingsDeps): SettingsHost {
   const emailActivationMessage = (config = deps.config()) => emailActivationIssue(config, deps.credentials.status()) ?? "请先完成邮箱配置。";
   const activation = (config: NotificationConfig, id: string) => channelActivation(config, id,
     id === "email" && deps.credentials.status().state === "configured", channelProblems(config).map((entry) => entry.id));
-  /** All gate writes share prerequisites; restoration never consumes the plan's routing suggestion. */
-  const checkActivation = (next: NotificationConfig, explicitChannels: readonly string[] = []): ActionResult | undefined => {
-    const current = deps.config();
+  /** The current declaration on one baseline: re-applying the overlay undoes runtime-only
+   * downgrades, so “before” and “after” describe what the user declared, not what the host allows. */
+  const declaredOn = (base: NotificationConfig) => applyOverlay(base, deps.overlay()).config;
+  /** All gate writes share prerequisites; restoration never consumes the plan's routing suggestion.
+   * `before` must come from the same baseline as `next`, otherwise a channel the runtime closed on
+   * its own (email without a credential) looks like a new activation of an untouched channel. */
+  const checkActivation = (next: NotificationConfig, explicitChannels: readonly string[] = [],
+    before: NotificationConfig = deps.config()): ActionResult | undefined => {
     for (const provider of next.providers) {
       if (!provider.enabled) continue;
-      const opening = !current.providers.find((entry) => entry.id === provider.id)?.enabled || explicitChannels.includes(provider.id);
-      const resumingEmail = provider.id === "email" && !current.enabled && next.enabled;
+      const opening = !before.providers.find((entry) => entry.id === provider.id)?.enabled || explicitChannels.includes(provider.id);
+      const resumingEmail = provider.id === "email" && !before.enabled && next.enabled;
       if (!opening && !resumingEmail) continue;
       if (opening && forcedOff(deps)) return blocked("强制静默期间无法开启通知。");
       const plan = activation(next, provider.id);
@@ -236,7 +245,8 @@ export function createSettingsHost(deps: SettingsDeps): SettingsHost {
     const next = applySettingPatch(deps.overlay(), item, patch);
     const checked = applyOverlay(deps.config(), next);
     if (checked.problems.length) return failed(`未应用${item.label}。请检查配置。`, checked.problems.map((problem) => `${problem.path}: ${problem.message}`));
-    const issue = checkActivation(checked.config, patchOperations(patch).flatMap((op) => op.kind === "providers" && op.value ? [op.id] : []));
+    const issue = checkActivation(checked.config,
+      patchOperations(patch).flatMap((op) => op.kind === "providers" && op.value ? [op.id] : []), declaredOn(deps.config()));
     if (issue) return issue;
     deps.setOverlay(next);
     return { ok: true, message: "" };
@@ -357,7 +367,9 @@ export function createSettingsHost(deps: SettingsDeps): SettingsHost {
     },
 
     reload() {
-      const issue = checkActivation(fromDisk());
+      // Compare two declarations read on the same layer: the last one and the candidate. A channel
+      // the runtime already downgraded is closed in both, so this never blocks an unrelated reload.
+      const issue = checkActivation(fromDisk(), [], deps.declared());
       if (issue) return issue;
       deps.reload();
       const load = deps.configLoad();
@@ -374,7 +386,7 @@ export function createSettingsHost(deps: SettingsDeps): SettingsHost {
       const checked = applyOverlay(load.config, next);
       const problems = [...load.errors, ...checked.problems];
       if (problems.length) return failed(`未恢复${item.label}。当前对话修改仍保留。`, problems.map((problem) => `${problem.path}: ${problem.message}`));
-      const issue = checkActivation(checked.config);
+      const issue = checkActivation(checked.config, [], declaredOn(load.config));
       if (issue) return issue;
       deps.setOverlay(next);
       deps.log.record({ event: "notify_override_cleared", item: item.id });
@@ -384,12 +396,16 @@ export function createSettingsHost(deps: SettingsDeps): SettingsHost {
     /** “恢复此项内置默认”: clear the user default and the conversation override for one item. */
     restoreBuiltinDefault(item) {
       const next = clearItemOverride(deps.overlay(), item);
+      // The declaration before the removal, on the disk layer. The candidate built inside the file
+      // transaction is the matching “after”: comparing the runtime config instead would treat a
+      // channel the host already downgraded as opened by this operation.
+      const before = declaredOn(loadConfig({ agentDir: deps.agentDir() }).config);
       let issue: ActionResult | undefined;
       // Validate the actual post-removal defaults inside the file transaction, before either layer changes.
       const result = deleteUserDefault(deps.agentDir(), itemRemovals(item, deps.config(), deps.overlay()), (base) => {
         const checked = applyOverlay(base, next);
         if (checked.problems.length) return checked.problems;
-        issue = checkActivation(checked.config);
+        issue = checkActivation(checked.config, [], before);
         return issue ? [{ path: item.userPath, message: issue.message }] : [];
       });
       if (issue) return issue;

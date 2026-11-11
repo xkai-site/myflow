@@ -119,8 +119,13 @@ export default function piNotification(pi: ExtensionAPI): void {
 
   // Startup and a fresh extension /reload are activation boundaries too. Never persist this gate
   // or change routes: the file remains the user's declaration, but missing prerequisites cannot open it.
-  let load: ConfigLoadResult = guardEmailActivation(loadConfig({ agentDir: getAgentDir() }), defaultConfig());
+  const initial = loadConfig({ agentDir: getAgentDir() });
+  let load: ConfigLoadResult = guardEmailActivation(initial, defaultConfig());
   const config: NotificationConfig = load.config;
+  /** Disk plus this conversation's overlay exactly as declared, before any runtime downgrade. The
+   * settings activation check compares against it, so an email gate the host already closed for a
+   * missing credential never blocks restoring unrelated fields. */
+  let declared: NotificationConfig = structuredClone(initial.config);
   if (isDisabledByEnv()) config.enabled = false;
 
   /**
@@ -235,6 +240,7 @@ export default function piNotification(pi: ExtensionAPI): void {
     }
     // The same preflight also guards file/session reloads and races after UI confirmation.
     // Reject only a new activation, never rewrite any unified or per-rule route.
+    declared = structuredClone(merged.config);
     const guarded = guardEmailActivation(merged, config);
     load = guarded;
     const effective = guarded.config;
@@ -337,6 +343,7 @@ export default function piNotification(pi: ExtensionAPI): void {
           credentials,
           config: () => config,
           configLoad: () => load,
+          declared: () => declared,
           service: () => service,
           agentDir: () => getAgentDir(),
           reload: (commandCtx) => reloadConfig(commandCtx, "notify_reload"),

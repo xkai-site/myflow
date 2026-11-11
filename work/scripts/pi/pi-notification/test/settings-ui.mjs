@@ -103,7 +103,7 @@ function harness(raw, options = {}) {
   if (options.realActions) {
     const credentials = options.credentials ?? createQqCredentials({ status: () => ({ available: true }),
       get: () => options.vault?.value, set(value) { options.vault.value = value; }, delete() { delete options.vault.value; } }, () => undefined);
-    const application = createSettingsHost({ credentials, config: effective, configLoad: () => config.loadConfig({ agentDir: dir }),
+    const application = createSettingsHost({ credentials, config: effective, declared: effective, configLoad: () => config.loadConfig({ agentDir: dir }),
       agentDir: () => dir, log: { log() {}, record() {} }, sessionId: () => "fake-ui", isSilenced: () => false,
       service() { throw new Error("Settings interactions must not access delivery service"); }, reload() {},
       overlay: () => overlay, setOverlay(next) { overlay = next; }, userRaw: host.userRaw });
@@ -298,7 +298,7 @@ try {
           send: async () => { delivered.push(id); }, dispose: async () => {} };
       } } });
       const credentials = createQqCredentials({ status: () => ({ available: true }), get: () => vault.value, set() {}, delete() {} }, () => undefined);
-      const application = createSettingsHost({ credentials, config: h.host.config, configLoad: () => config.loadConfig({ agentDir: h.dir }),
+      const application = createSettingsHost({ credentials, config: h.host.config, declared: h.host.config, configLoad: () => config.loadConfig({ agentDir: h.dir }),
         agentDir: () => h.dir, log: { record() {}, log() {} }, sessionId: () => "fake-service", isSilenced: () => scenario === "silenced",
         service: () => service, reload() {}, overlay: h.overlay, setOverlay() { assert.fail("Tests must not write settings"); }, userRaw: h.raw });
       h.host.test = application.test; h.host.testEmail = application.testEmail;
