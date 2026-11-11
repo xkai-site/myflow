@@ -2,9 +2,20 @@
 import { defaultConfig, mergeConfig } from "./config.ts";
 import { buildSettingItems, RULE_INFOS, type SettingItem } from "./settings.ts";
 import { emailRequirement, rulesUsingChannel } from "./channels.ts";
+import { resolveChannels } from "./rules.ts";
 import type { NotificationConfig } from "./types.ts";
 
 export type SaveScope = "all" | "email";
+
+/** Resolve the current operation context once, without changing gates or routing. */
+export function settingsTestTarget(config: NotificationConfig, item?: SettingItem, pageId?: string): { channels: string[]; emailOnly: boolean } {
+  const channelId = pageId === "email-config" ? "email" : pageId === "home" ? item?.providerId : undefined;
+  const ruleKey = item?.rule?.key ?? RULE_INFOS.find((rule) => pageId === `rule:${rule.key}`)?.key;
+  return {
+    channels: channelId ? [channelId] : ruleKey ? resolveChannels(config, config.rules[ruleKey]) : [...config.channels],
+    emailOnly: channelId === "email",
+  };
+}
 
 /** Canonical leaves avoid counting the same switch through both ordinary and expert controls.
  * Overlay presence is NOT dirtiness: an explicitly pinned value may already match the default.

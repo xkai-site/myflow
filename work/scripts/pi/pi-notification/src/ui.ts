@@ -27,9 +27,7 @@ import {
   type SettingItem,
   type SettingValue,
 } from "./settings.ts";
-import type { NotificationConfig } from "./types.ts";
-import { resolveChannels } from "./rules.ts";
-import { channelRules, emailMissing, emailSetup, pendingSettings, type SaveScope } from "./ui-model.ts";
+import { channelRules, emailMissing, emailSetup, pendingSettings, settingsTestTarget, type SaveScope } from "./ui-model.ts";
 import { builtinDefaultValue, hasUserDefault, providerDefinitionSource, userDefaultValue } from "./settings-state.ts";
 import { channelState, controlStatus, emailReadiness } from "./channels.ts";
 import { QQ_MAIL_URL, SECURE_INJECTION_HELP } from "./mail/credentials.ts";
@@ -66,12 +64,11 @@ const DEFAULT_SUFFIX_MIN_WIDTH = 24;
 /** Trailing marker of a row that opens another page. */
 const OPEN_MARK = " ›";
 
-const ACTION_LABELS: Record<"saveAll" | "saveEmail" | "test" | "emailTest" | "emailEnable" | "credentialSave" | "credentialDelete" | "status" | "reload" | "search" | "preview" | "help", string> = {
+const ACTION_LABELS: Record<"saveAll" | "saveEmail" | "test" | "emailTest" | "credentialSave" | "credentialDelete" | "status" | "reload" | "search" | "preview" | "help", string> = {
   saveAll: "保存为默认设置",
   saveEmail: "保存为默认设置",
   test: "发送测试通知",
   emailTest: "发送邮箱测试",
-  emailEnable: "邮箱通知",
   credentialSave: "QQ 邮箱授权码",
   credentialDelete: "移除已保存的邮箱授权码",
   status: "状态与诊断",
@@ -94,7 +91,7 @@ type MenuRow =
   | { key: string; kind: "qqLink"; label: string }
   /** Read-only information row on the status page. */
   | { key: string; kind: "text"; text: string }
-  | { key: string; kind: "action"; action: "saveAll" | "saveEmail" | "test" | "emailTest" | "emailEnable" | "credentialSave" | "credentialDelete" | "status" | "reload" | "search" | "preview" | "help" };
+  | { key: string; kind: "action"; action: "saveAll" | "saveEmail" | "test" | "emailTest" | "credentialSave" | "credentialDelete" | "status" | "reload" | "search" | "preview" | "help" };
 
 /** Pages that are a list of rows; `id` is stable so a refresh can rebuild the same page. */
 interface MenuPage {
@@ -223,12 +220,8 @@ export class NotifySettingsComponent {
     this.invalidate();
   }
 
-  private startTest(emailOnly = false): void {
-    emailOnly ||= this.view.kind === "menu" && this.view.id === "email-config";
-    const config = this.host.config();
-    const field = this.focusedFieldItem();
-    const ruleKey = field?.rule?.key ?? (this.view.kind === "menu" && this.view.id.startsWith("rule:") ? this.view.id.slice(5) : undefined);
-    const channels = emailOnly ? ["email"] : ruleKey ? resolveChannels(config, config.rules[ruleKey as keyof NotificationConfig["rules"]]) : [...config.channels];
+  private startTest(): void {
+    const { channels, emailOnly } = settingsTestTarget(this.host.config(), this.focusedFieldItem(), this.view.kind === "menu" ? this.view.id : undefined);
     const emailKey = this.emailStateKey();
     const context = this.context;
     this.testRun.start((progress) => emailOnly ? this.host.testEmail(progress) : this.host.test(channels, progress), {
@@ -356,10 +349,9 @@ export class NotifySettingsComponent {
   private hasCredential(): boolean { return this.host.credentialState().state === "configured"; }
 
   private buildEmailPage(): MenuPage {
-    const rows: MenuRow[] = this.items.filter((item) => item.providerId === "email" && item.group === "邮箱")
+    const rows: MenuRow[] = this.items.filter((item) => item.id === "provider:email" || (item.providerId === "email" && item.group === "邮箱"))
       .map((item) => ({ key: `item:${item.id}`, kind: "field" as const, item, label: item.label }));
     rows.push({ key: "action:credential-save", kind: "action", action: "credentialSave" });
-    rows.unshift({ key: "action:email-enable", kind: "action", action: "emailEnable" });
     rows.push({ key: "action:email-test", kind: "action", action: "emailTest" });
     if (this.pending("email").length) rows.push({ key: "action:save-email", kind: "action", action: "saveEmail" });
     rows.push({ key: "qq:settings", kind: "qqLink", label: "获取授权码：QQ 邮箱设置 ↗" });
@@ -504,13 +496,8 @@ export class NotifySettingsComponent {
       this.push({ kind: "secretConfirm", focus: 0 });
       return;
     }
-    if (row.action === "emailEnable") {
-      const item = this.itemById("provider:email");
-      if (item) this.toggleChannel(item);
-      return;
-    }
     if (row.action === "emailTest") {
-      this.startTest(true);
+      this.startTest();
       return;
     }
     if (row.action === "status") {
@@ -593,13 +580,12 @@ export class NotifySettingsComponent {
 
   /**
    * Space: quick toggle. Boolean fields and reminder-rule rows flip in place; a collection or
-   * other complex field uses the same entry as Enter. Other navigation/action rows do nothing,
-   * except the email channel switch, which is also a configuration item.
+   * other complex field uses the same entry as Enter. Other navigation/action rows do nothing.
    */
   private quickToggle(): void {
     if (this.view.kind === "menu") {
       const row = this.view.rows[this.view.focus];
-      if (row?.kind === "field" || row?.kind === "channel" || (row?.kind === "action" && row.action === "emailEnable")) {
+      if (row?.kind === "field" || row?.kind === "channel") {
         this.openFocusedRow();
         return;
       }
@@ -708,7 +694,8 @@ export class NotifySettingsComponent {
     return ["↑↓ 选择，Enter 操作，Esc 返回或关闭设置。",
       "修改立即用于当前对话；保存为默认设置后用于以后对话，其他已打开对话不变。",
       "Ctrl+S 保存当前设置项的已生效值，不保存悬停选项。",
-      "Ctrl+T 发送测试，Ctrl+O 状态与诊断，Ctrl+R 重新读取配置。",
+      "Ctrl+T 测试首页聚焦渠道、邮箱页的邮箱或当前规则；其他位置测试统一接收选择。",
+      "Ctrl+O 状态与诊断，Ctrl+R 重新读取配置。",
       "/ 搜索全部设置，PgUp/PgDn 翻页。",
       "Space 切换开关或应用候选项；规则列表中切换该规则。",
       "✓ 表示当前选择，（默认）表示已保存的默认选择。",
@@ -1022,8 +1009,7 @@ export class NotifySettingsComponent {
     if (row.kind === "action") {
       const scope = row.action === "saveAll" ? "all" : row.action === "saveEmail" ? "email" : undefined;
       const label = scope ? `${ACTION_LABELS[row.action]}  ${this.pending(scope).length} 项更改` : row.action === "credentialSave"
-        ? `${ACTION_LABELS[row.action]}  ${this.hasCredential() ? "已配置" : "未配置"}`
-        : row.action === "emailEnable" ? `${ACTION_LABELS[row.action]}  ${this.host.config().providers.find((entry) => entry.id === "email")?.enabled ? "开启" : "关闭"}` : ACTION_LABELS[row.action];
+        ? `${ACTION_LABELS[row.action]}  ${this.hasCredential() ? "已配置" : "未配置"}` : ACTION_LABELS[row.action];
       return truncateToWidth(`${focus}${label}${mark}`, width);
     }
     if (row.kind === "qqLink") {

@@ -21,7 +21,7 @@ import { evaluateRunOutcome } from "./rules.ts";
 import { validateHttpOptions } from "./providers/http.ts";
 import { buildSettingItems, channelLabel, type SettingItem, type SettingPatch, type SettingValue } from "./settings.ts";
 import { patchOperations, applyOverlay, applySettingPatch, settingSnapshot, settingUserFilePatch, itemRemovals, builtinDefaultValue, clearItemOverride, sessionOverrideValue, pendingPatch, type SessionOverlay } from "./settings-state.ts";
-import { emailActivationBlock, emailActivationIssue, channelActivation, controlStatus, emailReadiness, emailRequirement, emailTestBlockReason, type ChannelActivation } from "./channels.ts";
+import { emailActivationIssue, channelActivation, controlStatus, emailReadiness, emailRequirement, emailTestBlockReason, type ChannelActivation } from "./channels.ts";
 import type { ApiSnapshot, Logger, NotificationConfig, NotificationService, RunOutcome, RunSummary, TestProgress } from "./types.ts";
 
 export type ItemValue = SettingValue | SettingValue[];
@@ -212,21 +212,31 @@ export function createSettingsHost(deps: SettingsDeps): SettingsHost {
     return list;
   };
 
-  const emailActivationMessage = () => emailActivationIssue(deps.config(), deps.credentials.status()) ?? "请先完成邮箱配置。";
-  const checkActivation = (next: NotificationConfig, explicitEmailEnable = false): ActionResult | undefined => {
-    const issue = emailActivationBlock(deps.config(), next, () => deps.credentials.status(), explicitEmailEnable);
-    return issue ? blocked(issue, "email") : undefined;
+  const emailActivationMessage = (config = deps.config()) => emailActivationIssue(config, deps.credentials.status()) ?? "请先完成邮箱配置。";
+  const activation = (config: NotificationConfig, id: string) => channelActivation(config, id,
+    id === "email" && deps.credentials.status().state === "configured", channelProblems(config).map((entry) => entry.id));
+  /** All gate writes share prerequisites; restoration never consumes the plan's routing suggestion. */
+  const checkActivation = (next: NotificationConfig, explicitChannels: readonly string[] = []): ActionResult | undefined => {
+    const current = deps.config();
+    for (const provider of next.providers) {
+      if (!provider.enabled) continue;
+      const opening = !current.providers.find((entry) => entry.id === provider.id)?.enabled || explicitChannels.includes(provider.id);
+      const resumingEmail = provider.id === "email" && !current.enabled && next.enabled;
+      if (!opening && !resumingEmail) continue;
+      if (opening && forcedOff(deps)) return blocked("强制静默期间无法开启通知。");
+      const plan = activation(next, provider.id);
+      if (plan.kind === "blocked") return blocked(plan.message);
+      if (plan.kind === "email") return blocked(emailActivationMessage(next), "email");
+    }
+    return undefined;
   };
   const fromDisk = (overlay = deps.overlay()) => applyOverlay(loadConfig({ agentDir: deps.agentDir() }).config, overlay).config;
 
   const applyPatch = (item: SettingItem, patch: SettingPatch): ActionResult => {
-    if (forcedOff(deps) && patchOperations(patch).some((operation) => operation.kind === "providers" && operation.value)) {
-      return blocked("强制静默期间无法开启通知。");
-    }
     const next = applySettingPatch(deps.overlay(), item, patch);
     const checked = applyOverlay(deps.config(), next);
     if (checked.problems.length) return failed(`未应用${item.label}。请检查配置。`, checked.problems.map((problem) => `${problem.path}: ${problem.message}`));
-    const issue = checkActivation(checked.config, patchOperations(patch).some((op) => op.kind === "providers" && op.id === "email" && op.value));
+    const issue = checkActivation(checked.config, patchOperations(patch).flatMap((op) => op.kind === "providers" && op.value ? [op.id] : []));
     if (issue) return issue;
     deps.setOverlay(next);
     return { ok: true, message: "" };
@@ -262,12 +272,12 @@ export function createSettingsHost(deps: SettingsDeps): SettingsHost {
       return applyPatch(item, item.patch(value));
     },
 
-    channelActivation: (id) => channelActivation(deps.config(), id, deps.credentials.status().state === "configured", channelProblems(deps.config()).map((entry) => entry.id)),
+    channelActivation: (id) => activation(deps.config(), id),
 
     enableChannel(id) {
       // Confirmation is not authority: recheck current prerequisites before committing.
       const current = deps.config();
-      const plan = channelActivation(current, id, deps.credentials.status().state === "configured", channelProblems(current).map((entry) => entry.id));
+      const plan = activation(current, id);
       if (plan.kind === "blocked") return blocked(plan.message);
       if (plan.kind === "email") return blocked(emailActivationMessage(), "email");
       const item = buildSettingItems(current).find((entry) => entry.providerId === id && !entry.providerOptionPath)!;
@@ -360,7 +370,11 @@ export function createSettingsHost(deps: SettingsDeps): SettingsHost {
     /** “沿用以后默认”: drop only this conversation's override, so the user default applies again. */
     followUserDefault(item) {
       const next = clearItemOverride(deps.overlay(), item);
-      const issue = checkActivation(fromDisk(next));
+      const load = loadConfig({ agentDir: deps.agentDir() });
+      const checked = applyOverlay(load.config, next);
+      const problems = [...load.errors, ...checked.problems];
+      if (problems.length) return failed(`未恢复${item.label}。当前对话修改仍保留。`, problems.map((problem) => `${problem.path}: ${problem.message}`));
+      const issue = checkActivation(checked.config);
       if (issue) return issue;
       deps.setOverlay(next);
       deps.log.record({ event: "notify_override_cleared", item: item.id });
@@ -369,12 +383,16 @@ export function createSettingsHost(deps: SettingsDeps): SettingsHost {
 
     /** “恢复此项内置默认”: clear the user default and the conversation override for one item. */
     restoreBuiltinDefault(item) {
-      // Restoring routing cannot alter gates. Built-in email gate is off.
-      if (item.id === "enabled" && builtinDefaultValue(item) === true) {
-        const issue = checkActivation({ ...deps.config(), enabled: true });
-        if (issue) return issue;
-      }
-      const result = deleteUserDefault(deps.agentDir(), itemRemovals(item, deps.config(), deps.overlay()));
+      const next = clearItemOverride(deps.overlay(), item);
+      let issue: ActionResult | undefined;
+      // Validate the actual post-removal defaults inside the file transaction, before either layer changes.
+      const result = deleteUserDefault(deps.agentDir(), itemRemovals(item, deps.config(), deps.overlay()), (base) => {
+        const checked = applyOverlay(base, next);
+        if (checked.problems.length) return checked.problems;
+        issue = checkActivation(checked.config);
+        return issue ? [{ path: item.userPath, message: issue.message }] : [];
+      });
+      if (issue) return issue;
       if (!result.ok) {
         const problems = result.problems.map((problem) => sanitizeError(`${problem.path}: ${problem.message}`));
         deps.log.record({ event: "notify_default_delete_failed", item: item.id, problems });
@@ -382,7 +400,7 @@ export function createSettingsHost(deps: SettingsDeps): SettingsHost {
       }
       // Only after the file is clean does the conversation override go away: a failed write must not
       // silently drop this conversation's value.
-      deps.setOverlay(clearItemOverride(deps.overlay(), item));
+      deps.setOverlay(next);
       deps.log.record({ event: "notify_default_removed", item: item.id, path: item.userPath });
       if (item.id === "enabled" && forcedOff(deps) && builtinDefaultValue(item) === true) {
         // The default really is back to on, but the session-level silence still wins; never bypass it.

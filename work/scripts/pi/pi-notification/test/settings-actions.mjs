@@ -152,6 +152,138 @@ try {
     assert.deepEqual(h.current().rules, routes);
     assert.doesNotMatch(JSON.stringify(h.overlay()) + fs.readFileSync(h.file, "utf8"), /fake-new/);
   });
+  step("Following email defaults rejects missing addresses and invalid credentials without changing either layer", () => {
+    for (const missing of ["from", "to", "credential"]) {
+      const options = { from: "fake@qq.com", to: ["reader@example.com"] };
+      if (missing === "from") options.from = "";
+      if (missing === "to") options.to = [];
+      const credentials = createQqCredentials({ status: () => ({ available: true }), get: () => "fake-only", set() {}, delete() {} },
+        () => missing === "credential" ? "invalid\ncode" : undefined);
+      const h = harness({ channels: [], providers: [{ id: "email", type: "email", enabled: true, options }],
+        rules: { runFailed: { channels: ["email"], enabled: false } } }, credentials);
+      const item = h.item("provider:email");
+      assert.equal(h.host.setValue(item, false).ok, true);
+      const before = h.overlay(), file = fs.readFileSync(h.file, "utf8"), commits = h.commits();
+      const result = h.host.followUserDefault(item);
+      assert.equal(result.ok, false);
+      assert.equal(result.feedback.next, "email");
+      assert.match(result.message, missing === "from" ? /发件/ : missing === "to" ? /收件/ : /授权码无效/);
+      assert.deepEqual(h.overlay(), before);
+      assert.equal(h.commits(), commits);
+      assert.equal(fs.readFileSync(h.file, "utf8"), file);
+      assert.doesNotMatch(JSON.stringify(result), /invalid|code/);
+    }
+  });
+  step("All channel writes share availability checks; a/d rejection leaves defaults, overlay and routes intact", () => {
+    for (const provider of [{ id: "hook", type: "webhook", options: {} }, { id: "custom", type: "unregistered", options: {} }]) {
+      const h = harness({ channels: [], providers: [{ ...provider, enabled: true }], rules: { runFailed: { channels: [provider.id] } } });
+      const item = h.item(`provider:${provider.id}`);
+      assert.equal(h.host.setValue(item, false).ok, true);
+      const before = h.overlay(), file = fs.readFileSync(h.file, "utf8"), commits = h.commits();
+      assert.equal(h.host.channelActivation(provider.id).kind, "blocked");
+      for (const result of [h.host.setValue(item, true), h.host.followUserDefault(item), h.host.restoreBuiltinDefault(item)]) {
+        assert.equal(result.ok, false); assert.match(result.message, /不可用/);
+      }
+      assert.deepEqual(h.overlay(), before); assert.equal(h.commits(), commits);
+      assert.equal(fs.readFileSync(h.file, "utf8"), file);
+      assert.deepEqual(h.current().channels, []);
+      assert.deepEqual(h.current().rules.runFailed.channels, [provider.id]);
+    }
+  });
+  step("a follows the latest target, rechecks changed prerequisites and clears only the selected gate", () => {
+    let code = "fake-only";
+    const credentials = createQqCredentials({ status: () => ({ available: true }), get: () => code, set() {}, delete() {} }, () => undefined);
+    const raw = { channels: [], providers: [{ id: "email", type: "email", enabled: true,
+      options: { from: "fake@qq.com", to: ["reader@example.com"] } }], rules: { runFailed: { channels: ["email"], enabled: false } } };
+    const h = harness(raw, credentials), item = h.item("provider:email");
+    h.host.setValue(h.item("content.includeCost"), false);
+    h.host.setValue(item, false);
+    const before = h.overlay(), file = fs.readFileSync(h.file, "utf8");
+    assert.equal(h.host.channelActivation("email").kind, "ready");
+    code = undefined;
+    assert.equal(h.host.followUserDefault(item).ok, false);
+    assert.deepEqual(h.overlay(), before);
+    code = "fake-only";
+    raw.providers[0].options.to = [];
+    fs.writeFileSync(h.file, JSON.stringify(raw));
+    assert.match(h.host.followUserDefault(item).message, /收件/);
+    assert.deepEqual(h.overlay(), before);
+    fs.writeFileSync(h.file, file);
+    assert.equal(h.host.followUserDefault(item).ok, true);
+    const expected = structuredClone(before); delete expected.providers.email;
+    assert.deepEqual(h.overlay(), expected);
+    assert.deepEqual(h.current().channels, []); assert.deepEqual(h.current().rules.runFailed.channels, ["email"]);
+    assert.equal(h.current().rules.runFailed.enabled, false);
+    assert.equal(fs.readFileSync(h.file, "utf8"), file);
+    // An already-open gate is not an activation, even if credentials have disappeared.
+    code = undefined;
+    assert.equal(h.host.followUserDefault(item).ok, true);
+    // A changed default now closes the gate. No credential lookup is needed.
+    code = "fake-only";
+    assert.equal(h.host.setValue(item, true).ok, true);
+    code = undefined;
+    raw.providers[0].enabled = false;
+    fs.writeFileSync(h.file, JSON.stringify(raw));
+    credentials.status = () => { throw new Error("Closing must not inspect credentials"); };
+    assert.equal(h.host.followUserDefault(item).ok, true);
+    assert.equal(h.current().providers.find((p) => p.id === "email").enabled, false);
+  });
+  step("d validates the real post-delete gate and keeps sparse persistence and unrelated overlay semantics", () => {
+    const h = harness({ channels: [], providers: [{ id: "custom", type: "debug", enabled: false, options: { label: "keep" } }],
+      content: { includeCost: false }, rules: { runFailed: { channels: [], enabled: false } } });
+    const item = h.item("provider:custom");
+    h.host.setValue(item, false); h.host.setValue(h.item("content.includeDuration"), false);
+    const before = h.overlay();
+    assert.equal(h.host.restoreBuiltinDefault(item).ok, true);
+    const expected = structuredClone(before); delete expected.providers.custom;
+    assert.deepEqual(h.overlay(), expected);
+    assert.deepEqual(h.host.userRaw(), { channels: [], providers: [{ id: "custom", type: "debug", options: { label: "keep" } }],
+      content: { includeCost: false }, rules: { runFailed: { channels: [], enabled: false } } });
+    assert.equal(h.current().providers[0].enabled, true);
+    assert.deepEqual(h.current().channels, []); assert.deepEqual(h.current().rules.runFailed.channels, []);
+    const silenced = harness({ providers: [{ id: "terminal", type: "terminal", enabled: false }] });
+    silenced.host.setValue(silenced.item("provider:terminal"), false); silenced.silence();
+    const file = fs.readFileSync(silenced.file, "utf8");
+    assert.equal(silenced.host.followUserDefault(silenced.item("provider:terminal")).ok, true, "default remains off");
+    const overlay = silenced.overlay();
+    assert.equal(silenced.host.restoreBuiltinDefault(silenced.item("provider:terminal")).ok, false);
+    assert.deepEqual(silenced.overlay(), overlay);
+    assert.equal(fs.readFileSync(silenced.file, "utf8"), file);
+    assert.equal(silenced.current().providers[0].enabled, false);
+    // Restoring the master default keeps its existing persistence semantics under silence.
+    const master = harness({ enabled: false }); master.silence();
+    assert.equal(master.host.restoreBuiltinDefault(master.item("enabled")).ok, true);
+    assert.equal(master.host.userRaw().enabled, undefined);
+  });
+  step("Restoration checks only opening gates, even when d would leave the sparse file unchanged", () => {
+    const credentials = createQqCredentials({ status() { throw new Error("Unrelated or closing gates must not inspect credentials"); },
+      get() {}, set() {}, delete() {} }, () => undefined);
+    const h = harness({ providers: [{ id: "custom", type: "unregistered" }] }, credentials), item = h.item("provider:custom");
+    assert.equal(h.host.followUserDefault(item).ok, true, "already-open gate needs no activation check");
+    assert.equal(h.host.restoreBuiltinDefault(item).ok, true, "same state, no disk write needed");
+    assert.equal(h.host.setValue(item, false).ok, true);
+    const overlay = h.overlay(), file = fs.readFileSync(h.file, "utf8");
+    assert.equal(h.host.restoreBuiltinDefault(item).ok, false, "preflight still runs if the default is already absent");
+    assert.deepEqual(h.overlay(), overlay); assert.equal(fs.readFileSync(h.file, "utf8"), file);
+    const email = harness({ providers: [{ id: "email", type: "email", enabled: true }] }, credentials);
+    assert.equal(email.host.restoreBuiltinDefault(email.item("provider:email")).ok, true, "built-in email default closes the gate");
+    assert.equal(email.current().providers.find((p) => p.id === "email").enabled, false);
+    const terminal = harness({ providers: [{ id: "terminal", type: "terminal", enabled: false }] }, credentials);
+    assert.equal(terminal.host.restoreBuiltinDefault(terminal.item("provider:terminal")).ok, true, "other channels do not read email credentials");
+  });
+  step("Email gate single-save snapshots no addresses, credentials, routing or unrelated session values", () => {
+    const credentials = createQqCredentials({ status: () => ({ available: true }), get: () => "fake-save-only", set() {}, delete() {} }, () => undefined);
+    const h = harness({}, credentials);
+    for (const [id, value] of [["provider:email:from", "fake@qq.com"], ["provider:email:to", ["reader@example.com"]],
+      ["provider:email", true], ["channels", ["email"]], ["rules.runFailed.channels", []], ["content.includeCost", false]]) {
+      assert.equal(h.host.setValue(h.item(id), value).ok, true);
+    }
+    const overlay = h.overlay();
+    assert.equal(h.host.saveDefault(h.item("provider:email")).ok, true);
+    assert.deepEqual(h.host.userRaw(), { providers: [{ id: "email", type: "email", enabled: true }] });
+    assert.deepEqual(h.overlay(), overlay);
+    assert.doesNotMatch(fs.readFileSync(h.file, "utf8"), /fake-save-only|fake@qq|reader|channels|content/);
+  });
   step("The same credential core serves a settings host and a plain non-Pi host", () => {
     let value;
     const credentials = createQqCredentials({ status: () => ({ available: true }), get: () => value, set: (next) => { value = next; }, delete: () => { value = undefined; } }, () => undefined);
@@ -170,6 +302,7 @@ try {
     fs.writeFileSync(h.file, "{broken");
     assert.equal(h.host.saveDefault(item).ok, false);
     assert.equal(h.host.saveChanges([item]).ok, false);
+    assert.equal(h.host.followUserDefault(item).ok, false);
     assert.equal(h.host.restoreBuiltinDefault(item).ok, false);
     assert.equal(fs.readFileSync(h.file, "utf8"), "{broken");
     assert.deepEqual(h.overlay(), overlay);

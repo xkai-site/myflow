@@ -642,7 +642,8 @@ export function writeUserDefault(agentDir: string, patch: ConfigPatch | ((raw: C
 }
 
 /** Read once, build against the latest sparse file, validate everything, then rename once. */
-function updateUserDefaults(agentDir: string, transform: (raw: ConfigPatch) => ConfigPatch, skipUnchanged = false): ConfigWriteResult {
+function updateUserDefaults(agentDir: string, transform: (raw: ConfigPatch) => ConfigPatch, skipUnchanged = false,
+  validate?: (config: NotificationConfig) => ConfigProblem[]): ConfigWriteResult {
   const file = userConfigPath(agentDir);
   const current = readUserConfigRaw(agentDir);
   if (!current.ok) return { ok: false, problems: current.problems };
@@ -652,6 +653,8 @@ function updateUserDefaults(agentDir: string, transform: (raw: ConfigPatch) => C
   catch { return { ok: false, problems: [{ path: file, message: "无法构建配置事务" }] }; }
   const merged = mergeConfig(defaultConfig(), sparse, file);
   if (merged.errors.length > 0) return { ok: false, problems: merged.errors };
+  const problems = validate?.(merged.config) ?? [];
+  if (problems.length) return { ok: false, problems };
   if (!skipUnchanged || JSON.stringify(base) !== JSON.stringify(sparse)) {
     const written = atomicWriteConfig(agentDir, `${JSON.stringify(sparse, null, 2)}\n`);
     if (!written.ok) return written;
@@ -669,12 +672,14 @@ function updateUserDefaults(agentDir: string, transform: (raw: ConfigPatch) => C
  */
 export type ConfigRemoval = { kind: "path"; path: string } | { kind: "provider"; id: string } | { kind: "providerOption"; id: string; optionPath: string };
 
-export function deleteUserDefault(agentDir: string, removal: ConfigRemoval | readonly ConfigRemoval[]): ConfigWriteResult {
+/** Optional application preflight sees the exact candidate before the atomic write. */
+export function deleteUserDefault(agentDir: string, removal: ConfigRemoval | readonly ConfigRemoval[],
+  validate?: (config: NotificationConfig) => ConfigProblem[]): ConfigWriteResult {
   const removals = Array.isArray(removal) ? removal : [removal as ConfigRemoval];
   return updateUserDefaults(agentDir, (raw) => removals.reduce((sparse, entry) => entry.kind === "path"
     ? removePath(sparse, entry.path)
     : entry.kind === "provider" ? removeArrayEntryField(sparse, "providers", entry.id, "enabled")
-      : removeProviderOption(sparse, entry.id, entry.optionPath), raw), true);
+      : removeProviderOption(sparse, entry.id, entry.optionPath), raw), true, validate);
 }
 
 /**

@@ -6,6 +6,7 @@ import { buildSettingItems } from "../src/settings.ts";
 import { candidateIsCurrent, candidateIsDefault, initialCandidateFocus, settingCandidates } from "../src/ui-candidates.ts";
 import { emailTestKey, SettingsTestRun } from "../src/ui-test.ts";
 import { channelState } from "../src/channels.ts";
+import { settingsTestTarget } from "../src/ui-model.ts";
 
 let passed = 0;
 function step(name, run) { run(); passed++; console.log(`  ✓ ${name}`); }
@@ -76,6 +77,22 @@ step("Disabled channels show only their switch state; enabled channels expose mi
     config.providers.find((p) => p.id === "terminal").enabled = enabled;
     assert.equal(channelState(config, "terminal", true, "fake"), enabled ? "开启（不可用）" : "关闭");
   }
+});
+step("Test target resolution follows focused home channels, email page and rules, leaving config unchanged", () => {
+  const config = mergeConfig(defaultConfig(), { channels: ["terminal", "email", "hook"], providers: [
+    { id: "terminal", type: "terminal" }, { id: "email", type: "email" }, { id: "hook", type: "debug" }],
+    rules: { runFailed: { channels: ["hook"] }, runCompleted: { channels: [] } } }, "test").config;
+  const before = structuredClone(config);
+  for (const [page, id, channels, emailOnly] of [
+    ["home", "provider:terminal", ["terminal"], false], ["home", "provider:email", ["email"], true],
+    ["home", "provider:hook", ["hook"], false], ["email-config", "provider:email:from", ["email"], true],
+    ["email-config", undefined, ["email"], true], ["home", undefined, config.channels, false],
+    ["home", "enabled", config.channels, false], ["category:providers", "provider:email", config.channels, false],
+    ["rule:runFailed", undefined, ["hook"], false], ["rule:runCompleted", undefined, [], false],
+    ["rule:waitingForUser", undefined, config.channels, false], [undefined, "rules.runFailed.level", ["hook"], false],
+    [undefined, "provider:email", config.channels, false], ["status", undefined, config.channels, false],
+  ]) assert.deepEqual(settingsTestTarget(config, id ? item(config, id) : undefined, page), { channels, emailOnly });
+  assert.deepEqual(config, before);
 });
 step("Test result aggregation preserves partial results and redacts full diagnostics on cancellation", () => {
   const h = observer(); h.start();
