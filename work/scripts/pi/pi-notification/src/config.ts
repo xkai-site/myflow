@@ -34,6 +34,13 @@ import type {
 
 export const CONFIG_VERSION = 1;
 
+/** External config/session boundary: credential-bearing fields cannot be persisted as settings. */
+export function containsCredentialKey(value: unknown): boolean {
+  return isPlainObject(value)
+    ? Object.entries(value).some(([key, nested]) => /password|auth.?code|credential|secret/i.test(key) || containsCredentialKey(nested))
+    : Array.isArray(value) ? value.some(containsCredentialKey) : false;
+}
+
 const LEVELS: NotifyLevel[] = ["info", "warning", "error"];
 
 /** Rule name to config key, using camelCase keys in the file. */
@@ -346,12 +353,9 @@ function checkProviders(
       return;
     }
     if (id === "email" && type === "email" && isPlainObject(options)) {
-      const containsSensitiveKey = (value: unknown): boolean => isPlainObject(value)
-        ? Object.entries(value).some(([key, nested]) => /password|auth.?code|credential|secret/i.test(key) || containsSensitiveKey(nested))
-        : Array.isArray(value) ? value.some(containsSensitiveKey) : false;
-      const sensitive = containsSensitiveKey(options);
+      const sensitive = containsCredentialKey(options);
       if (sensitive) {
-        errors.push({ path: `${fieldPath}.options`, message: "邮箱凭据禁止明文配置；请在 UI 使用 Windows 凭据管理器，或设置授权码环境变量" });
+        errors.push({ path: `${fieldPath}.options`, message: "邮箱凭据禁止明文配置；请使用系统安全存储或授权码环境注入" });
         return;
       }
       const checkString = (key: string, max: number, required = false): void => {

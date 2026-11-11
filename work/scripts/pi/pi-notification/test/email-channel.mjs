@@ -1,41 +1,22 @@
+import "./fixtures/isolate-keyring.cjs";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 
-// Provider validation must never read the operator's real Windows credential store.
 const require = createRequire(import.meta.url);
-const keyringPath = require.resolve("@napi-rs/keyring");
-const previousKeyring = require.cache[keyringPath];
-require.cache[keyringPath] = { id: keyringPath, filename: keyringPath, loaded: true, exports: {
-  Entry: class {
-    getPassword() { return null; }
-    setPassword() { throw new Error("Unexpected system credential write in test"); }
-    deletePassword() { throw new Error("Unexpected system credential deletion in test"); }
-  },
-} };
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const mail = async (name) => import(pathToFileURL(path.join(root, "src", name)).href);
 const { createQqSmtpSender, QQ_AUTH_ENV } = await mail("mail/smtp.ts");
-const { resolveQqCredential, saveQqCredential, deleteQqCredential } = await mail("mail/credentials.ts");
+const { createQqCredentials } = await mail("mail/credentials.ts");
 let stored;
-const vault = { get: () => stored, set: (value) => { stored = value; }, delete: () => { stored = undefined; } };
-assert.equal(resolveQqCredential({ [QQ_AUTH_ENV]: "legacy" }, vault).source, "environment");
-assert.equal(saveQqCredential("vault-code", vault), true);
-assert.deepEqual(resolveQqCredential({ [QQ_AUTH_ENV]: "legacy" }, vault), { source: "vault", value: "vault-code" });
-assert.equal(saveQqCredential("bad\ncode", vault), false);
-assert.equal(stored, "vault-code");
-assert.equal(deleteQqCredential(vault), true);
-assert.equal(resolveQqCredential({}, vault).source, "missing");
-assert.equal(resolveQqCredential({ [QQ_AUTH_ENV]: "legacy" }, { get() { throw new Error("secret in OS error"); } }).source, "environment");
-assert.equal(saveQqCredential("test", { set() { throw new Error("secret in OS error"); }, get() { return undefined; } }), false);
-assert.equal(saveQqCredential("test", { set() {}, get() { return "different"; } }), false);
+const vault = { status: () => ({ available: true }), get: () => stored, set: (value) => { stored = value; }, delete: () => { stored = undefined; } };
+const credentials = createQqCredentials(vault, () => process.env[QQ_AUTH_ENV]);
 const { createEmailNotifier } = await mail("providers/email.ts");
 const logLines = [];
 const logger = { log: (_level, text, meta) => logLines.push({ text, meta }), record() {} };
 
-const old = process.env[QQ_AUTH_ENV];
 process.env[QQ_AUTH_ENV] = "test-auth-value";
 try {
   let received;
@@ -47,7 +28,7 @@ try {
     return [{ address: "203.0.113.10", family: 4 }];
   };
   const sender = createQqSmtpSender(options, {
-    env: process.env, credentialStore: vault, lookup: smtpLookup,
+    credentials, lookup: smtpLookup,
     transportFactory(value) {
       received = value;
       return { async sendMail(message) { assert.equal(message.to, "a@example.org"); return { accepted: [message.to], rejected: [] }; }, close() { closed += 1; } };
@@ -83,7 +64,7 @@ try {
     }, close() { defaultClosed++; } };
   };
   try {
-    const defaultSender = createQqSmtpSender(options, { env: process.env, credentialStore: vault, lookup: smtpLookup });
+    const defaultSender = createQqSmtpSender(options, { credentials, lookup: smtpLookup });
     await defaultSender.send(message, new AbortController().signal);
     assert.equal(defaultOptions.auth.user, "sender@qq.com");
     assert.equal(defaultOptions.auth.pass, "test-auth-value");
@@ -97,7 +78,7 @@ try {
 
   let createdAfterDnsFailure = false;
   const dnsFailure = createQqSmtpSender(options, {
-    env: process.env, credentialStore: vault,
+    credentials,
     async lookup() { throw new Error("private DNS diagnostic"); },
     transportFactory() { createdAfterDnsFailure = true; throw new Error("must not create transport"); },
   });
@@ -109,7 +90,7 @@ try {
   assert.equal(createdAfterDnsFailure, false);
 
   const dnsTimeout = createQqSmtpSender(options, {
-    env: process.env, credentialStore: vault, timeoutMs: 250,
+    credentials, timeoutMs: 250,
     lookup: () => new Promise(() => {}),
     transportFactory() { createdAfterDnsFailure = true; throw new Error("must not create transport"); },
   });
@@ -119,7 +100,7 @@ try {
   const dnsAbort = new AbortController();
   let lookupStartedAfterAbort = 0;
   const cancelledLookup = createQqSmtpSender(options, {
-    env: process.env, credentialStore: vault, timeoutMs: 10000,
+    credentials, timeoutMs: 10000,
     lookup: () => { lookupStartedAfterAbort += 1; return new Promise(() => {}); },
     transportFactory() { createdAfterDnsFailure = true; throw new Error("must not create transport"); },
   });
@@ -241,22 +222,21 @@ try {
     assert.equal(messages.length, 1, "双渠道仍保持同事件去重");
   } finally { await service.dispose(); }
 
-  const noCred = createQqSmtpSender(options, { env: {}, credentialStore: vault });
+  const noCred = createQqSmtpSender(options, { credentials: createQqCredentials(vault, () => undefined) });
   assert.match(noCred.validate(), new RegExp(QQ_AUTH_ENV));
-  saveQqCredential("vault-code", vault);
-  const primary = createQqSmtpSender(options, { env: { [QQ_AUTH_ENV]: "legacy" }, credentialStore: vault, lookup: smtpLookup,
+  assert.equal(credentials.save("vault-code").ok, true);
+  const primary = createQqSmtpSender(options, { credentials, lookup: smtpLookup,
     transportFactory(transportOptions) {
-      assert.equal(transportOptions.auth.pass, "vault-code");
+      assert.equal(transportOptions.auth.pass, "test-auth-value", "explicit injection wins over stored code");
       assert.equal(transportOptions.host, "203.0.113.10");
       assert.equal(transportOptions.tls.servername, "smtp.qq.com");
       return { async sendMail(message) { return { accepted: [message.to], rejected: [] }; } };
     },
   });
   await primary.send(message, new AbortController().signal);
-  deleteQqCredential(vault);
+  assert.equal(credentials.delete().ok, true);
   assert.match(noCred.validate(), new RegExp(QQ_AUTH_ENV));
 } finally {
-  if (old === undefined) delete process.env[QQ_AUTH_ENV]; else process.env[QQ_AUTH_ENV] = old;
-  if (previousKeyring) require.cache[keyringPath] = previousKeyring; else delete require.cache[keyringPath];
+  delete process.env[QQ_AUTH_ENV];
 }
 console.log("邮箱 SMTP sender/provider 离线回归通过");

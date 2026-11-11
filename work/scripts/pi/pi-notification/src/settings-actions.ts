@@ -3,11 +3,11 @@
  * No terminal component or SDK context: callers supply the reload operation.
  */
 
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
 import {
   describeConfig,
+  loadConfig,
   isDisabledByEnv,
   userConfigPath,
   writeUserDefault,
@@ -15,13 +15,13 @@ import {
   type ConfigLoadResult,
 } from "./config.ts";
 import { sanitize, sanitizeError } from "./log.ts";
-import { resolveQqCredential, saveQqCredential, deleteQqCredential } from "./mail/credentials.ts";
+import { QQ_MAIL_URL, type QqCredentials, type CredentialStatus } from "./mail/credentials.ts";
 import { createDefaultTerminalIo, selectTerminalChannel } from "./providers/terminal.ts";
 import { evaluateRunOutcome } from "./rules.ts";
 import { validateHttpOptions } from "./providers/http.ts";
 import { buildSettingItems, channelLabel, type SettingItem, type SettingPatch, type SettingValue } from "./settings.ts";
 import { patchOperations, applyOverlay, applySettingPatch, settingSnapshot, settingUserFilePatch, itemRemovals, builtinDefaultValue, clearItemOverride, sessionOverrideValue, pendingPatch, type SessionOverlay } from "./settings-state.ts";
-import { channelActivation, controlStatus, emailReadiness, emailRequirement, emailTestBlockReason, type ChannelActivation } from "./channels.ts";
+import { emailActivationBlock, emailActivationIssue, channelActivation, controlStatus, emailReadiness, emailRequirement, emailTestBlockReason, type ChannelActivation } from "./channels.ts";
 import type { ApiSnapshot, Logger, NotificationConfig, NotificationService, RunOutcome, RunSummary, TestProgress } from "./types.ts";
 
 export type ItemValue = SettingValue | SettingValue[];
@@ -47,7 +47,7 @@ export interface SettingsHost {
   test(channels?: string[], onProgress?: (progress: TestProgress) => void): SettingsTestResult;
   testEmail(onProgress?: (progress: TestProgress) => void): SettingsTestResult;
   credentialStatus(): string;
-  canManageCredentials(): boolean;
+  credentialState(): CredentialStatus;
   saveCredential(value: string): ActionResult;
   deleteCredential(): ActionResult;
   openQqSettings(): ActionResult | Promise<ActionResult>;
@@ -58,7 +58,7 @@ export interface SettingsHost {
   itemScope(item: SettingItem): string[];
   preview(): { ok: boolean; message: string; lines: string[] };
 }
-export const QQ_MAIL_URL = "https://mail.qq.com/";
+export { QQ_MAIL_URL } from "./mail/credentials.ts";
 export function testBlockMessage(reason: string): string {
   const messages: Record<string, string> = {
     silenced: "未发送：当前对话已强制静默，无法开启通知。", disabled: "未发送：请先开启通知总开关。",
@@ -72,6 +72,9 @@ export function testBlockMessage(reason: string): string {
 }
 
 export interface SettingsDeps {
+  credentials: QqCredentials;
+  /** Optional browser/link capability belongs to the host, never to the mail core. */
+  openUrl?(url: string): Promise<boolean>;
   log: Logger;
   config(): NotificationConfig;
   configLoad(): ConfigLoadResult;
@@ -111,15 +114,16 @@ function formatStatus(deps: SettingsDeps): string {
   const selection = selectTerminalChannel(createDefaultTerminalIo().environment());
 
   const email = config.providers.find((provider) => provider.id === "email");
-  const emailConfigured = email?.enabled === true && emailRequirement(email, true) === undefined;
+  const credential = deps.credentials.status();
+  const emailConfigured = email?.enabled === true && emailRequirement(email, credential.state === "configured") === undefined;
   const lines: string[] = [];
   const effective = controlStatus(config, { restrictions: forcedOff(deps) ? [{ label: "强制静默", reason: "" }] : [],
-    hasCredential: resolveQqCredential().source !== "missing", configError: load.errors.length > 0, degraded: load.degraded,
+    hasCredential: credential.state === "configured", configError: load.errors.length > 0, degraded: load.degraded,
     quiet: deps.service().isQuietHours(), terminalIssue: selection.channel === "none" ? selection.reason ?? "不可用" : undefined,
     channelIssues: channelProblems(config).map((entry) => entry.id) });
   lines.push(`pi-notification: ${effective.label}`);
   if (forcedOff(deps)) lines.push(`  限制来源：${[deps.isSilenced() ? "--no-notify" : "", isDisabledByEnv() ? "PI_NOTIFY_DISABLE" : ""].filter(Boolean).join("、")}`);
-  const readiness = emailReadiness(config, resolveQqCredential().source !== "missing");
+  const readiness = emailReadiness(config, credential);
   lines.push(`  邮箱：${readiness.label}；${readiness.usedBy} 类提醒使用邮箱。`);
   lines.push("  诊断详情：");
   for (const issue of channelProblems(config)) lines.push(`  ${channelLabel(issue.id)}：${issue.reason}`);
@@ -138,8 +142,7 @@ function formatStatus(deps: SettingsDeps): string {
   const quiet = config.quietHours;
   lines.push(`  静默时段: ${quiet.start}–${quiet.end}（${!quiet.enabled ? "未开启" : deps.service().isQuietHours() ? "当前生效" : "当前未生效"}；本地时间；例外 ${quiet.exceptLevels.join(",") || "无"}）`);  lines.push(`  配置来源: ${load.sources.join(" → ")}${load.degraded ? "（已降级）" : ""}`);
   lines.push(`  用户默认: ${userConfigPath(deps.agentDir())}（未单独保存的项使用内置默认）`);
-  const credentialSource = resolveQqCredential().source;
-  const credentialStatus = credentialSource === "vault" ? "Windows 凭据管理器已设置" : credentialSource === "environment" ? "环境变量已设置（回退）" : "未设置";
+  const credentialStatus = credential.message;
   lines.push(`  终端机制: ${selection.channel}${selection.reason ? `（${selection.reason}）` : ""}；邮箱 ${email?.enabled ? (emailConfigured ? "已启用且参数齐全" : "已启用但不可用") : "已关闭"}；QQ SMTP 授权码：${credentialStatus}`);
   lines.push(
     `  投递统计: 成功 ${snapshot.delivered} / 失败 ${snapshot.failed} / 跳过 ${snapshot.skipped} / 去重 ${snapshot.deduped}`
@@ -209,6 +212,13 @@ export function createSettingsHost(deps: SettingsDeps): SettingsHost {
     return list;
   };
 
+  const emailActivationMessage = () => emailActivationIssue(deps.config(), deps.credentials.status()) ?? "请先完成邮箱配置。";
+  const checkActivation = (next: NotificationConfig, explicitEmailEnable = false): ActionResult | undefined => {
+    const issue = emailActivationBlock(deps.config(), next, () => deps.credentials.status(), explicitEmailEnable);
+    return issue ? blocked(issue, "email") : undefined;
+  };
+  const fromDisk = (overlay = deps.overlay()) => applyOverlay(loadConfig({ agentDir: deps.agentDir() }).config, overlay).config;
+
   const applyPatch = (item: SettingItem, patch: SettingPatch): ActionResult => {
     if (forcedOff(deps) && patchOperations(patch).some((operation) => operation.kind === "providers" && operation.value)) {
       return blocked("强制静默期间无法开启通知。");
@@ -216,6 +226,8 @@ export function createSettingsHost(deps: SettingsDeps): SettingsHost {
     const next = applySettingPatch(deps.overlay(), item, patch);
     const checked = applyOverlay(deps.config(), next);
     if (checked.problems.length) return failed(`未应用${item.label}。请检查配置。`, checked.problems.map((problem) => `${problem.path}: ${problem.message}`));
+    const issue = checkActivation(checked.config, patchOperations(patch).some((op) => op.kind === "providers" && op.id === "email" && op.value));
+    if (issue) return issue;
     deps.setOverlay(next);
     return { ok: true, message: "" };
   };
@@ -250,14 +262,14 @@ export function createSettingsHost(deps: SettingsDeps): SettingsHost {
       return applyPatch(item, item.patch(value));
     },
 
-    channelActivation: (id) => channelActivation(deps.config(), id, resolveQqCredential().source !== "missing", channelProblems(deps.config()).map((entry) => entry.id)),
+    channelActivation: (id) => channelActivation(deps.config(), id, deps.credentials.status().state === "configured", channelProblems(deps.config()).map((entry) => entry.id)),
 
     enableChannel(id) {
       // Confirmation is not authority: recheck current prerequisites before committing.
       const current = deps.config();
-      const plan = channelActivation(current, id, resolveQqCredential().source !== "missing", channelProblems(current).map((entry) => entry.id));
+      const plan = channelActivation(current, id, deps.credentials.status().state === "configured", channelProblems(current).map((entry) => entry.id));
       if (plan.kind === "blocked") return blocked(plan.message);
-      if (plan.kind === "email") return blocked("请先完成邮箱配置。", "email");
+      if (plan.kind === "email") return blocked(emailActivationMessage(), "email");
       const item = buildSettingItems(current).find((entry) => entry.providerId === id && !entry.providerOptionPath)!;
       return applyPatch(item, { kind: "compound", operations: [
         { kind: "providers", id, value: true },
@@ -301,46 +313,33 @@ export function createSettingsHost(deps: SettingsDeps): SettingsHost {
 
     testEmail(onProgress) {
       if (forcedOff(deps)) return blocked(testBlockMessage("silenced"));
-      const reason = emailTestBlockReason(deps.config(), resolveQqCredential().source !== "missing");
+      const status = deps.credentials.status();
+      const reason = status.state !== "configured" ? emailActivationMessage() : emailTestBlockReason(deps.config(), true);
       if (reason) return blocked(`邮箱测试未发送：${reason}`, !deps.config().enabled ? "home" : "email");
       return sendTest(["email"], onProgress);
     },
 
-    canManageCredentials: () => process.platform === "win32",
-
-    credentialStatus() {
-      const source = resolveQqCredential().source;
-      return source === "vault" ? "已安全保存" : source === "environment" ? "由启动环境提供" : "未设置";
-    },
+    credentialState: () => deps.credentials.status(),
+    credentialStatus: () => deps.credentials.status().message,
 
     saveCredential(value) {
-      const ok = saveQqCredential(value);
-      deps.log.record({ event: "notify_qq_credential_saved", ok });
-      return ok
-        ? { ok: true, message: "" }
-        : failed("无法保存授权码。请重试或查看系统凭据存储状态。");
+      const result = deps.credentials.save(value);
+      deps.log.record({ event: "notify_qq_credential_saved", ok: result.ok });
+      return result.ok ? result : blocked(result.message, "email");
     },
 
     deleteCredential() {
-      const ok = deleteQqCredential();
-      deps.log.record({ event: "notify_qq_credential_deleted", ok });
-      return ok
-        ? { ok: true, message: "" }
-        : failed("无法移除授权码。请查看系统凭据存储状态。");
+      const result = deps.credentials.delete();
+      deps.log.record({ event: "notify_qq_credential_deleted", ok: result.ok });
+      return result.ok ? result : blocked(result.message, "email");
     },
 
     async openQqSettings() {
-      if (process.platform !== "win32") return blocked(`请在浏览器访问 ${QQ_MAIL_URL}，进入「设置 → 帐户」获取授权码。`);
+      const manual = `请打开或复制 ${QQ_MAIL_URL}，在「设置 → 帐户」开启 SMTP 并获取授权码（不是登录密码）。`;
+      if (!deps.openUrl) return { ok: true, message: manual };
       try {
-        await new Promise<void>((resolve, reject) => {
-          const child = spawn("explorer.exe", [QQ_MAIL_URL], { detached: true, stdio: "ignore" });
-          child.once("error", reject);
-          child.once("spawn", () => { child.unref(); resolve(); });
-        });
-        return { ok: true, message: "" };
-      } catch (error) {
-        return failed(`无法打开浏览器。请手动访问 ${QQ_MAIL_URL}。`, [String(error)]);
-      }
+        return { ok: true, message: await deps.openUrl(QQ_MAIL_URL) ? `已请求打开 QQ 邮箱。${manual}` : `当前宿主无法打开浏览器。${manual}` };
+      } catch { return { ok: false, message: `打开浏览器失败。${manual}` }; }
     },
 
     test(channels, onProgress) {
@@ -348,6 +347,8 @@ export function createSettingsHost(deps: SettingsDeps): SettingsHost {
     },
 
     reload() {
+      const issue = checkActivation(fromDisk());
+      if (issue) return issue;
       deps.reload();
       const load = deps.configLoad();
       deps.log.record({ event: "notify_reload", degraded: load.degraded });
@@ -358,13 +359,21 @@ export function createSettingsHost(deps: SettingsDeps): SettingsHost {
 
     /** “沿用以后默认”: drop only this conversation's override, so the user default applies again. */
     followUserDefault(item) {
-      deps.setOverlay(clearItemOverride(deps.overlay(), item));
+      const next = clearItemOverride(deps.overlay(), item);
+      const issue = checkActivation(fromDisk(next));
+      if (issue) return issue;
+      deps.setOverlay(next);
       deps.log.record({ event: "notify_override_cleared", item: item.id });
       return { ok: true, message: "" };
     },
 
     /** “恢复此项内置默认”: clear the user default and the conversation override for one item. */
     restoreBuiltinDefault(item) {
+      // Restoring routing cannot alter gates. Built-in email gate is off.
+      if (item.id === "enabled" && builtinDefaultValue(item) === true) {
+        const issue = checkActivation({ ...deps.config(), enabled: true });
+        if (issue) return issue;
+      }
       const result = deleteUserDefault(deps.agentDir(), itemRemovals(item, deps.config(), deps.overlay()));
       if (!result.ok) {
         const problems = result.problems.map((problem) => sanitizeError(`${problem.path}: ${problem.message}`));

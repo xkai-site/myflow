@@ -5,13 +5,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createSettingsHost } from "../src/settings-actions.ts";
+import { createQqCredentials, QQ_AUTH_ENV } from "../src/mail/credentials.ts";
 import { loadConfig, readUserConfigRaw, userConfigPath } from "../src/config.ts";
 import { buildSettingItems } from "../src/settings.ts";
 import { applyOverlay, emptyOverlay } from "../src/settings-state.ts";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "notify-actions-"));
 let serial = 0, passed = 0;
-function harness(raw) {
+function harness(raw, credentials = createQqCredentials({ status: () => ({ available: true }), get: () => undefined, set() {}, delete() {} }, () => process.env[QQ_AUTH_ENV]), openUrl) {
   const dir = path.join(tmp, String(++serial));
   const file = userConfigPath(dir);
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -19,6 +20,7 @@ function harness(raw) {
   let overlay = emptyOverlay(), commits = 0, silenced = false;
   const current = () => applyOverlay(loadConfig({ agentDir: dir }).config, overlay).config;
   const host = createSettingsHost({
+    credentials, openUrl,
     config: current, configLoad: () => loadConfig({ agentDir: dir }), agentDir: () => dir,
     log: { log() {}, record() {} }, sessionId: () => "test", isSilenced: () => silenced,
     service: () => { throw new Error("Configuration operations must not access delivery service"); },
@@ -31,6 +33,14 @@ function harness(raw) {
 }
 function step(name, run) { run(); passed++; console.log(`  ✓ ${name}`); }
 try {
+  for (const capability of [undefined, async () => true, async () => false, async () => { throw new Error("fake-url-private"); }]) {
+    const h = harness({}, undefined, capability);
+    const result = await h.host.openQqSettings();
+    assert.match(result.message, /https:\/\/mail\.qq\.com\//);
+    assert.doesNotMatch(JSON.stringify(result), /fake-url-private/);
+    assert.equal(h.commits(), 0);
+  }
+  passed++; console.log("  ✓ No browser, open-capable, unavailable and failed host adapters all expose the official URL without secrets");
   step("Unused channel activation is one session transaction, with explicit unified-selection impact", () => {
     const h = harness({ channels: [], providers: [{ id: "terminal", type: "terminal", enabled: false }], rules: { runFailed: { channels: [] } } });
     const before = fs.readFileSync(h.file, "utf8"), rules = structuredClone(h.current().rules);
@@ -72,7 +82,7 @@ try {
     const h = harness({ channels: [], providers: [{ id: "email", type: "email", enabled: false,
       options: { from: "fake@qq.com", to: ["reader@example.com"] } }] });
     process.env.PI_NOTIFY_QQ_SMTP_AUTH_CODE = "fake-test-only";
-    assert.deepEqual(h.host.channelActivation("email"), { kind: "ready", addUnified: true });
+    assert.deepEqual(h.host.channelActivation("email"), { kind: "ready", addUnified: false });
     delete process.env.PI_NOTIFY_QQ_SMTP_AUTH_CODE;
     assert.deepEqual(h.host.channelActivation("email"), { kind: "email", field: "credential" });
     const result = h.host.enableChannel("email");
@@ -94,6 +104,63 @@ try {
     assert.deepEqual(h.host.channelActivation("email"), { kind: "email", field: "from" });
     assert.equal(h.host.enableChannel("email").ok, false);
     assert.equal(h.commits(), 1);
+  });
+  step("Every email enable entry checks prerequisites; destination edits never open gates", () => {
+    const options = { from: "fake@qq.com", to: ["reader@example.com"] };
+    for (const state of ["missing", "unavailable", "read-failed"]) {
+      const credentials = createQqCredentials({ status: () => state === "unavailable" ? { available: false, reason: "离线测试无系统服务" } : { available: true },
+        get() { if (state === "read-failed") throw new Error("fake-private"); }, set() {}, delete() {} }, () => undefined);
+      const h = harness({ channels: [], providers: [{ id: "email", type: "email", enabled: false, options }] }, credentials);
+      for (const result of [h.host.enableChannel("email"), h.host.setValue(h.item("provider:email"), true)]) {
+        assert.equal(result.ok, false); assert.equal(result.feedback.next, "email");
+        assert.match(result.message, state === "missing" ? /未配置授权码/ : state === "unavailable" ? /安全存储不可用/ : /读取失败/);
+        assert.doesNotMatch(JSON.stringify(result), /fake-private/);
+      }
+      assert.equal(h.commits(), 0);
+      assert.equal(h.host.setValue(h.item("channels"), ["email"]).ok, true);
+      assert.equal(h.host.setValue(h.item("rules.runFailed.channels"), ["email"]).ok, true);
+      assert.equal(h.current().providers.find((p) => p.id === "email").enabled, false);
+      assert.deepEqual(h.current().rules.runFailed.channels, ["email"]);
+      const raw = { channels: [], providers: [{ id: "email", type: "email", enabled: true, options }] };
+      fs.writeFileSync(h.file, JSON.stringify(raw));
+      // Explicitly pin the old off gate before following a newly-enabled user default.
+      h.host.setValue(h.item("provider:email"), false);
+      assert.equal(h.host.followUserDefault(h.item("provider:email")).ok, false);
+      assert.equal(h.current().providers.find((p) => p.id === "email").enabled, false);
+      const paused = harness({ ...raw, enabled: false }, credentials);
+      assert.equal(paused.host.restoreBuiltinDefault(paused.item("enabled")).ok, false);
+      assert.equal(paused.current().enabled, false);
+      assert.equal(paused.host.restoreBuiltinDefault(paused.item("provider:email")).ok, true, "restoring built-in email gate always closes it");
+      assert.deepEqual(paused.current().channels, []);
+    }
+  });
+  step("Enable/disable/restore defaults preserve all email routes and do not access delivery service", () => {
+    let value;
+    const credentials = createQqCredentials({ status: () => ({ available: true }), get: () => value, set: (next) => { value = next; }, delete: () => { value = undefined; } }, () => undefined);
+    const h = harness({ channels: [], providers: [{ id: "email", type: "email", enabled: false,
+      options: { from: "fake@qq.com", to: ["reader@example.com"] } }], rules: { runFailed: { channels: ["email"], enabled: false } } }, credentials);
+    const routes = structuredClone(h.current().rules);
+    assert.equal(h.host.saveCredential("fake-new").ok, true);
+    assert.equal(h.current().providers.find((p) => p.id === "email").enabled, false);
+    for (let i = 0; i < 2; i++) {
+      assert.equal(h.host.enableChannel("email").ok, true);
+      assert.equal(h.host.setValue(h.item("provider:email"), false).ok, true);
+    }
+    assert.equal(h.host.deleteCredential().ok, true);
+    assert.equal(h.host.enableChannel("email").ok, false);
+    assert.equal(h.host.restoreBuiltinDefault(h.item("channels")).ok, true);
+    assert.deepEqual(h.current().rules, routes);
+    assert.doesNotMatch(JSON.stringify(h.overlay()) + fs.readFileSync(h.file, "utf8"), /fake-new/);
+  });
+  step("The same credential core serves a settings host and a plain non-Pi host", () => {
+    let value;
+    const credentials = createQqCredentials({ status: () => ({ available: true }), get: () => value, set: (next) => { value = next; }, delete: () => { value = undefined; } }, () => undefined);
+    const h = harness({}, credentials);
+    const plainHost = { save: (text) => credentials.save(text), status: () => credentials.status(), remove: () => credentials.delete() };
+    assert.equal(plainHost.save("fake-other-host").ok, true);
+    assert.equal(h.host.credentialState().source, "vault");
+    assert.equal(h.host.deleteCredential().ok, true);
+    assert.equal(plainHost.status().state, "missing");
   });
   step("Failed atomic save/restore preserves session choices and malformed file bytes", () => {
     const h = harness({});

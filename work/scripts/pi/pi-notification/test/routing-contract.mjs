@@ -6,6 +6,7 @@ import * as settingState from "../src/settings-state.ts";
 import * as channels from "../src/channels.ts";
 import * as rules from "../src/rules.ts";
 import { createService } from "../src/service.ts";
+const configuredCredential = { state: "configured", source: "environment", storage: { available: true }, revision: 0, message: "fake configured" };
 
 const failures = [];
 async function step(name, run) {
@@ -74,11 +75,11 @@ const harness = (c) => {
     const c = config.defaultConfig();
     const email = c.providers.find((p) => p.id === "email");
     email.enabled = true; email.options.from = "sender@qq.com"; email.options.to = ["reader@example.com"];
-    const state = channels.emailReadiness(c, true);
+    const state = channels.emailReadiness(c, configuredCredential);
     assert.equal(state.usedBy, 0);
-    assert.match(state.label, /尚无提醒使用/);
+    assert.match(state.label, /渠道开启但未被规则使用/);
     c.channels = ["terminal", "email"];
-    assert.ok(channels.emailReadiness(c, true).usedBy > 0);
+    assert.ok(channels.emailReadiness(c, configuredCredential).usedBy > 0);
   });
 }
 if (failures.length) process.exitCode = 1;

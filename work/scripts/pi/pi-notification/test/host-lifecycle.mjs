@@ -23,6 +23,7 @@
  *   MSYS_NO_PATHCONV=1 node test/host-lifecycle.mjs
  */
 
+import "./fixtures/isolate-keyring.cjs";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import fs from "node:fs";
@@ -1355,6 +1356,52 @@ await step("J13f 首页渠道开关直接操作并约束逐规则投递，单项
     assert.equal((await host.prompt()).notifies, 0);
     assert.deepEqual(host.runtimeErrors, []);
   } finally { await host.dispose(); }
+});
+
+await step("J13g 真实 Pi 宿主复用凭据核心，缺码/写入失败/重新加载不绕过启用检查", async () => {
+  const driver = createUiDriver();
+  const raw = { ...NO_COALESCE, channels: [], providers: [{ id: "email", type: "email", enabled: false,
+    options: { from: "fake@qq.com", to: ["reader@example.com"] } }], rules: { runFailed: { channels: ["email"] } } };
+  const host = await makeHost({ label: "email-credential-host", extensions: [PROBE_ENTRY, PLUGIN_ENTRY], mode: "tui", driver, userConfig: raw });
+  const drive = async (keys) => { driver.setKeys(keys); const result = await host.command("/notify"); assert.equal(result.deliveries.length, 0); return result; };
+  const email = [K.down, K.down];
+  try {
+    const before = fs.readFileSync(host.userConfigPath, "utf8");
+    await drive([...email, K.enter]);
+    assert.match(driver.lastLines.join(""), /未配置授权码|设置 QQ 邮箱授权码/);
+    // On the email page the fourth row is the masked credential input. The isolated vault rejects writes.
+    const failed = await drive([...email, K.enter, K.down, K.down, K.down, K.enter, "fake-host-private-code", K.enter]);
+    assert.match(driver.lastLines.join(""), /保存.*失败/);
+    assert.doesNotMatch(JSON.stringify(driver.renders) + JSON.stringify(failed.plugin), /fake-host-private-code/);
+    assert.equal(fs.readFileSync(host.userConfigPath, "utf8"), before);
+    process.env.PI_NOTIFY_QQ_SMTP_AUTH_CODE = "fake-host-injection";
+    await drive([...email, K.enter]);
+    assert.match(driver.lastLines.join(""), /邮箱通知  开启/);
+    delete process.env.PI_NOTIFY_QQ_SMTP_AUTH_CODE;
+    await drive([...email, K.enter]);
+    assert.match(driver.lastLines.join(""), /邮箱通知  关闭/);
+    fs.writeFileSync(host.userConfigPath, JSON.stringify({ ...raw, providers: [{ ...raw.providers[0], enabled: true }] }));
+    await drive([K.ctrlR]);
+    assert.match(driver.lastLines.join(""), /邮箱通知  关闭/, "会话关闭覆盖优先于文件启用，不应误报一次启用");
+    const freshDriver = createUiDriver();
+    const fresh = await makeHost({ label: "email-reload-preflight", extensions: [PROBE_ENTRY, PLUGIN_ENTRY], mode: "tui", driver: freshDriver, userConfig: raw });
+    try {
+      fs.writeFileSync(fresh.userConfigPath, JSON.stringify({ ...raw, providers: [{ ...raw.providers[0], enabled: true }] }));
+      freshDriver.setKeys([K.ctrlR]);
+      assert.equal((await fresh.command("/notify")).deliveries.length, 0);
+      assert.match(freshDriver.lastLines.join(""), /未配置授权码/);
+      assert.match(freshDriver.lastLines.join(""), /邮箱通知  关闭/);
+      const reloaded = await fresh.during(() => fresh.session.reload());
+      assert.equal(reloaded.deliveries.length, 0);
+      freshDriver.setKeys([K.esc]); await fresh.command("/notify");
+      assert.match(freshDriver.lastLines.join(""), /邮箱通知  关闭/, "重新创建插件的 /reload 也不能绕过前置检查");
+      assert.equal(fresh.readUserConfigRaw().providers[0].enabled, true, "只阻止本次启用，不改用户文件");
+      assert.deepEqual(fresh.runtimeErrors, []);
+    } finally { await fresh.dispose(); }
+    assert.deepEqual(host.readUserConfigRaw().channels, []);
+    assert.deepEqual(host.readUserConfigRaw().rules.runFailed.channels, ["email"]);
+    assert.deepEqual(host.runtimeErrors, []);
+  } finally { delete process.env.PI_NOTIFY_QQ_SMTP_AUTH_CODE; await host.dispose(); }
 });
 
 await step("J14 非 TUI 模式守卫：print/json/rpc 都不打开组件、不写盘、凭据不外泄", async () => {

@@ -1,4 +1,5 @@
 /** Keyboard/visual task regression for the simplified UI. Temp JSON, fake vault and fake deliveries only. */
+import "./fixtures/isolate-keyring.cjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -20,6 +21,7 @@ const settings = await jiti.import("../src/settings.ts");
 const settingState = await jiti.import("../src/settings-state.ts");
 const channels = await jiti.import("../src/channels.ts");
 const model = await jiti.import("../src/ui-model.ts");
+const { createQqCredentials } = await jiti.import("../src/mail/credentials.ts");
 const { NotifySettingsComponent } = await jiti.import("../src/ui.ts");
 const { createService } = await jiti.import("../src/service.ts");
 const { resolveChannels, evaluateRunOutcome } = await jiti.import("../src/rules.ts");
@@ -78,11 +80,11 @@ function harness(raw, options = {}) {
       return { ok: result.ok, message: result.ok ? "已恢复初始设置" : "恢复失败" };
     },
     itemScope: (item) => item.paths ? [item.label] : [item.label],
-    canManageCredentials: () => options.canManageCredentials ?? true,
-    credentialStatus: () => options.vault?.value ? "已保存于 Windows 凭据管理器" : "未设置",
+    credentialStatus: () => options.canManageCredentials === false ? "安全存储不可用。可通过 PI_NOTIFY_QQ_SMTP_AUTH_CODE 或外部安全凭据服务注入。" : options.vault?.value ? "已保存于系统安全存储" : "未设置",
+    credentialState: () => ({ source: options.vault?.value ? "vault" : "missing", state: options.vault?.value ? "configured" : options.canManageCredentials === false ? "unavailable" : "missing", storage: options.canManageCredentials === false ? { available: false, reason: "离线测试无系统服务" } : { available: true }, revision: calls.credential.length, message: host.credentialStatus() }),
     saveCredential(value) { options.vault.value = value; calls.credential.push("save"); return { ok: true, message: "授权码已安全保存（所有对话可用）" }; },
     deleteCredential() { delete options.vault.value; calls.credential.push("delete"); return { ok: true, message: "已移除授权码" }; },
-    openQqSettings: () => ({ ok: true, message: "已打开邮箱设置" }),
+    openQqSettings: () => ({ ok: true, message: "请打开或复制 https://mail.qq.com/ 获取 SMTP 授权码。" }),
     test(channels, onProgress) {
       calls.test.push({ channels, onProgress });
       if (options.immediateTest) options.immediateTest(onProgress);
@@ -93,6 +95,10 @@ function harness(raw, options = {}) {
     statusLines: () => ["状态与诊断", ...Array.from({ length: 24 }, (_, i) => `诊断行 ${i}`)],
     preview: () => ({ ok: true, message: "示例，不会发送", lines: ["任务完成 / 示例会话", "固定数据，不读取真实回复"] }),
   };
+  if (options.credentials) Object.assign(host, {
+    credentialState: () => options.credentials.status(), credentialStatus: () => options.credentials.status().message,
+    saveCredential: (value) => options.credentials.save(value), deleteCredential: () => options.credentials.delete(),
+  });
   const bindings = { "tui.select.up": K.up, "tui.select.down": K.down, "tui.select.confirm": K.enter, "tui.select.cancel": K.esc, "tui.select.pageUp": "\x1b[5~", "tui.select.pageDown": "\x1b[6~" };
   const component = new NotifySettingsComponent({ host, theme: options.theme ?? { fg: (_, text) => text, bold: (text) => text },
     keybindings: { matches: (data, key) => bindings[key] === data }, requestRender: () => { renders++; }, done: () => { done = true; } });
@@ -191,18 +197,18 @@ try {
     choose(h, "本机通知"); assert.deepEqual(h.host.config().rules.runCompleted.channels, []);
     choose(h, "跟随统一设置"); assert.equal(h.host.config().rules.runCompleted.channels, "inherit");
   });
-  await step("邮箱缺配置时进入步骤页，不先开启或测试", () => {
+  await step("缺凭据时统一选择只修改路由，首页启用才进入配置页", () => {
     const h = harness(undefined, { vault: {} }); searchItem(h, "channels"); choose(h, "邮箱通知");
-    assert.equal(h.frame()[0], "邮箱通知"); assert.equal(h.calls.test.length, 0);
-    assert.deepEqual(h.host.config().channels, ["terminal"]); assert.equal(h.host.config().providers.find((p) => p.id === "email").enabled, false);
-    assert.doesNotMatch(h.frame().join(""), /主题前缀/);
+    assert.equal(h.frame()[0], "统一接收选择"); assert.equal(h.calls.test.length, 0);
+    assert.deepEqual(h.host.config().channels, ["terminal", "email"]); assert.equal(h.host.config().providers.find((p) => p.id === "email").enabled, false);
+    home(h); row(h, "邮箱通知", true);
+    assert.equal(h.frame()[0], "邮箱通知");
   });
-  await step("配置齐全的邮箱仍需明确确认；取消不产生外发", () => {
+  await step("配置齐全的邮箱选择路由也不隐式开启，不产生外发", () => {
     const h = harness({ providers: [{ id: "email", type: "email", options: { from: "sender@qq.com", to: ["reader@example.com"] } }] }, { vault: { value: "fake" } });
-    searchItem(h, "channels"); choose(h, "邮箱通知"); assert.match(h.frame()[0], /确认应用/); h.press(K.enter);
-    assert.deepEqual(h.host.config().channels, ["terminal"]);
-    choose(h, "邮箱通知"); confirm(h); h.press(K.save);
-    assert.deepEqual(h.raw().channels, ["terminal", "email"]); assert.equal(h.raw().providers.find((p) => p.id === "email").enabled, true);
+    searchItem(h, "channels"); choose(h, "邮箱通知"); h.press(K.save);
+    assert.deepEqual(h.host.config().channels, ["terminal", "email"]);
+    assert.deepEqual(h.raw().channels, ["terminal", "email"]); assert.equal(h.host.config().providers.find((p) => p.id === "email").enabled, false);
     assert.equal(h.calls.test.length, 0);
   });
   await step("邮箱启用步骤可以重新启用已选但关闭的邮箱", () => {
@@ -307,8 +313,9 @@ try {
     row(h, "QQ 邮箱授权码", true); h.press("fake-journey-code"); h.press(K.enter);
     assert.equal(h.calls.test.length, 0); assert.equal(h.raw(), undefined);
     assert.equal(h.host.config().providers.find((p) => p.id === "email").enabled, false);
-    row(h, "邮箱通知", true); confirm(h);
-    assert.deepEqual(h.host.config().channels, ["terminal", "email"]);
+    row(h, "邮箱通知", true);
+    assert.deepEqual(h.host.config().channels, ["terminal"]);
+    searchItem(h, "channels"); choose(h, "邮箱通知");
     const current = h.host.config();
     assert.deepEqual(resolveChannels(current, current.rules.runFailed), ["terminal", "email"]);
     assert.equal(current.rules.waitingForUser.enabled, false); assert.equal(current.content.includeAssistantExcerpt, false);
@@ -389,7 +396,9 @@ try {
     assert.match(h.frame().join(""), /配置已就绪/);
     assert.doesNotMatch(h.frame().join(""), /查看问题详情|授权码已安全保存/);
     assert.equal(h.calls.test.length, 0); assert.equal(h.raw(), undefined);
-    row(h, "邮箱通知", true); confirm(h);
+    row(h, "邮箱通知", true);
+    searchItem(h, "channels"); choose(h, "邮箱通知");
+    reception(h); row(h, "邮箱配置", true);
     h.press(K.test); assert.deepEqual(h.calls.test[0].channels, ["email"], "邮箱页快捷测试只能发邮箱");
     h.calls.test[0].onProgress({ id: "mail", stage: "result", result: { providerId: "email", ok: true } });
     h.calls.test[0].onProgress({ id: "mail", stage: "finished" });
@@ -405,18 +414,54 @@ try {
     assert.doesNotMatch(JSON.stringify(h.raw()) + JSON.stringify(h.overlay()), /fake-only-code/);
     assert.doesNotMatch(h.frame().join(""), /保存为默认设置|测试结果与详情|查看问题详情/);
   });
-  await step("邮箱失败测试引导重试，非 Windows 显示环境变量步骤而非不可执行存储", () => {
+  await step("安全存储不可用仍保留一致管理入口，Enter 明确反馈安全注入方式", () => {
     const h = harness(undefined, { vault: {}, canManageCredentials: false });
     reception(h); row(h, "邮箱配置", true);
-    assert.doesNotMatch(h.frame().join(""), /QQ 邮箱授权码  未设置/);
-    assert.doesNotMatch(h.frame().join(""), /PI_NOTIFY_QQ_SMTP_AUTH_CODE/);
-    row(h, "获取授权码：QQ 邮箱设置 ↗"); h.press("?");
-    for (let i = 0; i < 10; i++) h.press(K.down);
-    assert.match(h.frame().join(""), /PI_NOTIFY_QQ_SMTP_AUTH_CODE/);
+    assert.match(h.frame().join(""), /QQ 邮箱授权码  未配置/);
+    row(h, "QQ 邮箱授权码", true);
+    assert.equal(h.frame()[0], "邮箱通知");
+    assert.match(h.frame().join(""), /安全存储不可用.*PI_NOTIFY_QQ_SMTP_AUTH_CODE/);
+    assert.equal(h.calls.credential.length, 0);
     assert.equal(model.emailSetup(h.host.config(), true, "发送失败").test, "发送失败");
     const ready = h.host.config(); const p = ready.providers.find((p) => p.id === "email");
     Object.assign(p, { enabled: true, options: { from: "a@qq.com", to: ["b@example.com"] } }); ready.channels = ["email"];
     assert.equal(model.emailSetup(ready, true, "发送失败").test, "发送失败");
+  });
+  await step("获取授权码始终展示可复制的官方网址，宿主打开失败明确反馈", async () => {
+    const h = harness(undefined, { vault: {} });
+    row(h, "邮箱通知", true);
+    h.host.openQqSettings = async () => ({ ok: false, message: "当前宿主无法打开浏览器，请复制官方 URL。" });
+    row(h, "获取授权码：QQ 邮箱设置 ↗", true);
+    await Promise.resolve(); await Promise.resolve();
+    for (const width of [40, 70, 110]) {
+      assert.match(h.frame(width).join(""), /https:\/\/mail\.qq\.com\//);
+      assert.match(h.frame(width).join(""), /无法打开浏览器/);
+    }
+    assert.equal(h.calls.test.length, 0); assert.equal(h.calls.set.length, 0);
+  });
+  await step("真实凭据核心的读写删失败在 TUI 明确反馈且不泄漏，不改变开关或路由", () => {
+    for (const operation of ["read", "write", "delete"]) {
+      const fail = () => { throw new Error("fake-native-private"); };
+      const credentials = createQqCredentials({ status: () => ({ available: true }),
+        get: operation === "read" ? fail : () => "fake-existing-code",
+        set: operation === "write" ? fail : () => {}, delete: operation === "delete" ? fail : () => {},
+      }, () => undefined);
+      const h = harness({ channels: ["email"], providers: [{ id: "email", type: "email", enabled: false,
+        options: { from: "fake@qq.com", to: ["reader@example.com"] } }] }, { credentials });
+      const before = JSON.stringify(h.host.config());
+      reception(h); row(h, "邮箱配置", true);
+      if (operation === "read") assert.match(h.frame().join(""), /凭据读取失败/);
+      if (operation === "delete") {
+        row(h, "移除已保存的邮箱授权码", true); h.press(K.down); h.press(K.enter);
+        assert.match(h.frame().join(""), /删除.*失败/);
+      } else {
+        row(h, "QQ 邮箱授权码", true); h.press("fake-submitted-code"); h.press(K.enter);
+        assert.match(h.frame().join(""), /保存.*失败/);
+      }
+      assert.equal(JSON.stringify(h.host.config()), before);
+      assert.equal(h.calls.test.length, 0);
+      assert.doesNotMatch(JSON.stringify(h.frame()) + JSON.stringify(h.state()) + JSON.stringify(h.overlay()), /fake-native-private|fake-submitted-code|fake-existing-code/);
+    }
   });
   await step("有效状态集中解释强制静默、全关、缺渠道、免打扰、等级和例外", () => {
     const state = (raw, options = {}) => { const h = harness(raw, options); return h.frame().join(""); };
@@ -506,15 +551,12 @@ try {
     assert.deepEqual(h.host.config().channels, []);
     assert.deepEqual(h.host.config().rules.runFailed.channels, ["terminal"]);
   });
-  await step("统一选择重新开启关闭的渠道前审查逐规则恢复范围", () => {
+  await step("统一选择不重新开启关闭渠道，逐规则路由保持不变", () => {
     const h = harness({ channels: [], providers: [{ id: "terminal", type: "terminal", enabled: false }], rules: { runFailed: { channels: ["terminal"] } } });
     searchItem(h, "channels"); choose(h, "本机通知");
-    assert.match(h.frame()[0], /确认应用/);
-    assert.match(h.frame().join(""), /同时开启本机通知，恢复原有规则：运行失败/);
-    assert.match(h.frame().join(""), /逐规则接收选择不变/);
-    h.press(K.enter); assert.equal(h.host.config().providers.find((p) => p.id === "terminal").enabled, false);
-    choose(h, "本机通知"); confirm(h);
-    assert.equal(h.host.config().providers.find((p) => p.id === "terminal").enabled, true);
+    assert.equal(h.frame()[0], "统一接收选择");
+    assert.equal(h.host.config().providers.find((p) => p.id === "terminal").enabled, false);
+    assert.deepEqual(h.host.config().channels, ["terminal"]);
     assert.deepEqual(h.host.config().rules.runFailed.channels, ["terminal"]);
   });
   await step("未使用渠道开启需确认加入统一选择，不改逐规则空集合或关闭规则", () => {
@@ -545,7 +587,7 @@ try {
     const h = harness(undefined, { vault: {} }); row(h, "邮箱通知", true);
     assert.equal(h.frame()[0], "邮箱通知"); assert.equal(h.calls.set.length, 0);
     assert.doesNotMatch(h.frame().join(""), /\b[1-5]\. /);
-    assert.match(h.frame().join(""), /QQ 邮箱授权码  未设置/);
+    assert.match(h.frame().join(""), /QQ 邮箱授权码  未配置/);
     const ready = harness({ channels: ["email"], providers: [{ id: "email", type: "email", enabled: true, options: { from: "fake@qq.com", to: ["reader@example.com"] } }] }, { vault: { value: "fake" } });
     row(ready, "邮箱通知", true);
     assert.equal(ready.host.config().providers.find((p) => p.id === "email").enabled, false);
@@ -579,9 +621,9 @@ try {
       const h = harness({ providers: [{ id: "email", type: "email", enabled: false,
         options: { from: "fake@qq.com", to: ["reader@example.com"] } }] }, { vault: { value: "fake" } });
       reception(h); row(h, "邮箱配置", true); row(h, "邮箱通知"); h.press(key);
-      assert.match(h.frame().join(""), /加入统一接收选择/); confirm(h);
+      assert.doesNotMatch(h.frame().join(""), /加入统一接收选择/);
       assert.equal(h.host.config().providers.find((p) => p.id === "email").enabled, true);
-      assert.deepEqual(h.host.config().channels, ["terminal", "email"]);
+      assert.deepEqual(h.host.config().channels, ["terminal"]);
       searchItem(h, "content.maxMessageChars"); row(h, "自定义…"); h.press(key);
       assert.match(h.frame().join(""), /范围：.*Enter 应用/);
     }
@@ -660,7 +702,7 @@ try {
     late({ id: "late", stage: "result", result: { providerId: "email", ok: true } });
     assert.match(h.frame().join(""), /测试：未测试/);
     row(h, "移除已保存的邮箱授权码", true); h.press(K.down); h.press(K.enter);
-    assert.match(h.frame().join(""), /QQ 邮箱授权码  未设置/);
+    assert.match(h.frame().join(""), /QQ 邮箱授权码  未配置/);
     assert.match(h.frame().join(""), /测试：未测试/);
     row(h, "邮箱通知", true);
     assert.equal(h.host.config().providers.find((p) => p.id === "email").enabled, false, "不完整配置也必须可以关闭渠道");
@@ -690,7 +732,7 @@ try {
       assert.equal(h.host.config().providers.find((p) => p.id === "terminal").enabled, true);
     }
   });
-  await step("统一接收选择只在隐式开启渠道时确认；已开启渠道的增删直接应用", () => {
+  await step("统一接收选择增删直接应用，只改路由不改变渠道开关", () => {
     const h = harness({ channels: [] });
     searchItem(h, "channels"); choose(h, "本机通知");
     assert.equal(h.frame()[0], "统一接收选择");
@@ -730,7 +772,7 @@ try {
     reception(h); row(h, "邮箱配置", true); row(h, "移除已保存的邮箱授权码", true);
     for (const width of [40, 70, 110]) {
       const frame = h.frame(width);
-      assert.match(frame.join(""), /影响所有对话.*启动环境仍可提供授权码/);
+      assert.match(frame.join(""), /影响所有对话.*环境注入需在来源单独移除/);
       for (const line of frame) assert.ok(tui.visibleWidth(line) <= width);
     }
     h.press(K.enter); assert.deepEqual(h.calls.credential, []);
@@ -765,7 +807,7 @@ try {
     h.press(K.esc); assert.match(focusedLine(h), /保存为默认设置/);
     row(h, "收件邮箱（多个）", true); h.press("reader@example.com"); h.press(K.enter);
     row(h, "QQ 邮箱授权码", true); h.press("fake-layout-only"); h.press(K.enter);
-    row(h, "邮箱通知", true); confirm(h); capture("email-ready");
+    row(h, "邮箱通知", true); capture("email-ready");
     h.press(K.test);
     h.calls.test[0].onProgress({ id: "snapshot", stage: "result", result: { providerId: "email", ok: false, error: "FAKE_FAILURE password=fake-layout-private" } });
     h.calls.test[0].onProgress({ id: "snapshot", stage: "finished" }); capture("email-test-failed");
@@ -814,7 +856,7 @@ try {
       themedRow("保存为默认设置", true); check("save-review"); h.press(K.esc);
       themedRow("收件邮箱（多个）", true); h.press("reader@example.com"); h.press(K.enter);
       themedRow("QQ 邮箱授权码", true); h.press("fake-layout-only"); h.press(K.enter);
-      themedRow("邮箱通知", true); confirm(h); check("email-ready");
+      themedRow("邮箱通知", true); check("email-ready");
       h.press(K.test);
       h.calls.test[0].onProgress({ id: "themed", stage: "result", result: { providerId: "email", ok: false, error: "FAKE_FAILURE password=fake-layout-private" } });
       h.calls.test[0].onProgress({ id: "themed", stage: "finished" }); check("email-test-failed");

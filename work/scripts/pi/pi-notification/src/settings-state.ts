@@ -1,5 +1,5 @@
 /** Session snapshots and sparse default transactions. No presentation, IO or host context. */
-import { defaultConfig, mergeConfig, type ConfigProblem } from "./config.ts";
+import { containsCredentialKey, defaultConfig, mergeConfig, type ConfigProblem } from "./config.ts";
 import {
   getPathValue,
   hasPath,
@@ -16,8 +16,6 @@ export interface SessionOverlay {
   patch: ConfigPatch;
   providers: Record<string, boolean>;
   providerOptions: Record<string, Record<string, unknown>>;
-  /** Switches last changed by unified destinations, not independently edited channel gates. */
-  channelOwners?: string[];
 }
 export const SESSION_OVERLAY_ENTRY = "notify-session-overlay";
 export function emptyOverlay(): SessionOverlay {
@@ -37,7 +35,7 @@ function notificationPatch(patch: ConfigPatch): ConfigPatch {
 
 /** Session files are an external boundary. Empty snapshots must survive reload; API stays file-only. */
 export function overlayFromEntry(value: unknown): SessionOverlay | undefined {
-  if (!isPlainObject(value)) return undefined;
+  if (!isPlainObject(value) || containsCredentialKey(value)) return undefined;
   const patch = isPlainObject(value.patch) ? notificationPatch(value.patch) : {};
   const providers: Record<string, boolean> = {};
   if (isPlainObject(value.providers)) {
@@ -49,14 +47,7 @@ export function overlayFromEntry(value: unknown): SessionOverlay | undefined {
     for (const [id, options] of Object.entries(value.providerOptions))
       if (isPlainObject(options)) providerOptions[id] = options;
   }
-  const channelOwners = Array.isArray(value.channelOwners)
-    ? [
-        ...new Set(
-          value.channelOwners.filter((id): id is string => typeof id === "string" && Object.hasOwn(providers, id))
-        ),
-      ]
-    : [];
-  return { patch, providers, providerOptions, ...(channelOwners.length ? { channelOwners } : {}) };
+  return { patch, providers, providerOptions };
 }
 export function overlayEntryData(sessionId: string | undefined, overlay: SessionOverlay, at: number) {
   return {
@@ -64,7 +55,6 @@ export function overlayEntryData(sessionId: string | undefined, overlay: Session
     patch: notificationPatch(overlay.patch),
     providers: overlay.providers,
     providerOptions: overlay.providerOptions,
-    ...(overlay.channelOwners?.length ? { channelOwners: [...overlay.channelOwners] } : {}),
     at,
   };
 }
@@ -143,17 +133,12 @@ export function patchOperations(patch: SettingPatch): SimpleSettingPatch[] {
 export function pendingPatch(items: readonly SettingItem[], config: NotificationConfig): SettingPatch {
   return {
     kind: "compound",
-    operations: items.flatMap((item) =>
-      item.destinations
-        ? [{ kind: "path" as const, path: item.userPath, value: item.read(config) }]
-        : patchOperations(item.patch(item.read(config) as SettingValue | SettingValue[]))
-    ),
+    operations: items.flatMap((item) => patchOperations(item.patch(item.read(config) as SettingValue | SettingValue[]))),
   };
 }
 /** Pure transaction candidate; validation happens before the caller commits one session snapshot. */
 export function applySettingPatch(overlay: SessionOverlay, item: SettingItem, patch: SettingPatch): SessionOverlay {
   const next = structuredClone(overlay);
-  const owners = new Set(next.channelOwners ?? []);
   for (const operation of patchOperations(patch)) {
     if (operation.kind === "path") next.patch = setPatchPath(next.patch, operation.path, operation.value);
     else if (operation.kind === "providerOption")
@@ -164,24 +149,12 @@ export function applySettingPatch(overlay: SessionOverlay, item: SettingItem, pa
       );
     else {
       next.providers[operation.id] = operation.value;
-      if (item.destinations) owners.add(operation.id);
-      else owners.delete(operation.id);
     }
   }
-  if (owners.size) next.channelOwners = [...owners];
-  else delete next.channelOwners;
   return next;
 }
 export function itemRemovals(item: SettingItem, config: NotificationConfig, overlay: SessionOverlay) {
   if (item.paths) return item.paths.map((path) => ({ kind: "path" as const, path }));
-  if (item.destinations) {
-    const owned = new Set(overlay.channelOwners ?? []);
-    for (const id of config.channels) if (!Object.hasOwn(overlay.providers, id) || owned.has(id)) owned.add(id);
-    return [
-      { kind: "path" as const, path: item.userPath },
-      ...[...owned].map((id) => ({ kind: "provider" as const, id })),
-    ];
-  }
   return [
     item.providerId
       ? item.providerOptionPath
@@ -273,12 +246,8 @@ export function settingUserFilePatch(raw: unknown, config: NotificationConfig, p
 /** Drop only this item's override, pruning empty ancestors and retaining independent gates. */
 export function clearItemOverride(overlay: SessionOverlay, item: SettingItem): SessionOverlay {
   const next = structuredClone(overlay);
-  if (item.paths || item.destinations) {
+  if (item.paths) {
     for (const path of item.paths ?? [item.userPath]) next.patch = removePath(next.patch, path);
-    if (item.destinations) {
-      for (const id of next.channelOwners ?? []) delete next.providers[id];
-      delete next.channelOwners;
-    }
   } else if (item.providerId !== undefined) {
     if (item.providerOptionPath) {
       const options = removePath(next.providerOptions[item.providerId] ?? {}, item.providerOptionPath);
@@ -286,7 +255,6 @@ export function clearItemOverride(overlay: SessionOverlay, item: SettingItem): S
       else delete next.providerOptions[item.providerId];
     } else {
       delete next.providers[item.providerId];
-      if (next.channelOwners) next.channelOwners = next.channelOwners.filter((id) => id !== item.providerId);
     }
   } else next.patch = removePath(next.patch, item.userPath);
   return next;

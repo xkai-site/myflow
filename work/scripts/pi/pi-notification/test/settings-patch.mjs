@@ -122,6 +122,10 @@ await step("S1 overlay 形状防御：空 overlay 与非法条目", () => {
 
   assert.equal(settingState.overlayFromEntry(undefined), undefined);
   assert.equal(settingState.overlayFromEntry(42), undefined);
+  for (const value of [
+    { providerOptions: { email: { authCode: "fake-session-private" } } },
+    { patch: { providers: [{ id: "email", options: { nested: { password: "fake-session-private" } } }] } },
+  ]) assert.equal(settingState.overlayFromEntry(value), undefined, "外部会话快照不得恢复邮箱凭据");
   assert.deepEqual(settingState.overlayFromEntry({ patch: {}, providers: {} }), { patch: {}, providers: {}, providerOptions: {} },
     "空快照是合法状态（已清空），必须保留以免 /reload 复活旧值");
   assert.deepEqual(settingState.overlayFromEntry({ patch: "broken", providers: { a: "yes", b: true } }), {
@@ -405,12 +409,12 @@ await step("S14 复合项保存有效混合状态，不统一、不泄漏其他�
   assert.equal(settingState.clearItemOverride(next, item).patch.rules, undefined);
 });
 
-await step("S15 接收多选与启用原子应用，provider 归属转移后不误还原", () => {
+await step("S15 接收多选只修改路由，保存和恢复不改变独立渠道开关", () => {
   const current = config.defaultConfig();
   const item = itemOf("channels");
   let overlay = settingState.applySettingPatch(settingState.emptyOverlay(), item, item.patch(["terminal", "email"]));
   let effective = settingState.applyOverlay(current, overlay).config;
-  assert.equal(effective.providers.find((p) => p.id === "email").enabled, true);
+  assert.equal(effective.providers.find((p) => p.id === "email").enabled, false);
   assert.deepEqual(effective.channels, ["terminal", "email"]);
   assert.equal(effective.rules.runFailed.channels, "inherit");
   overlay = settingState.applySettingPatch(overlay, itemOf("provider:email"), itemOf("provider:email").patch(false));
@@ -420,9 +424,9 @@ await step("S15 接收多选与启用原子应用，provider 归属转移后不�
   effective = settingState.applyOverlay(current, overlay).config;
   const raw = { providers: [{ id: "email", type: "email", options: { from: "saved@qq.com" }, future: 7 }] };
   const saved = settingState.settingUserFilePatch(raw, effective, settingState.settingSnapshot(item, effective));
-  assert.equal(saved.providers.find((p) => p.id === "email").enabled, false, "Ctrl+S 不重新开启");
-  assert.equal(saved.providers.find((p) => p.id === "email").options.from, "saved@qq.com");
-  assert.equal(saved.providers.find((p) => p.id === "email").future, 7);
+  assert.deepEqual(saved, { channels: ["terminal", "email"] }, "Ctrl+S 只保存路由，不夹带渠道开关或地址");
+  assert.equal(raw.providers[0].options.from, "saved@qq.com");
+  assert.equal(raw.providers[0].future, 7);
   const roundTrip = settingState.overlayFromEntry(settingState.overlayEntryData("s", overlay, 1));
   assert.deepEqual(roundTrip, overlay);
 });
@@ -451,7 +455,7 @@ await step("S17 邮箱批量补丁只写已审查叶字段，不快照无关渠�
   }
   const current = settingState.applyOverlay(base, overlay).config;
   const pending = uiModel.pendingSettings(current, raw, (item) => settingState.sessionOverrideValue(overlay, item), "email");
-  assert.deepEqual(pending.map((item) => item.id), ["channels", "provider:email", "provider:email:from"]);
+  assert.deepEqual(pending.map((item) => item.id), ["channels", "provider:email:from"]);
   const patch = settingState.settingUserFilePatch(raw, current, settingState.pendingPatch(pending, current));
   assert.deepEqual(patch.channels, ["terminal", "email"]);
   assert.equal(patch.providers.find((provider) => provider.id === "debug").enabled, true);

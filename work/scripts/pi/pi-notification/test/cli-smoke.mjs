@@ -22,6 +22,7 @@
  * Skip with `PI_SKIP_CLI=1`. Choose the executable with `PI_BIN=/path/to/pi`.
  */
 
+import "./fixtures/isolate-keyring.cjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import http from "node:http";

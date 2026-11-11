@@ -3,7 +3,7 @@ import { isIP } from "node:net";
 import nodemailer from "nodemailer";
 import type SMTPTransport from "nodemailer/lib/smtp-transport/index.js";
 import type { MailMessage, MailSender } from "./sender.ts";
-import { QQ_AUTH_ENV, resolveQqCredential, type CredentialStore } from "./credentials.ts";
+import type { QqCredentials } from "./credentials.ts";
 export { QQ_AUTH_ENV } from "./credentials.ts";
 const QQ_SMTP_HOST = "smtp.qq.com";
 const MAX_TIMEOUT_MS = 120_000;
@@ -72,12 +72,11 @@ function validEmail(value: unknown): value is string {
   return typeof value === "string" && value.length <= 254 && /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value);
 }
 
-export function validateQqSmtp(options: Record<string, unknown>, env: NodeJS.ProcessEnv = process.env, store?: CredentialStore): string | undefined {
+export function validateQqSmtp(options: Record<string, unknown>): string | undefined {
   if (!validEmail(options.from)) return "缺少有效的发件邮箱地址";
   if (!Array.isArray(options.to) || options.to.length === 0 || options.to.length > 50 || options.to.some((to) => !validEmail(to))) {
     return "缺少有效收件地址（至少一个，最多 50 个）";
   }
-  if (resolveQqCredential(env, store).source === "missing") return `Windows 凭据管理器未设置授权码，且环境变量 ${QQ_AUTH_ENV} 未设置或为空`;
   return undefined;
 }
 
@@ -88,21 +87,26 @@ function safeCode(error: unknown): string {
 
 export function createQqSmtpSender(
   options: Record<string, unknown>,
-  deps: { env?: NodeJS.ProcessEnv; credentialStore?: CredentialStore; timeoutMs?: number; transportFactory?: SmtpTransportFactory; lookup?: SmtpLookup } = {},
+  deps: { credentials: QqCredentials; timeoutMs?: number; transportFactory?: SmtpTransportFactory; lookup?: SmtpLookup },
 ): MailSender {
-  const env = deps.env ?? process.env;
+  const validation = (value: Record<string, unknown>) => {
+    const invalid = validateQqSmtp(value);
+    if (invalid) return invalid;
+    const status = deps.credentials.status();
+    return status.state === "configured" ? undefined : status.message;
+  };
   const timeout = Math.max(250, Math.min(MAX_SMTP_PHASE_TIMEOUT_MS, Math.floor(deps.timeoutMs ?? 30000)));
   const lookup = deps.lookup ?? ((hostname, options) => systemLookup(hostname, options));
   const factory: SmtpTransportFactory = deps.transportFactory ?? ((transportOptions) => nodemailer.createTransport(transportOptions));
   let disposed = false;
   return {
-    validate: () => disposed ? "邮箱发送器已关闭" : validateQqSmtp(options, env, deps.credentialStore),
+    validate: () => disposed ? "邮箱发送器已关闭" : validation(options),
     async send(message, signal) {
       if (disposed) throw new Error("邮箱发送器已关闭");
       if (signal.aborted) throw new Error(abortCode(signal));
-      const invalid = validateQqSmtp({ ...options, to: [message.to] }, env, deps.credentialStore);
+      const invalid = validation({ ...options, to: [message.to] });
       if (invalid) throw new Error("SMTP_NOT_CONFIGURED");
-      const auth = resolveQqCredential(env, deps.credentialStore).value;
+      const auth = deps.credentials.read().value;
       if (!auth) throw new Error("SMTP_NOT_CONFIGURED");
       let transport: SmtpTransportLike | undefined;
       let onAbort: (() => void) | undefined;

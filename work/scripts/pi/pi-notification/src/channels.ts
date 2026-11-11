@@ -1,5 +1,6 @@
 /** Pure channel prerequisites and rule usage. No IO, credentials, rendering or notifier creation. */
 import { resolveChannels } from "./rules.ts";
+import type { CredentialStatus } from "./mail/credentials.ts";
 import { LEVEL_RANK, type NotificationConfig } from "./types.ts";
 
 type Provider = NotificationConfig["providers"][number];
@@ -13,6 +14,18 @@ export function emailRequirement(provider: Provider | undefined, hasCredential: 
     ? "credential"
     : undefined;
 }
+/** Shared preflight for every explicit email enable operation. */
+export function emailActivationIssue(config: NotificationConfig, credential: CredentialStatus): string | undefined {
+  const provider = config.providers.find((entry) => entry.id === "email");
+  const missing = emailRequirement(provider, credential.state === "configured");
+  return missing === "from" ? "请填写发件 QQ 邮箱地址。" : missing === "to" ? "请填写收件邮箱地址。"
+    : missing === "credential" ? credential.message : undefined;
+}
+export function emailActivationBlock(current: NotificationConfig, next: NotificationConfig, credential: () => CredentialStatus, explicit = false): string | undefined {
+  const email = next.providers.find((entry) => entry.id === "email");
+  const activating = email?.enabled && (explicit || !current.providers.find((entry) => entry.id === "email")?.enabled || (!current.enabled && next.enabled));
+  return activating ? emailActivationIssue(next, credential()) : undefined;
+}
 /** Disabled rules count too: reopening a gate must preserve their future routing. */
 export function rulesUsingChannel(config: NotificationConfig, id: string): Array<keyof NotificationConfig["rules"]> {
   return (Object.keys(config.rules) as Array<keyof NotificationConfig["rules"]>).filter((key) =>
@@ -22,7 +35,9 @@ export function rulesUsingChannel(config: NotificationConfig, id: string): Array
 export function enabledChannelUsage(config: NotificationConfig, id: string): number {
   return rulesUsingChannel(config, id).filter((key) => config.rules[key].enabled).length;
 }
-export function emailReadiness(config: NotificationConfig, hasCredential: boolean): { label: string; usedBy: number } {
+export function emailReadiness(config: NotificationConfig, credential: CredentialStatus): { label: string; usedBy: number } {
+  const hasCredential = credential.state === "configured";
+  const storageIssue = credential.state === "unavailable";
   const provider = config.providers.find((entry) => entry.id === "email" && entry.type === "email");
   const usedBy = enabledChannelUsage(config, "email");
   const missing = emailRequirement(provider, hasCredential);
@@ -32,15 +47,19 @@ export function emailReadiness(config: NotificationConfig, hasCredential: boolea
     ? "缺发件地址"
     : missing === "to"
     ? "缺收件地址"
+    : missing === "credential" && credential.state === "read-failed"
+    ? "凭据读取失败"
+    : missing === "credential" && storageIssue
+    ? "安全存储不可用"
     : missing === "credential"
     ? "缺授权码"
     : !provider.enabled
-    ? "渠道未启用"
+    ? "配置就绪但渠道关闭"
     : !config.enabled
     ? "总开关已关"
     : !usedBy
-    ? "尚无提醒使用"
-    : "配置已就绪";
+    ? "渠道开启但未被规则使用"
+    : "已就绪且正在被规则使用";
   return { label, usedBy };
 }
 export function emailTestBlockReason(config: NotificationConfig, hasCredential: boolean): string | undefined {
@@ -131,5 +150,5 @@ export function channelActivation(
     return { kind: "blocked", message: "此接收方式暂不可用。请查看配置详情。" };
   const missing = id === "email" && provider.type === "email" ? emailRequirement(provider, hasCredential) : undefined;
   if (missing) return { kind: "email", field: missing };
-  return { kind: "ready", addUnified: !config.channels.includes(id) && !rulesUsingChannel(config, id).length };
+  return { kind: "ready", addUnified: id !== "email" && !config.channels.includes(id) && !rulesUsingChannel(config, id).length };
 }

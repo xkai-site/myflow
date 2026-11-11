@@ -217,27 +217,9 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
       emptyLabel: "不投递",
     }),
     destinations: true,
-    patch: (value) => ({
-      kind: "compound",
-      operations: [
-        { kind: "path", path: "channels", value },
-        ...(Array.isArray(value)
-          ? value.filter(
-              (id) => !config.channels.includes(String(id)) && config.providers.some((provider) => provider.id === id)
-            )
-          : []
-        ).map((id) => ({ kind: "providers" as const, id: String(id), value: true })),
-      ],
-    }),
-    snapshot: (current) => ({
-      kind: "compound",
-      operations: [
-        { kind: "path", path: "channels", value: [...current.channels] },
-        ...current.providers
-          .filter((provider) => current.channels.includes(provider.id))
-          .map((provider) => ({ kind: "providers" as const, id: provider.id, value: provider.enabled })),
-      ],
-    }),
+    // Selecting destinations edits routing only. Channel gates are independent.
+    patch: (value) => ({ kind: "path", path: "channels", value }),
+    snapshot: (current) => ({ kind: "path", path: "channels", value: [...current.channels] }),
   });
   const routes = compositeItem(
     makeItem({

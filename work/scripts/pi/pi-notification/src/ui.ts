@@ -31,7 +31,8 @@ import type { NotificationConfig } from "./types.ts";
 import { resolveChannels } from "./rules.ts";
 import { channelRules, emailMissing, emailSetup, pendingSettings, type SaveScope } from "./ui-model.ts";
 import { builtinDefaultValue, hasUserDefault, providerDefinitionSource, userDefaultValue } from "./settings-state.ts";
-import { channelState, controlStatus, emailRequirement } from "./channels.ts";
+import { channelState, controlStatus, emailReadiness } from "./channels.ts";
+import { QQ_MAIL_URL, SECURE_INJECTION_HELP } from "./mail/credentials.ts";
 import type { ActionResult, ItemValue, SettingsHost } from "./settings-actions.ts";
 import { candidateIsCurrent, candidateIsDefault, initialCandidateFocus, settingCandidates, type Candidate } from "./ui-candidates.ts";
 import { emailTestKey, SettingsTestRun } from "./ui-test.ts";
@@ -206,7 +207,8 @@ export class NotifySettingsComponent {
   }
 
   private emailStateKey(): string {
-    return emailTestKey(this.host.config(), this.host.credentialStatus(), this.credentialRevision);
+    const status = this.host.credentialState();
+    return emailTestKey(this.host.config(), `${status.source}:${status.state}:${status.revision}`, this.credentialRevision);
   }
 
   /** Pi calls dispose when closing custom UI; late deliveries can only update service diagnostics. */
@@ -316,7 +318,7 @@ export class NotifySettingsComponent {
         const child = SETTING_CATEGORIES.find((candidate) => candidate.id === id);
         if (child) rows.push({ key: `category:${child.id}`, kind: "category", category: child });
       }
-      if (category.id === "more" && this.itemById("provider:email:from")) rows.push({ key: "email-config", kind: "emailConfig", label: "邮箱配置", summary: channelState(this.host.config(), "email", this.host.credentialStatus() !== "未设置") });
+      if (category.id === "more" && this.itemById("provider:email:from")) rows.push({ key: "email-config", kind: "emailConfig", label: "邮箱配置", summary: channelState(this.host.config(), "email", this.hasCredential()) });
       for (const action of category.actions ?? []) rows.push({ key: action.key, kind: "action", action: action.action });
       return { kind: "menu", id: `category:${category.id}`, title: category.label, rows, focus: 0 };
     }
@@ -331,7 +333,7 @@ export class NotifySettingsComponent {
       if (index >= 0) rows.splice(index, 1);
     }
     if (category.id === "channels" && this.items.some((item) => item.id === "provider:email:from")) {
-      const summary = channelState(this.host.config(), "email", this.host.credentialStatus() !== "未设置");
+      const summary = channelState(this.host.config(), "email", this.hasCredential());
       rows.push({ key: "email-config", kind: "emailConfig", label: "邮箱配置", summary });
     }
     if (category.collapsed && collapsed.length > 0) {
@@ -351,17 +353,17 @@ export class NotifySettingsComponent {
     return { kind: "menu", id: `subgroup:${category.id}`, title: label, rows, focus: 0 };
   }
 
-  private canManageCredentials(): boolean { return this.host.canManageCredentials(); }
+  private hasCredential(): boolean { return this.host.credentialState().state === "configured"; }
 
   private buildEmailPage(): MenuPage {
     const rows: MenuRow[] = this.items.filter((item) => item.providerId === "email" && item.group === "邮箱")
       .map((item) => ({ key: `item:${item.id}`, kind: "field" as const, item, label: item.label }));
-    if (this.canManageCredentials()) rows.push({ key: "action:credential-save", kind: "action", action: "credentialSave" });
+    rows.push({ key: "action:credential-save", kind: "action", action: "credentialSave" });
     rows.unshift({ key: "action:email-enable", kind: "action", action: "emailEnable" });
     rows.push({ key: "action:email-test", kind: "action", action: "emailTest" });
     if (this.pending("email").length) rows.push({ key: "action:save-email", kind: "action", action: "saveEmail" });
     rows.push({ key: "qq:settings", kind: "qqLink", label: "获取授权码：QQ 邮箱设置 ↗" });
-    if (this.canManageCredentials() && !["未设置", "由启动环境提供"].includes(this.host.credentialStatus())) rows.push({ key: "action:credential-delete", kind: "action", action: "credentialDelete" });
+    rows.push({ key: "action:credential-delete", kind: "action", action: "credentialDelete" });
     return { kind: "menu", id: "email-config", title: "邮箱通知", rows, focus: 0 };
   }
 
@@ -482,6 +484,7 @@ export class NotifySettingsComponent {
       return;
     }
     if (row.kind === "qqLink") {
+      this.push({ kind: "preview", title: "获取 QQ 邮箱授权码", lines: [QQ_MAIL_URL, "可复制此官方网址到任意设备的浏览器。", "在「设置 → 帐户」开启 SMTP，生成授权码，不是登录密码。"], offset: 0 });
       const context = this.context;
       void Promise.resolve(this.host.openQqSettings()).then((result) => { if (!this.closed && context === this.context) this.report(result); });
       return;
@@ -492,6 +495,8 @@ export class NotifySettingsComponent {
       return;
     }
     if (row.action === "credentialSave") {
+      const storage = this.host.credentialState().storage;
+      if (!storage.available) { this.report({ ok: false, message: `安全存储不可用：${storage.reason}。${SECURE_INJECTION_HELP}`, feedback: { kind: "blocked", next: "email" } }); return; }
       this.push({ kind: "secret", prompt: new SecretPrompt() });
       return;
     }
@@ -571,7 +576,10 @@ export class NotifySettingsComponent {
         const target = plan.field === "credential" ? "action:credential-save" : `item:provider:email:${plan.field}`;
         const index = this.view.rows.findIndex((row) => row.key === target);
         if (index >= 0) { this.view.focus = index; this.openFocusedRow(); }
-      } else this.push(this.buildEmailPage());
+      } else {
+        this.push(this.buildEmailPage());
+        this.report({ ok: false, message: "请先完成邮箱地址与授权码配置。", feedback: { kind: "blocked", next: "email" } });
+      }
       return;
     }
     if (!plan.addUnified) {
@@ -654,16 +662,17 @@ export class NotifySettingsComponent {
     const config = this.host.config();
     const lines: string[] = [];
     if (this.view.id === "home") {
-      const state = controlStatus(config, { ...this.host.runtimeState(), restrictions: this.host.restrictions(), hasCredential: this.host.credentialStatus() !== "未设置" });
+      const state = controlStatus(config, { ...this.host.runtimeState(), restrictions: this.host.restrictions(), hasCredential: this.hasCredential() });
       lines.push(...wrapTextWithAnsi(this.theme.fg(state.tone, state.label), width));
       if (this.pending().length) lines.push(...wrapTextWithAnsi(this.theme.fg("dim", "当前对话有未保存修改"), width));
     }
     if (this.view.id === "email-config") {
-      const setup = emailSetup(config, this.host.credentialStatus() !== "未设置", this.emailTestKey === this.emailStateKey() ? this.emailTestLabel : undefined);
+      const setup = emailSetup(config, this.hasCredential(), this.emailTestKey === this.emailStateKey() ? this.emailTestLabel : undefined);
+      lines.push(...wrapTextWithAnsi(emailReadiness(config, this.host.credentialState()).label, width));
+      lines.push(...wrapTextWithAnsi(this.host.credentialStatus(), width));
       for (const text of [setup.conditions, ...(setup.next ? [`下一步：${setup.next}`] : [])]) lines.push(...wrapTextWithAnsi(this.theme.fg("muted", text), width));
       const testTone = this.emailTestKey === this.emailStateKey() && this.feedback?.feedback?.kind === "delivery" && !this.feedback.ok ? "error" : "muted";
       lines.push(...wrapTextWithAnsi(this.theme.fg(testTone, `测试：${setup.test}`), width));
-      if (!this.canManageCredentials() && this.host.credentialStatus() === "未设置") lines.push(...wrapTextWithAnsi(this.theme.fg("dim", "此系统需在启动前配置授权码，详见帮助。"), width));
     }
     return lines;
   }
@@ -709,7 +718,7 @@ export class NotifySettingsComponent {
       "在设置详情按 ? 打开操作帮助。",
       "渠道开关约束所有通知，包括单独设置的规则。统一接收选择只影响跟随它的规则。",
       "QQ 邮箱授权码：邮箱生成的专用发送凭据，不是登录密码。",
-      ...(!this.canManageCredentials() ? ["此系统通过启动环境变量 PI_NOTIFY_QQ_SMTP_AUTH_CODE 配置授权码，不在界面输入。"] : [])];
+      SECURE_INJECTION_HELP];
   }
 
   private titleText(): string {
@@ -886,14 +895,7 @@ export class NotifySettingsComponent {
     }
     if (view.action.kind === "apply") {
       const config = this.host.config();
-      const selected = Array.isArray(view.action.value) ? view.action.value.map(String) : [];
-      const restored = selected.filter((id) => !config.channels.includes(id) && config.providers.find((entry) => entry.id === id)?.enabled === false);
-      const text = item.id === "routes.unify"
-        ? [`将以下规则改为跟随统一接收选择：${routingExceptions(config).join("、") || "全部规则"}。`, "提醒时机和重要程度不变。"]
-        : [`统一接收选择：${selected.map(channelLabel).join("、") || "无"}。`,
-          `适用规则：${RULE_INFOS.filter((entry) => config.rules[entry.key as keyof NotificationConfig["rules"]].channels === "inherit").map((entry) => entry.label).join("、") || "无"}。`,
-          ...restored.map((id) => `同时开启${channelLabel(id)}，恢复原有规则：${channelRules(config, id).join("、") || "无"}。`),
-          "逐规则接收选择不变，仅已开启的规则发送。"];
+      const text = [`将以下规则改为跟随统一接收选择：${routingExceptions(config).join("、") || "全部规则"}。`, "提醒时机和重要程度不变。"];
       return [...text.flatMap((line) => wrapTextWithAnsi(line, width)), ...menuList(["取消", "确认应用"], view.focus, width, 2, this.theme)];
     }
     const lines = [
@@ -965,8 +967,8 @@ export class NotifySettingsComponent {
   private secretConfirmLines(width: number): string[] {
     const view = this.view;
     if (view.kind !== "secretConfirm") return [];
-    return [...wrapTextWithAnsi("移除此设备保存的授权码，影响所有对话。", width),
-      ...wrapTextWithAnsi("启动环境仍可提供授权码。", width),
+    return [...wrapTextWithAnsi("删除当前系统用户保存的本插件授权码，影响所有对话。", width),
+      ...wrapTextWithAnsi("不修改开关或路由，不撤销 QQ 授权；环境注入需在来源单独移除。", width),
       ...menuList(["取消", "确认移除"], view.focus, width, 2, this.theme)];
   }
 
@@ -1002,7 +1004,7 @@ export class NotifySettingsComponent {
   private openMark(row: MenuRow): string {
     if (row.kind === "category" || row.kind === "rule" || row.kind === "subgroup" || row.kind === "emailConfig") return OPEN_MARK;
     if (row.kind === "feedback" || (row.kind === "action" && ["status", "saveAll", "saveEmail", "credentialSave", "help"].includes(row.action))) return OPEN_MARK;
-    if (row.kind === "channel" && this.value(row.item) !== true && row.item.providerId === "email" && emailMissing(this.host.config(), this.host.credentialStatus() !== "未设置")) return OPEN_MARK;
+    if (row.kind === "channel" && this.value(row.item) !== true && row.item.providerId === "email" && emailMissing(this.host.config(), this.hasCredential())) return OPEN_MARK;
     if (row.kind === "field" && row.item.kind !== "boolean") return OPEN_MARK;
     return "";
   }
@@ -1020,7 +1022,7 @@ export class NotifySettingsComponent {
     if (row.kind === "action") {
       const scope = row.action === "saveAll" ? "all" : row.action === "saveEmail" ? "email" : undefined;
       const label = scope ? `${ACTION_LABELS[row.action]}  ${this.pending(scope).length} 项更改` : row.action === "credentialSave"
-        ? `${ACTION_LABELS[row.action]}  ${this.host.credentialStatus() === "未设置" ? "未设置" : this.host.credentialStatus() === "由启动环境提供" ? "启动环境已提供" : "已设置"}`
+        ? `${ACTION_LABELS[row.action]}  ${this.hasCredential() ? "已配置" : "未配置"}`
         : row.action === "emailEnable" ? `${ACTION_LABELS[row.action]}  ${this.host.config().providers.find((entry) => entry.id === "email")?.enabled ? "开启" : "关闭"}` : ACTION_LABELS[row.action];
       return truncateToWidth(`${focus}${label}${mark}`, width);
     }
@@ -1032,7 +1034,7 @@ export class NotifySettingsComponent {
       return truncateToWidth(`${focus}${row.text}`, width);
     }
     if (row.kind === "feedback") return truncateToWidth(`${focus}${this.feedbackLabel()}${OPEN_MARK}`, width);
-    if (row.kind === "channel") return truncateToWidth(`${focus}${row.item.label}  ${channelState(this.host.config(), row.item.providerId!, this.host.credentialStatus() !== "未设置", this.host.runtimeState().terminalIssue, this.host.runtimeState().channelIssues)}${mark}`, width);
+    if (row.kind === "channel") return truncateToWidth(`${focus}${row.item.label}  ${channelState(this.host.config(), row.item.providerId!, this.hasCredential(), this.host.runtimeState().terminalIssue, this.host.runtimeState().channelIssues)}${mark}`, width);
     const summary = row.kind === "field"
       ? row.item.format(this.value(row.item))
       : row.kind === "rule"
@@ -1342,20 +1344,6 @@ export class NotifySettingsComponent {
     if (item.id === "routes.unify" && current !== "inherit") {
       this.push({ kind: "confirm", itemId: item.id, focus: 0, action: { kind: "apply", value } });
       return;
-    }
-    if (item.destinations && Array.isArray(value)) {
-      const added = value.filter((id) => !this.host.config().channels.includes(String(id)));
-      if (added.includes("email")) {
-        const email = this.host.config().providers.find((entry) => entry.id === "email");
-        if (emailRequirement(email, this.host.credentialStatus() !== "未设置")) {
-          this.push(this.buildEmailPage());
-          return;
-        }
-      }
-      if (added.some((id) => this.host.config().providers.find((provider) => provider.id === id)?.enabled === false)) {
-        this.push({ kind: "confirm", itemId: item.id, focus: 0, action: { kind: "apply", value } });
-        return;
-      }
     }
     this.commit(item, value, false);
     this.requestRender();

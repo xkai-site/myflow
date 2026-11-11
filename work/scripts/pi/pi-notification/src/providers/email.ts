@@ -1,9 +1,8 @@
 import { sanitize } from "../log.ts";
 import type { Logger, Notifier, NotificationRequest } from "../types.ts";
-import { createMailSender, registerMailSender, type MailSender } from "../mail/sender.ts";
+import { createMailSender, type MailSender } from "../mail/sender.ts";
+import type { QqCredentials } from "../mail/credentials.ts";
 import { createQqSmtpSender, validateQqSmtp } from "../mail/smtp.ts";
-
-registerMailSender("smtp", "qq", (options, timeoutMs) => createQqSmtpSender(options, { timeoutMs }));
 
 const MAX_DEDUPE_KEYS = 512;
 const SAFE_PRE_SEND_ERRORS = new Set(["SMTP_NOT_CONFIGURED", "SMTP_TIMEOUT", "SMTP_CANCELLED", "邮箱发送已取消", "邮箱发送器已关闭"]);
@@ -11,9 +10,9 @@ const SAFE_PRE_SEND_ERRORS = new Set(["SMTP_NOT_CONFIGURED", "SMTP_TIMEOUT", "SM
 export function createEmailNotifier(
   id: string,
   options: Record<string, unknown>,
-  deps: { log: Logger; maxChars: number; timeoutMs?: number; sender?: MailSender },
+  deps: { log: Logger; maxChars: number; timeoutMs?: number } & ({ sender: MailSender; credentials?: QqCredentials } | { credentials: QqCredentials; sender?: undefined }),
 ): Notifier {
-  const sender = deps.sender ?? createMailSender(options, deps.timeoutMs);
+  const sender = deps.sender ?? createMailSender(options, (value, timeoutMs) => createQqSmtpSender(value, { credentials: deps.credentials!, timeoutMs }), deps.timeoutMs);
   const acceptedByKey = new Map<string, Set<string>>();
   const maxChars = Number.isFinite(deps.maxChars) && deps.maxChars > 0 ? deps.maxChars : 300;
   const parseOptions = (raw: Record<string, unknown>) => ({
@@ -23,7 +22,7 @@ export function createEmailNotifier(
   });
   const parsed = parseOptions(options);
   const validation = (): string | undefined => {
-    const base = validateQqSmtp({ ...parsed, transport: options.transport }, process.env);
+    const base = validateQqSmtp({ ...parsed, transport: options.transport });
     return base ?? sender.validate();
   };
   return {
@@ -42,7 +41,7 @@ export function createEmailNotifier(
     async send(req, signal) {
       if (signal.aborted) throw new Error("邮箱发送已取消");
       const ready = validation();
-      if (ready) throw new Error("邮箱渠道不可用，请检查地址与授权码（Windows 凭据管理器或环境变量）");
+      if (ready) throw new Error("邮箱渠道不可用，请检查地址与授权码（系统安全存储或环境注入）");
       const accepted = acceptedByKey.get(req.dedupeKey) ?? new Set<string>();
       acceptedByKey.delete(req.dedupeKey);
       acceptedByKey.set(req.dedupeKey, accepted); // refresh insertion order for bounded eviction

@@ -28,16 +28,20 @@ import { randomUUID } from "node:crypto";
 import { handleNotifyCommand } from "../src/commands.ts";
 import {
   CONFIG_VERSION,
+  defaultConfig,
   isDisabledByEnv,
   loadConfig,
   readUserConfigRaw,
   type ConfigLoadResult,
 } from "../src/config.ts";
 import { createRuntime } from "../src/runtime.ts";
+import { emailActivationBlock } from "../src/channels.ts";
 import { createLogger } from "../src/log.ts";
 import { withReliability } from "../src/providers/decorators.ts";
 import { createDebugNotifier } from "../src/providers/debug.ts";
 import { createEmailNotifier } from "../src/providers/email.ts";
+import { systemCredentialStore } from "../src/infrastructure/keyring.ts";
+import { createQqCredentials, QQ_AUTH_ENV } from "../src/mail/credentials.ts";
 import { createRegistry } from "../src/providers/registry.ts";
 import { createTerminalNotifier } from "../src/providers/terminal.ts";
 import { createWebhookNotifier, type WebhookOptions } from "../src/providers/webhook.ts";
@@ -102,11 +106,20 @@ function asPromptKind(value: unknown): UIPromptKind | undefined {
 
 export default function piNotification(pi: ExtensionAPI): void {
   const log = createLogger();
+  const credentials = createQqCredentials(systemCredentialStore(), () => process.env[QQ_AUTH_ENV]);
   const INSTANCE_TOKEN = randomUUID();
 
-  // Read the user defaults in the factory, and finish registration even when that fails so
-  // `/notify` is always available.
-  let load: ConfigLoadResult = loadConfig({ agentDir: getAgentDir() });
+  function guardEmailActivation(next: ConfigLoadResult, current: NotificationConfig): ConfigLoadResult {
+    const issue = emailActivationBlock(current, next.config, () => credentials.status());
+    return !issue ? next : { ...next,
+      config: { ...next.config, providers: next.config.providers.map((provider) => provider.id === "email" ? { ...provider, enabled: false } : provider) },
+      warnings: [...next.warnings, { path: "providers.email.enabled", message: `邮箱未开启：${issue}` }],
+    };
+  }
+
+  // Startup and a fresh extension /reload are activation boundaries too. Never persist this gate
+  // or change routes: the file remains the user's declaration, but missing prerequisites cannot open it.
+  let load: ConfigLoadResult = guardEmailActivation(loadConfig({ agentDir: getAgentDir() }), defaultConfig());
   const config: NotificationConfig = load.config;
   if (isDisabledByEnv()) config.enabled = false;
 
@@ -155,7 +168,7 @@ export default function piNotification(pi: ExtensionAPI): void {
   // QQ SMTP email channel; transport protocol selection stays behind MailSender.
   registry.register("email", (id, options) =>
     reliable(createEmailNotifier(id, (options ?? {}) as Record<string, unknown>, {
-      log, maxChars: config.content.maxMessageChars, timeoutMs: config.delivery.timeoutMs,
+      log, credentials, maxChars: config.content.maxMessageChars, timeoutMs: config.delivery.timeoutMs,
     })));
   // Legacy notification HTTP channel; the machine stream has its own independent publisher.
   registry.register("webhook", (id, options) =>
@@ -220,8 +233,11 @@ export default function piNotification(pi: ExtensionAPI): void {
       // ignore it as a whole so delivery is unaffected.
       log.log("warning", "本对话覆盖已失效，已忽略（详见状态总览）");
     }
-    load = merged;
-    const effective = merged.config;
+    // The same preflight also guards file/session reloads and races after UI confirmation.
+    // Reject only a new activation, never rewrite any unified or per-rule route.
+    const guarded = guardEmailActivation(merged, config);
+    load = guarded;
+    const effective = guarded.config;
     if (isDisabledByEnv()) effective.enabled = false;
     // Replaced field by field: the service and lifecycle hold a reference to this same object.
     config.enabled = effective.enabled;
@@ -242,7 +258,7 @@ export default function piNotification(pi: ExtensionAPI): void {
       sources: next.sources,
       degraded: next.degraded,
       errors: next.errors,
-      warnings: merged.warnings,
+      warnings: guarded.warnings,
       overlay: !isEmptyOverlay(overlay),
       enabled: config.enabled,
       minLevel: config.minLevel,
@@ -250,7 +266,7 @@ export default function piNotification(pi: ExtensionAPI): void {
     for (const problem of next.errors) {
       log.log("error", `配置错误 ${problem.path}: ${problem.message}`);
     }
-    for (const problem of merged.warnings) {
+    for (const problem of guarded.warnings) {
       log.log("warning", `配置提示 ${problem.path}: ${problem.message}`);
     }
   }
@@ -318,6 +334,7 @@ export default function piNotification(pi: ExtensionAPI): void {
       try {
         await handleNotifyCommand(args, ctx, {
           log,
+          credentials,
           config: () => config,
           configLoad: () => load,
           service: () => service,
