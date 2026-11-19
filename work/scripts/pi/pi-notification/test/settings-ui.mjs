@@ -94,7 +94,7 @@ function harness(raw, options = {}) {
     testEmail(onProgress) { return host.test(["email"], onProgress); },
     reload() { calls.reload++; return { ok: true, message: "已重读，保留本对话修改" }; },
     statusLines: () => ["状态与诊断", ...Array.from({ length: 24 }, (_, i) => `诊断行 ${i}`)],
-    preview: () => ({ ok: true, message: "示例，不会发送", lines: ["任务完成 / 示例会话", "固定数据，不读取真实回复"] }),
+    preview: () => ({ ok: true, message: "示例，不会发送", lines: ["示例会话：已完成（2分35秒，$0.0246）", "固定数据，不读取真实回复"] }),
   };
   if (options.credentials) Object.assign(host, {
     credentialState: () => options.credentials.status(), credentialStatus: () => options.credentials.status().message,
@@ -156,7 +156,7 @@ try {
     const h = harness(); row(h, "提醒时机", true);
     assert.match(h.frame().join(""), /执行完成.*执行失败.*等待输入/);
     assert.equal(h.host.config().rules.waitingForUser.enabled, false);
-    assert.equal(h.host.config().content.includeAssistantExcerpt, false);
+    assert.equal(h.host.config().content.mode, "brief");
   });
   await step("失败混合状态可保存但不强制归一", () => {
     const h = harness({ rules: { compactFailed: { enabled: false } } }); searchItem(h, "reminders.failed");
@@ -226,17 +226,20 @@ try {
     reception(h); row(h, "邮箱配置", true); row(h, "邮箱通知", true);
     assert.equal(h.host.config().providers.find((p) => p.id === "email").enabled, true);
   });
-  await step("数字自定义及非法输入；时间自定义严格校验", () => {
-    const h = harness(); searchItem(h, "content.maxMessageChars"); choose(h, "自定义…");
-    h.press("\x7f"); h.press("\x7f"); h.press("\x7f"); h.press("1"); h.press(K.enter);
-    assert.match(h.frame().join(""), /Enter 应用.*Esc 取消/); assert.equal(h.host.config().content.maxMessageChars, 300);
-    h.press(K.esc); home(h); searchItem(h, "quietHours.start"); choose(h, "自定义…");
+  await step("通知内容只有两个模式，选择完整仅改变当前对话；时间输入仍校验", () => {
+    const h = harness(); searchItem(h, "content.mode");
+    assert.match(h.frame().join(""), /简要.*完整/);
+    choose(h, "完整（邮箱附全文）");
+    assert.equal(h.host.config().content.mode, "full");
+    assert.equal(h.raw(), undefined);
+    home(h); searchItem(h, "quietHours.start"); choose(h, "自定义…");
     for (let i = 0; i < 5; i++) h.press("\x7f"); h.press("25:00"); h.press(K.enter); assert.match(h.frame().join(""), /Enter 应用.*Esc 取消/);
+    assert.equal(h.host.config().quietHours.start, "23:00");
   });
   await step("a/d 单项还原：默认取消，确认才删，其他字段保留", () => {
-    const h = harness({ enabled: false, content: { includeCost: false } }); row(h, "通知总开关"); h.press(K.space); h.press("?"); h.press("a");
+    const h = harness({ enabled: false, content: { mode: "full" } }); row(h, "通知总开关"); h.press(K.space); h.press("?"); h.press("a");
     assert.equal(h.host.config().enabled, false); h.press("d"); assert.match(focusedLine(h), /取消/); h.press(K.enter); assert.equal(h.raw().enabled, false);
-    h.press("d"); confirm(h); assert.equal(h.raw().enabled, undefined); assert.equal(h.raw().content.includeCost, false);
+    h.press("d"); confirm(h); assert.equal(h.raw().enabled, undefined); assert.equal(h.raw().content.mode, "full");
   });
   await step("窄屏/宽字符/标记/页数不超宽，详情可以分页", () => {
     const h = harness(); searchItem(h, "channels");
@@ -387,7 +390,7 @@ try {
     searchItem(h, "channels"); choose(h, "邮箱通知");
     const current = h.host.config();
     assert.deepEqual(resolveChannels(current, current.rules.runFailed), ["terminal", "email"]);
-    assert.equal(current.rules.waitingForUser.enabled, false); assert.equal(current.content.includeAssistantExcerpt, false);
+    assert.equal(current.rules.waitingForUser.enabled, false); assert.equal(current.content.mode, "brief");
     frames.push(["邮箱就绪", h.frame().join("\n")]);
     const deliveries = [];
     let journeyReceipt;
@@ -428,7 +431,7 @@ try {
   await step("批量保存默认取消、Esc 原焦点返回；确认原子写入所有修改", () => {
     const h = harness({ api: { enabled: false }, future: "keep" });
     row(h, "通知总开关"); h.press(K.space);
-    searchItem(h, "content.includeCost"); choose(h, "关闭"); home(h);
+    searchItem(h, "content.mode"); choose(h, "完整（邮箱附全文）"); home(h);
     row(h, "保存为默认设置", true);
     assert.match(h.frame().join(""), /将保存以下修改.*其他已打开对话不变/);
     assert.doesNotMatch(h.frame().join(""), /JSON|API|授权码/);
@@ -437,7 +440,7 @@ try {
     row(h, "保存为默认设置", true); h.press(K.esc);
     assert.match(focusedLine(h), /保存为默认设置/);
     h.press(K.enter); h.press(K.down); h.press(K.enter);
-    assert.deepEqual(h.raw(), { api: { enabled: false }, future: "keep", enabled: false, content: { includeCost: false } });
+    assert.deepEqual(h.raw(), { api: { enabled: false }, future: "keep", enabled: false, content: { mode: "full" } });
     assert.doesNotMatch(h.frame().join(""), /保存为默认设置|查看问题详情|测试结果与详情/);
     assert.equal(h.calls.save.length, 2);
   });
@@ -568,8 +571,9 @@ try {
   });
   await step("范围确认超过五项可分页，未查看项目也不重复或遗漏保存", () => {
     const h = harness();
-    for (const id of ["content.includeCost", "content.includeDuration", "content.includeSessionLabel", "content.includeToolFailureNames", "content.includeAssistantExcerpt", "rules.waitingForUser.enabled"]) {
-      searchItem(h, id); choose(h, id === "content.includeAssistantExcerpt" || id === "rules.waitingForUser.enabled" ? "开启" : "关闭");
+    for (const [id, label] of [["content.mode", "完整（邮箱附全文）"], ["quietHours.enabled", "开启"], ["rules.runAborted.enabled", "开启"],
+      ["rules.runCompleted.enabled", "关闭"], ["rules.toolFailed.enabled", "关闭"], ["rules.waitingForUser.enabled", "开启"]]) {
+      searchItem(h, id); choose(h, label);
     }
     home(h); row(h, "保存为默认设置", true);
     assert.match(h.frame(40).join(""), /1–5\/6/);
@@ -712,7 +716,7 @@ try {
     for (const key of [K.enter, K.space]) for (const width of [40, 70, 110]) {
       const h = harness({}, { vault: { value: "fake-switch-only" }, realActions: true });
       for (const [id, value] of [["provider:email:from", "fake@qq.com"], ["provider:email:to", ["reader@example.com"]],
-        ["channels", ["email"]], ["content.includeCost", false], ["rules.runFailed.channels", []]]) {
+        ["channels", ["email"]], ["content.mode", "full"], ["rules.runFailed.channels", []]]) {
         const item = settings.buildSettingItems(h.host.config()).find((item) => item.id === id);
         assert.equal(h.host.setValue(item, value).ok, true);
       }
@@ -780,8 +784,8 @@ try {
       assert.doesNotMatch(h.frame().join(""), /加入统一接收选择/);
       assert.equal(h.host.config().providers.find((p) => p.id === "email").enabled, true);
       assert.deepEqual(h.host.config().channels, ["terminal"]);
-      searchItem(h, "content.maxMessageChars"); row(h, "自定义…"); h.press(key);
-      assert.match(h.frame().join(""), /范围：.*Enter 应用/);
+      searchItem(h, "quietHours.start"); row(h, "自定义…"); h.press(key);
+      assert.match(h.frame().join(""), /HH:MM.*Enter 应用/);
     }
   });
   await step("错误与异步反馈仅留在操作上下文，不跟随导航或回流到旧页面", async () => {
@@ -971,7 +975,7 @@ try {
     row(h, "保存为默认设置", true); h.press(K.down); h.press(K.enter); capture("save-failed");
     home(h); row(h, "更多设置", true); row(h, "操作帮助", true); capture("help"); h.press(K.esc);
     home(h); row(h, "通知总开关"); h.press("?"); capture("field-details"); h.press(K.esc);
-    searchItem(h, "content.maxMessageChars"); h.press(K.save); capture("candidates"); home(h);
+    searchItem(h, "content.mode"); h.press(K.save); capture("candidates"); home(h);
     const unused = harness({ channels: [], providers: [{ id: "terminal", type: "terminal", enabled: false }] });
     row(unused, "本机通知", true);
     for (const width of [40, 70, 110]) frames[`enable-review-${width}`] = unused.frame(width);
@@ -1019,7 +1023,7 @@ try {
       assert.ok(h.frame().includes(theme.fg("error", "测试：发送失败")), "测试失败使用语义错误色");
       h.press(K.esc); themedRow("操作帮助", true); check("help");
       h.press(K.esc); h.press(K.esc); themedRow("通知总开关"); h.press("?"); check("field-details");
-      h.press(K.esc); h.press("/"); h.press("content.maxMessageChars"); h.press(K.enter); h.press(K.save); check("candidates");
+      h.press(K.esc); h.press("/"); h.press("content.mode"); h.press(K.enter); h.press(K.save); check("candidates");
       const unused = harness({ channels: [], providers: [{ id: "terminal", type: "terminal", enabled: false }] }, { theme });
       unused.press(K.down); unused.press(K.down); unused.press(K.enter); check("enable-review", unused);
     }

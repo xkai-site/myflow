@@ -11,9 +11,7 @@
  *     constant with no interpolation, and the text is written with DOM `CreateTextNode`
  *     instead of string concatenation; interpolating a title into the script would be a
  *     command-injection surface.
- *  2. Every payload passes `sanitize()` (dropping ESC, BEL and C0 controls) and the renderers
- *     additionally flatten newlines, so a title cannot terminate the sequence early or smuggle
- *     a second one.
+ *  2. All payloads are flattened and stripped of terminal controls before rendering.
  *  3. Writing to stdout requires `stdout.isTTY`: under `-p` or `--mode json` that stream is the
  *     caller's data, and an escape sequence written into it corrupts the output.
  *
@@ -23,7 +21,7 @@
 
 import { execFile } from "node:child_process";
 
-import { sanitize } from "../log.ts";
+import { singleLine } from "../log.ts";
 import type { Logger, Notifier, NotificationRequest } from "../types.ts";
 
 export type TerminalChannel = "osc99" | "osc777" | "toast" | "none";
@@ -90,20 +88,10 @@ export function selectTerminalChannel(environment: TerminalEnvironment): Termina
   return { channel: "osc777" };
 }
 
-/**
- * OSC payload hardening: `sanitize()` first, then drop any byte that could end the sequence
- * early or start another one. The 300 here is only a defensive bound; the real limit is the
- * caller's `maxChars`, which `send()` already applied.
- */
-function payload(text: string): string {
-  const cleaned = sanitize(text, 300);
-  const hardened = cleaned.replace(/[\u0000-\u001f\u007f\u001b\u009b]/g, " ").replace(/\s+/g, " ").trim();
-  return hardened.replace(/\n/g, " ");
-}
-
 export function renderOsc777(title: string, body: string): string {
-  const t = payload(title);
-  const b = payload(body);
+  // The title and body are delimited by a literal semicolon in OSC 777.
+  const t = singleLine(title).replace(/;/g, "；");
+  const b = singleLine(body);
   return `\u001b]777;notify;${t}${b ? `;${b}` : ""}\u0007`;
 }
 
@@ -112,8 +100,8 @@ export function renderOsc777(title: string, body: string): string {
  * into a single notification.
  */
 export function renderOsc99(id: string, title: string, body: string): string {
-  const t = payload(title);
-  const b = payload(body);
+  const t = singleLine(title);
+  const b = singleLine(body);
   return [
     `\u001b]99;i=${id}:d=0:p=title;${t}\u001b\\`,
     `\u001b]99;i=${id}:d=1:p=body;${b}\u001b\\`,
@@ -137,12 +125,16 @@ export const TOAST_SCRIPT = [
 
 /** Payload is passed only through base64 environment variables, so the script never holds user data. */
 export function buildToastInvocation(title: string, body: string): ToastInvocation {
+  const encodedBody = Buffer.from(singleLine(body), "utf8").toString("base64");
+  // Windows environment values are limited to 32,767 characters. Keep the title
+  // when an exceptional diagnostic or prompt cannot travel in the body variable.
+  const toastBody = encodedBody.length < 32767 ? encodedBody : Buffer.from("详细信息请在 Pi 中查看", "utf8").toString("base64");
   return {
     command: "powershell.exe",
     args: ["-NoProfile", "-NonInteractive", "-Command", TOAST_SCRIPT],
     env: {
-      PI_NOTIFY_TOAST_TITLE: Buffer.from(payload(title), "utf8").toString("base64"),
-      PI_NOTIFY_TOAST_BODY: Buffer.from(payload(body), "utf8").toString("base64"),
+      PI_NOTIFY_TOAST_TITLE: Buffer.from(singleLine(title), "utf8").toString("base64"),
+      PI_NOTIFY_TOAST_BODY: toastBody,
     },
   };
 }
@@ -181,7 +173,6 @@ export function createDefaultTerminalIo(): TerminalIo {
 
 export interface TerminalNotifierOptions {
   log: Logger;
-  maxChars: number;
   io?: TerminalIo;
 }
 
@@ -215,9 +206,7 @@ export function createTerminalNotifier(id: string, options: TerminalNotifierOpti
       }
       if (signal.aborted) throw new Error("投递已取消");
 
-      const title = sanitize(req.title, options.maxChars);
-      const body = sanitize(req.body, options.maxChars);
-
+      const { title, body } = req;
       if (selection.channel === "toast") {
         await io.runToast(buildToastInvocation(title, body));
         return;

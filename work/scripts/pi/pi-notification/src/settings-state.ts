@@ -1,5 +1,5 @@
 /** Session snapshots and sparse default transactions. No presentation, IO or host context. */
-import { containsCredentialKey, defaultConfig, mergeConfig, type ConfigProblem } from "./config.ts";
+import { containsCredentialKey, defaultConfig, mergeConfig, stripLegacyContent, type ConfigProblem } from "./config.ts";
 import {
   getPathValue,
   hasPath,
@@ -30,13 +30,15 @@ export function isEmptyOverlay(overlay: SessionOverlay): boolean {
 }
 function notificationPatch(patch: ConfigPatch): ConfigPatch {
   const { api: _api, ...allowed } = structuredClone(patch);
-  return allowed;
+  return stripLegacyContent(allowed);
 }
 
 /** Session files are an external boundary. Empty snapshots must survive reload; API stays file-only. */
 export function overlayFromEntry(value: unknown): SessionOverlay | undefined {
-  if (!isPlainObject(value) || containsCredentialKey(value)) return undefined;
-  const patch = isPlainObject(value.patch) ? notificationPatch(value.patch) : {};
+  if (!isPlainObject(value)) return undefined;
+  const rawPatch = isPlainObject(value.patch) ? stripLegacyContent(value.patch) : {};
+  if (containsCredentialKey({ ...value, patch: rawPatch })) return undefined;
+  const patch = notificationPatch(rawPatch);
   const providers: Record<string, boolean> = {};
   if (isPlainObject(value.providers)) {
     for (const [id, enabled] of Object.entries(value.providers))

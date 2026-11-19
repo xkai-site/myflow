@@ -50,6 +50,8 @@ export type SignalKind =
   | "compact_completed"
   | "run_started"
   | "assistant_message"
+  | "turn_started"
+  | "turn_finished"
   | "tool_finished"
   | "run_settled"
   | "compact_failed"
@@ -63,13 +65,14 @@ export interface SignalEvent {
   /** epoch ms, from the injected clock */
   at: number;
   reason?: string;
-  labels?: { sessionName?: string; projectName?: string };
+  labels?: SessionLabels;
   contextPercent?: number;
+  /** Candidate from a finished, text-producing assistant turn; never a tool call or result. */
+  replyCandidate?: string;
   assistant?: {
     stopReason: AssistantStopReason | undefined;
     errorMessage?: string;
     usageCostUsd?: number;
-    text?: string;
   };
   tool?: {
     toolCallId: string;
@@ -115,10 +118,12 @@ export interface RunOutcome {
   errorMessage?: string;
   toolFailures: ToolFailure[];
   compactFailed?: boolean;
-  /** Cost accumulated from assistant usage in this run; undefined when usage is never reported. */
+  /** Actual compaction error (not a user-cancelled compaction). Human notifications only. */
+  compactionError?: boolean;
+  /** Cost accumulated from assistant usage in this run; omitted if any report is missing. */
   costUsd?: number;
-  /** Leading characters of the last assistant text (length-capped upstream, not yet sanitized). */
-  assistantExcerpt?: string;
+  /** Private human-notification data; only present for a final text-producing turn. */
+  finalReply?: string;
 }
 
 /** Accumulated result for a failing `tool_execution_end` (produced by lifecycle, consumed by rules). */
@@ -128,28 +133,29 @@ export interface ToolFailureEvent {
   toolName: string;
   /** Failure count for this tool, deduplicated per tool name within the run. */
   count: number;
-  /** All failures seen so far in this run; `immediate` mode renders from this list. */
+  /** All failures seen so far in this run. */
   accumulated: ToolFailure[];
 }
 
-export interface RunSummary {
-  runStatus: RunStatus;
-  durationMs: number;
-  toolFailures: ToolFailure[];
+export interface SessionLabels {
   /** Session name from `/name`; undefined when the session is unnamed. */
   sessionName?: string;
   /** Basename of `ctx.cwd`; fallback label when the session has no name. */
   projectName?: string;
-  /** Cost accumulated in this instance for the session; reset by `/reload` or a session change. */
-  cumulativeCostUsd?: number;
+}
+
+export interface RunSummary extends SessionLabels {
   contextPercent?: number;
 }
 
 export interface NotificationRequest {
   level: NotifyLevel;
   kind: NotificationKind;
+  /** Brief presentation shared by all human channels. */
   title: string;
   body: string;
+  /** Full-mode settlement details for email. Never log or serialize to other channels. */
+  details?: { contextPercent?: number; finalReply: string | null };
   /** Stable key used for dedupe and coalescing. */
   dedupeKey: string;
   /**
@@ -169,12 +175,6 @@ export interface NotificationRequest {
     level: NotifyLevel;
   };
 }
-
-/** Pure function, no IO. */
-export type RuleEvaluator = (
-  input: { outcome: RunOutcome; summary?: RunSummary },
-  config: NotificationConfig,
-) => NotificationRequest | null;
 
 export interface Notifier {
   readonly id: string;
@@ -319,17 +319,7 @@ export interface NotificationConfig {
     end: string;
     exceptLevels: NotifyLevel[];
   };
-  content: {
-    includeDuration: boolean;
-    includeToolFailureNames: boolean;
-    /** Add session name or project directory to the title; a short session id is always shown. */
-    includeSessionLabel: boolean;
-    /** Leading characters of the final assistant reply; off by default (may carry file content or secrets). */
-    includeAssistantExcerpt: boolean;
-    /** Cost (this run and session total) plus context usage percentage. */
-    includeCost: boolean;
-    maxMessageChars: number;
-  };
+  content: { mode: "brief" | "full" };
   delivery: {
     timeoutMs: number;
     maxRetries: number;
@@ -371,7 +361,7 @@ export type RuntimeState = "idle" | "working" | "blocked" | "done" | "error" | "
 export type CompactionReason = "manual" | "threshold" | "overflow";
 export type BlockingPromptKind = Exclude<UIPromptKind, "custom">;
 
-/** Wire-safe run summary: never contains assistant excerpts or raw context. */
+/** Wire-safe run summary: never contains assistant text or raw context. */
 export interface MachineRun {
   runId: string;
   status: RunStatus;

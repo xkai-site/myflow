@@ -160,7 +160,7 @@ await step("Windows toast：脚本静态零插值，载荷只走环境变量 bas
 
 await step("未认证/不可用：非 TTY 下 send() 跳过而非失败，且一个字节都不写", async () => {
   const { io, log, writes, records } = withIo({ environment: () => env({ stdoutIsTTY: false }) });
-  const notifier = terminal.createTerminalNotifier("terminal", { log, maxChars: 300, io });
+  const notifier = terminal.createTerminalNotifier("terminal", { log, io });
   assert.match(notifier.validate(), /TTY/);
   await notifier.send(request("run_completed"), new AbortController().signal);
   assert.deepEqual(writes, []);
@@ -170,7 +170,7 @@ await step("未认证/不可用：非 TTY 下 send() 跳过而非失败，且一
 await step("TTY 下真的写出 OSC；win32 下走 toast；toast 失败会冒泡为投递失败", async () => {
   const linux = withIo({});
   await terminal
-    .createTerminalNotifier("terminal", { log: linux.log, maxChars: 300, io: linux.io })
+    .createTerminalNotifier("terminal", { log: linux.log, io: linux.io })
     .send(request("run_completed"), new AbortController().signal);
   assert.equal(linux.writes.length, 1);
   assert.ok(linux.writes[0].startsWith("\u001b]777;notify;"));
@@ -178,7 +178,7 @@ await step("TTY 下真的写出 OSC；win32 下走 toast；toast 失败会冒泡
 
   const windows = withIo({ environment: () => env({ platform: "win32" }) });
   await terminal
-    .createTerminalNotifier("terminal", { log: windows.log, maxChars: 300, io: windows.io })
+    .createTerminalNotifier("terminal", { log: windows.log, io: windows.io })
     .send(request("run_failed"), new AbortController().signal);
   assert.equal(windows.toasts.length, 1);
   assert.deepEqual(windows.writes, [], "win32 不应写 OSC");
@@ -191,7 +191,7 @@ await step("TTY 下真的写出 OSC；win32 下走 toast；toast 失败会冒泡
   });
   await assert.rejects(
     terminal
-      .createTerminalNotifier("terminal", { log: failing.log, maxChars: 300, io: failing.io })
+      .createTerminalNotifier("terminal", { log: failing.log, io: failing.io })
       .send(request("run_completed"), new AbortController().signal),
     /toast/,
   );
@@ -202,27 +202,22 @@ await step("取消信号：已 abort 时不得写出任何字节", async () => {
   const controller = new AbortController();
   controller.abort();
   await assert.rejects(
-    terminal.createTerminalNotifier("terminal", { log, maxChars: 300, io }).send(request("run_completed"), controller.signal),
+    terminal.createTerminalNotifier("terminal", { log, io }).send(request("run_completed"), controller.signal),
     /取消/,
   );
   assert.deepEqual(writes, []);
 });
 
-await step("长文案截断：以 maxMessageChars 为界，且不切断代理对", async () => {
+await step("本机始终只发送简要内容；OSC 标题分隔符和 Windows 传输上限单独处理", async () => {
   const { io, log, writes } = withIo({});
-  const long = "😀".repeat(400);
-  await terminal
-    .createTerminalNotifier("terminal", { log, maxChars: 50, io })
-    .send({ ...request("run_completed"), body: long }, new AbortController().signal);
-  const body = writes[0];
-  assert.ok(body.includes("…"));
-  assert.ok([...body].length < 120, `未截断: ${[...body].length}`);
-  // `for...of` iterates code points, which is what detecting a lone surrogate needs; a regex
-  // character class matches per UTF-16 unit and gets it wrong.
-  for (const ch of body) {
-    const code = ch.codePointAt(0) ?? 0;
-    assert.ok(code < 0xd800 || code > 0xdfff, `孤立代理对: 0x${code.toString(16)}`);
-  }
+  const title = "proj;name：已完成（38秒，$0.0246）";
+  await terminal.createTerminalNotifier("terminal", { log, io }).send({
+    ...request("run_completed"), title, body: "", details: { contextPercent: 42, finalReply: "PRIVATE REPLY" },
+  }, new AbortController().signal);
+  assert.equal(writes[0], "\u001b]777;notify;proj；name：已完成（38秒，$0.0246）\u0007");
+  const { env: payload } = terminal.buildToastInvocation(title, "😀".repeat(32767));
+  assert.equal(Buffer.from(payload.PI_NOTIFY_TOAST_TITLE, "base64").toString("utf8"), title);
+  assert.equal(Buffer.from(payload.PI_NOTIFY_TOAST_BODY, "base64").toString("utf8"), "详细信息请在 Pi 中查看");
 });
 
 function request(kind) {

@@ -60,7 +60,7 @@ try {
   await step("信封：稳定身份、白名单、隐私和不可变快照", () => {
     const snapshot = { state: "done", prompts: [], lastRun: {
       runId: "run", status: "completed", startObserved: false, startedAt: 99, durationMs: 2,
-      toolFailures: [{ toolName: "bash", count: 2 }], assistantExcerpt: "SECRET_REPLY", cwd: "SECRET_CWD",
+      toolFailures: [{ toolName: "bash", count: 2 }], finalReply: "SECRET_REPLY", cwd: "SECRET_CWD",
     }, rawPrompt: "SECRET_PROMPT" };
     const fact = { type: "run.settled", at: 123, runId: "run", data: snapshot.lastRun };
     const item = envelope(9, { snapshot, fact, labels: { sessionName: "PRIVATE_LABEL" } });
@@ -85,7 +85,7 @@ try {
       assert.equal(loadConfig({ agentDir: dir }).config.api.enabled, false);
       const raw = { enabled: false, api: { enabled: true, url: url(), headers: { Authorization: "private-header" } } };
       fs.writeFileSync(userConfigPath(dir), JSON.stringify(raw));
-      assert.equal(writeUserDefault(dir, { content: { includeCost: false } }).ok, true);
+      assert.equal(writeUserDefault(dir, { content: { mode: "full" } }).ok, true);
       assert.deepEqual(JSON.parse(fs.readFileSync(userConfigPath(dir), "utf8")).api, raw.api);
       assert.equal(loadConfig({ agentDir: dir }).config.api.enabled, true);
       fs.writeFileSync(userConfigPath(dir), JSON.stringify({ enabled: false, api: { enabled: true, queueLimit: 0 } }));

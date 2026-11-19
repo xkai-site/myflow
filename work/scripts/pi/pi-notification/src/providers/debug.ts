@@ -7,18 +7,15 @@
  * the service and the reliability decorators own both.
  */
 
-import { sanitize } from "../log.ts";
+import { singleLine } from "../log.ts";
 import type { Logger, Notifier, NotificationRequest } from "../types.ts";
 
 export interface DebugNotifierOptions {
   log: Logger;
-  /** Body length cap, taken from `config.content.maxMessageChars`. */
-  maxChars: number;
+
 }
 
 export function createDebugNotifier(id: string, options: DebugNotifierOptions): Notifier {
-  const maxChars = Number.isFinite(options.maxChars) && options.maxChars > 0 ? options.maxChars : 300;
-
   return {
     id,
     type: "debug",
@@ -29,8 +26,8 @@ export function createDebugNotifier(id: string, options: DebugNotifierOptions): 
 
     async send(req: NotificationRequest, signal: AbortSignal): Promise<void> {
       if (signal.aborted) throw new Error("投递已取消");
-      const title = sanitize(req.title, maxChars).replace(/\n/g, " ");
-      const body = sanitize(req.body, maxChars).replace(/\n/g, " ");
+      const title = singleLine(req.title);
+      const body = singleLine(req.body);
       options.log.log(req.level, `[${req.kind}] ${title}${body ? ` — ${body}` : ""}`, {
         kind: req.kind,
         dedupeKey: req.dedupeKey,

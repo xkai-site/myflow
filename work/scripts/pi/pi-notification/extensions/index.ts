@@ -65,33 +65,17 @@ function isAssistantStopReason(value: unknown): value is AssistantStopReason {
 }
 
 /**
- * Keeps only text parts, at most 200 code points, as an assistant reply sample.
- * The display length is decided by the rules layer; the cap here only stops per-run state from
- * growing without bound.
- */
-function assistantText(content: unknown): string | undefined {
-  if (!Array.isArray(content)) return undefined;
-  const parts: string[] = [];
-  for (const part of content) {
-    if ((part as { type?: unknown })?.type !== "text") continue;
-    const text = (part as { text?: unknown }).text;
-    if (typeof text === "string" && text !== "") parts.push(text);
-  }
-  const joined = parts.join(" ").trim();
-  return joined === "" ? undefined : [...joined].slice(0, 200).join("");
-}
-
-/**
- * Context usage percentage, omitted unless both `getContextUsage()` and `model.contextWindow`
- * are available: guessing a number would be worse than showing nothing, since local and unknown
- * models have no reliable window size.
+ * Use Pi's context usage and matching window (including the resolved model's window).
+ * After compaction Pi may report unknown tokens until the next response.
  */
 function contextPercentOf(ctx: ExtensionContext): number | undefined {
   try {
-    const used = ctx.getContextUsage()?.tokens;
-    const window = ctx.model?.contextWindow;
-    if (typeof used !== "number" || !Number.isFinite(used) || typeof window !== "number" || window <= 0) return undefined;
-    return Math.max(0, Math.round((used / window) * 100));
+    const usage = ctx.getContextUsage();
+    if (!usage) return undefined;
+    const { tokens, contextWindow } = usage;
+    if (tokens === null || !Number.isFinite(tokens) || tokens < 0
+      || !Number.isFinite(contextWindow) || contextWindow <= 0) return undefined;
+    return Math.round((tokens / contextWindow) * 100);
   } catch {
     return undefined;
   }
@@ -166,18 +150,18 @@ export default function piNotification(pi: ExtensionAPI): void {
 
   // Default channel: desktop notification through OSC 777, OSC 99 or a Windows toast.
   registry.register("terminal", (id) =>
-    reliable(createTerminalNotifier(id, { log, maxChars: config.content.maxMessageChars })));
+    reliable(createTerminalNotifier(id, { log })));
   // Diagnostic channel: writes the notification as one log line instead of touching the output.
   registry.register("debug", (id) =>
-    reliable(createDebugNotifier(id, { log, maxChars: config.content.maxMessageChars })));
+    reliable(createDebugNotifier(id, { log })));
   // QQ SMTP email channel; transport protocol selection stays behind MailSender.
   registry.register("email", (id, options) =>
     reliable(createEmailNotifier(id, (options ?? {}) as Record<string, unknown>, {
-      log, credentials, maxChars: config.content.maxMessageChars, timeoutMs: config.delivery.timeoutMs,
+      log, credentials, timeoutMs: config.delivery.timeoutMs,
     })));
   // Legacy notification HTTP channel; the machine stream has its own independent publisher.
   registry.register("webhook", (id, options) =>
-    reliable(createWebhookNotifier(id, (options ?? {}) as WebhookOptions, { log, maxChars: config.content.maxMessageChars })));
+    reliable(createWebhookNotifier(id, (options ?? {}) as WebhookOptions, { log })));
 
   const service = createService({ config, registry, log, now: () => Date.now(), isSilenced: () => pi.getFlag("no-notify") === true });
   const runtime = createRuntime({
@@ -187,10 +171,7 @@ export default function piNotification(pi: ExtensionAPI): void {
   const lifecycle = runtime.lifecycle;
 
   let currentSessionId: string | undefined;
-  /**
-   * Session name from `/name`, used only as a body label: read at `session_start` and kept up to
-   * date by `session_info_changed`.
-   */
+  /** Session name from `/name`, refreshed by `session_info_changed`. */
   let sessionName: string | undefined;
   /** Project directory name, used as the fallback label when the session has no name. */
   let projectName: string | undefined;
@@ -429,21 +410,34 @@ export default function piNotification(pi: ExtensionAPI): void {
         role?: string;
         stopReason?: unknown;
         errorMessage?: unknown;
-        content?: unknown;
         usage?: { cost?: { total?: unknown } };
       };
       if (message?.role !== "assistant") return;
-      const text = config.content.includeAssistantExcerpt ? assistantText(message.content) : undefined;
       observe(ctx, "assistant_message", { assistant: {
         stopReason: isAssistantStopReason(message.stopReason) ? message.stopReason : undefined,
         ...(typeof message.errorMessage === "string" ? { errorMessage: message.errorMessage } : {}),
         ...(typeof message.usage?.cost?.total === "number" ? { usageCostUsd: message.usage.cost.total } : {}),
-        ...(text !== undefined ? { text } : {}),
       } });
     });
   });
 
-  // Read-only: refreshes the body label when the session name changes. The name itself is never
+  pi.on("turn_start", (_event, ctx) => {
+    guard("turn_start", () => observe(ctx, "turn_started"));
+  });
+
+  // Unlike message_end, turn_end sees the finalized message after replacement handlers.
+  // It is only a candidate: a retry, a follow-up or an extension continuation can still run.
+  pi.on("turn_end", ({ message, toolResults }, ctx) => {
+    guard("turn_end", () => {
+      if (config.content.mode !== "full" || message.role !== "assistant" || toolResults.length > 0) return;
+      if (message.stopReason !== "stop" && message.stopReason !== "length") return;
+      if (message.content.some((part) => part.type === "toolCall")) return;
+      const text = message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n\n");
+      if (text.trim()) observe(ctx, "turn_finished", { replyCandidate: text });
+    });
+  });
+
+  // Read-only: refreshes the title label when the session name changes. The name itself is never
   // recorded, only whether one exists.
   pi.on("session_info_changed", (event, ctx) => {
     guard("session_info_changed", () => {
@@ -488,7 +482,8 @@ export default function piNotification(pi: ExtensionAPI): void {
   pi.on("agent_settled", (event, ctx) => {
     guard("agent_settled", () => observe(ctx, "run_settled", {
       settled: { isIdle: isIdleOf(ctx), aborted: event.aborted === true },
-      labels: { sessionName, projectName }, contextPercent: contextPercentOf(ctx),
+      labels: { sessionName, projectName },
+      contextPercent: config.content.mode === "full" ? contextPercentOf(ctx) : undefined,
     }));
   });
 

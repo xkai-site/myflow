@@ -28,6 +28,7 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -292,7 +293,7 @@ function createUiDriver() {
   return driver;
 }
 
-async function makeHost({ label, extensions, projectTrusted = true, userConfig, mode = "print", ui = {}, driver, retry, persisted = false }) {
+async function makeHost({ label, extensions, projectTrusted = true, userConfig, mode = "print", ui = {}, driver, retry, persisted = false, noTools = "all" }) {
   const root = path.join(TMP, label);
   const agentDir = path.join(root, "agent");
   const probeFile = path.join(root, "probe.jsonl");
@@ -343,7 +344,7 @@ async function makeHost({ label, extensions, projectTrusted = true, userConfig, 
     allowModelNetwork: false,
   });
 
-  const common = { cwd: root, agentDir, resourceLoader: loader, settingsManager, modelRuntime, noTools: "all" };
+  const common = { cwd: root, agentDir, resourceLoader: loader, settingsManager, modelRuntime, noTools };
   const initial = await sdk.createAgentSession({ ...common,
     sessionManager: persisted ? sdk.SessionManager.create(root, path.join(root, "sessions")) : sdk.SessionManager.inMemory(root) });
   let session = initial.session;
@@ -588,7 +589,7 @@ await step("B 一次成功运行恰好投递 1 条 run_completed（并真的写�
   assert.equal(delta.deliveries[0].providerId, "terminal");
   assert.match(delta.deliveries[0].dedupeKey, /:run_completed$/);
   assert.equal(delta.notifies, 1, "应恰好写出 1 条终端通知");
-  assert.ok(delta.osc.osc777[0].includes("任务完成"), "通知正文应含判定结果标题");
+  assert.match(oscTitle(delta.osc.osc777[0]), /已完成/);
   firstDedupeKey = delta.deliveries[0].dedupeKey;
   bSettledMono = findBy(delta.probe, (row) => row.ev === "settled_enter", "settled_enter").mono;
 });
@@ -645,7 +646,7 @@ await step("F 失败运行投递 1 条 run_failed(error)", async () => {
   const delta = await host.prompt("hi");
   assert.equal(delta.deliveries.length, 1, `期望 1 条投递，实际 ${delta.deliveries.length} 条`);
   assert.equal(delta.deliveries[0].kind, "run_failed");
-  assert.ok(delta.osc.osc777[0].includes("任务未完成"), "失败标题应明确提示任务未完成");
+  assert.match(oscTitle(delta.osc.osc777[0]), /运行失败/);
   assert.equal(delta.deliveries[0].level, "error");
   assert.equal(delta.deliveries[0].ok, true);
   assert.equal(delta.notifies, 1, "失败运行也应恰好写出 1 条终端通知");
@@ -1050,11 +1051,11 @@ await step("J7 Ctrl+S：只写这一项到用户默认文件，且标记与状�
 });
 
 await step("J8 Ctrl+S 再保存另一项：两项并存，其余字段不出现", async () => {
-  const delta = await driveSettings(await keysToList("content.includeCost", [K.ctrlS]));
+  const delta = await driveSettings(await keysToList("content.mode", [K.ctrlS]));
   assert.equal(delta.deliveries.length, 0);
   assert.deepEqual(readSparse(settings), {
     rules: { runCompleted: { enabled: false } },
-    content: { includeCost: true },
+    content: { mode: "brief" },
   });
 });
 
@@ -1300,11 +1301,11 @@ await step("J13e 控制中心批量保存：真实命令事务、范围取消、
   const items = module.buildSettingItems(configModule.loadConfig({ agentDir: host.agentDir }).config);
   try {
     const before = fs.readFileSync(host.userConfigPath, "utf8");
-    await drive(keysAlongRoute(module, items, "content.includeCost", { open: true, after: [K.down, K.enter] }));
+    await drive(keysAlongRoute(module, items, "content.mode", { open: true, after: [K.down, K.enter] }));
     await drive([...saveRow, K.enter, K.enter, K.esc]);
     assert.equal(fs.readFileSync(host.userConfigPath, "utf8"), before, "默认确认必须取消");
     const saved = await drive([...saveRow, K.enter, K.down, K.enter, K.esc]);
-    assert.equal(host.readUserConfigRaw().content.includeCost, false);
+    assert.equal(host.readUserConfigRaw().content.mode, "full");
     assert.ok(saved.plugin.some((entry) => entry.event === "notify_defaults_saved"));
     assert.equal(saved.deliveries.length, 0);
     assert.doesNotMatch(driver.renders.at(-1).join(""), /项更改|保存为默认设置/);
@@ -1320,7 +1321,7 @@ await step("J13e 控制中心批量保存：真实命令事务、范围取消、
     } finally {
       if (previousSilence === undefined) delete process.env.PI_NOTIFY_DISABLE; else process.env.PI_NOTIFY_DISABLE = previousSilence;
     }
-    await drive(keysAlongRoute(module, items, "content.includeDuration", { open: true, after: [K.down, K.enter] }));
+    await drive(keysAlongRoute(module, items, "rules.runCompleted.enabled", { open: true, after: [K.down, K.enter] }));
     fs.writeFileSync(host.userConfigPath, "{broken-config");
     await drive([...saveRow, K.enter, K.down, K.enter, K.esc]);
     assert.equal(fs.readFileSync(host.userConfigPath, "utf8"), "{broken-config");
@@ -1408,7 +1409,7 @@ await step("J13h 邮箱被运行时关闭后，恢复无关字段不被邮箱不
   const driver = createUiDriver();
   // The file declares email on, but there is no credential: startup must close only the runtime copy.
   const raw = { ...NO_COALESCE, channels: [], providers: [{ id: "email", type: "email", enabled: true,
-    options: { from: "fake@qq.com", to: ["reader@example.com"] } }], content: { includeCost: false } };
+    options: { from: "fake@qq.com", to: ["reader@example.com"] } }], content: { mode: "full" } };
   const host = await makeHost({ label: "email-runtime-downgrade", extensions: [PROBE_ENTRY, PLUGIN_ENTRY], mode: "tui", driver, userConfig: raw });
   const module = await import(pathToFileURL(path.join(PLUGIN_DIR, "src", "settings.ts")).href);
   const items = module.buildSettingItems(configModule.loadConfig({ agentDir: host.agentDir }).config);
@@ -1418,19 +1419,19 @@ await step("J13h 邮箱被运行时关闭后，恢复无关字段不被邮箱不
     await drive([K.esc]);
     assert.match(driver.lastLines.join("\n"), /邮箱通知  关闭/, "缺少授权码时运行时邮箱必须关闭");
     // Enter changes an unrelated field for this conversation only.
-    await drive(keysAlongRoute(module, items, "content.includeCost", { open: true, after: [K.down, K.enter] }));
+    await drive(keysAlongRoute(module, items, "content.mode", { open: true, after: [K.up, K.enter] }));
     // “a” follows the disk default again; the untouched email declaration must not be read as an activation.
-    const followed = await drive(keysAlongRoute(module, items, "content.includeCost", { open: false, after: ["?", "a"] }));
-    assert.ok(followed.plugin.some((row) => row.event === "notify_override_cleared" && row.item === "content.includeCost"),
+    const followed = await drive(keysAlongRoute(module, items, "content.mode", { open: false, after: ["?", "a"] }));
+    assert.ok(followed.plugin.some((row) => row.event === "notify_override_cleared" && row.item === "content.mode"),
       `恢复无关默认被邮箱牵连: ${JSON.stringify(followed.plugin.filter((row) => row.event === "log"))}`);
     assert.equal(host.readUserConfigRaw().providers[0].enabled, true, "恢复无关默认不得改写邮箱声明");
     await drive([K.esc]);
     assert.match(driver.lastLines.join("\n"), /邮箱通知  关闭/, "恢复无关默认后邮箱仍必须不可用");
     // “d” restores an unrelated built-in default through the file transaction, with the same guard.
-    const restored = await drive(keysAlongRoute(module, items, "content.includeCost", { open: false, after: ["?", "d", K.down, K.enter] }));
-    assert.ok(restored.plugin.some((row) => row.event === "notify_default_removed" && row.item === "content.includeCost"),
+    const restored = await drive(keysAlongRoute(module, items, "content.mode", { open: false, after: ["?", "d", K.down, K.enter] }));
+    assert.ok(restored.plugin.some((row) => row.event === "notify_default_removed" && row.item === "content.mode"),
       `恢复无关内置默认被邮箱牵连: ${JSON.stringify(restored.plugin.filter((row) => row.event === "log"))}`);
-    assert.equal(host.readUserConfigRaw().content?.includeCost, undefined, "无关字段的用户默认应被移除");
+    assert.equal(host.readUserConfigRaw().content?.mode, undefined, "无关字段的用户默认应被移除");
     assert.equal(host.readUserConfigRaw().providers[0].enabled, true, "恢复无关默认不得改写邮箱声明");
     await drive([K.esc]);
     assert.match(driver.lastLines.join("\n"), /邮箱通知  关闭/, "恢复无关内置默认后邮箱仍必须不可用");
@@ -1466,25 +1467,10 @@ await settings.dispose();
 
 
 // ---------------------------------------------------------------------------
-// Host: content fields - session label, cost, context usage and assistant excerpt
+// Host: final reply from real Pi hooks, offline SMTP capture and terminal projection
 // ---------------------------------------------------------------------------
 
-const CONTENT_CONFIG = {
-  version: 1,
-  coalesce: { windowMs: 0, cooldownMs: 0 },
-  content: { includeAssistantExcerpt: true },
-};
-
-const contentHost = await makeHost({
-  label: "content",
-  extensions: [PROBE_ENTRY, PLUGIN_ENTRY],
-  mode: "tui",
-  userConfig: CONTENT_CONFIG,
-  driver: createUiDriver(),
-});
-await contentHost.useModel("probe-fake", "fake-model");
-
-/** Every content-field assertion controls the fake provider's output and must clean up afterwards, otherwise it leaks into later hosts. */
+/** Keep fake provider and SMTP overrides local to the host content checks. */
 async function withEnv(values, run) {
   const saved = new Map();
   for (const [key, value] of Object.entries(values)) {
@@ -1502,133 +1488,67 @@ async function withEnv(values, run) {
   }
 }
 
-/** Runs one successful run and returns its title/body pair from the terminal notification. */
-async function runNotification(toolFailures = []) {
-  const delta = toolFailures.length > 0
-    ? await contentHost.promptWithToolFailures(toolFailures)
-    : await contentHost.prompt("hi");
-  assert.equal(delta.osc.osc777.length, 1, `应恰好写出 1 条终端通知，实际 ${delta.osc.osc777.length} 条`);
-  return { title: oscTitle(delta.osc.osc777[0]), body: oscBody(delta.osc.osc777[0]) };
-}
-async function runBody(toolFailures = []) {
-  return (await runNotification(toolFailures)).body;
-}
-
-await step("R1 内容字段默认值与字段替换：no-op 字段已删，新字段仍严格校验", () => {
-  const content = configModule.defaultConfig().content;
-  assert.equal(content.includeSessionLabel, true);
-  assert.equal(content.includeAssistantExcerpt, false);
-  assert.equal(content.includeCost, true);
-  assert.ok(!("includeSessionName" in content), "窗口标识字段为 includeSessionLabel（语义含项目目录名回退）");
-  assert.ok(!("includePromptExcerpt" in content), "已删除的 no-op 字段不得复活（它会静默失效）");
-  // A leftover field from an older config: it is no longer meaningful, but one removed field must not
-  // degrade the whole config.
-  assert.deepEqual(
-    configModule.mergeConfig(configModule.defaultConfig(), { version: 1, content: { includePromptExcerpt: true } }, "test").errors,
-    [],
-  );
-  // A wrong type in a new field must still degrade: strict validation must not loosen as fields are added.
-  for (const content of [{ includeAssistantExcerpt: "yes" }, { includeSessionLabel: 1 }, { includeCost: null }]) {
-    assert.ok(configModule.mergeConfig(configModule.defaultConfig(), { content }, "test").errors.length > 0, JSON.stringify(content));
+await step("R 实际宿主：旧配置简要，显式完整仅邮件发送多轮工具后的最终回复", async () => {
+  const require = createRequire(import.meta.url);
+  const dns = require("node:dns/promises");
+  const nodemailer = require("nodemailer");
+  const { lookup } = dns;
+  const { createTransport } = nodemailer;
+  const messages = [];
+  dns.lookup = async () => [{ address: "203.0.113.10", family: 4 }];
+  syncBuiltinESMExports();
+  nodemailer.createTransport = () => ({ async sendMail(message) {
+    messages.push(message);
+    return { accepted: [message.to] };
+  } });
+  const finalReply = "\n# PRIVATE FINAL\n\n- list\n  - nested\n\n```js\n\tconst a = '<tag>';\n```\n\n" + "long paragraph\n".repeat(200) + "final tail\n";
+  const config = {
+    ...NO_COALESCE,
+    channels: ["terminal", "email"],
+    providers: [{ id: "email", type: "email", enabled: true, options: { from: "fake@qq.com", to: ["reader@example.com"] } }],
+    content: { includeAssistantExcerpt: true },
+  };
+  try {
+    await withEnv({ PI_NOTIFY_QQ_SMTP_AUTH_CODE: "test-only", PROBE_ASSISTANT_TEXT: finalReply,
+      PROBE_COST_USD: "0.0246", PROBE_CONTEXT_TOKENS: "42000" }, async () => {
+      const host = await makeHost({ label: "content", extensions: [PROBE_ENTRY, PLUGIN_ENTRY], noTools: "builtin",
+        mode: "tui", userConfig: config, driver: createUiDriver() });
+      try {
+        await host.useModel("probe-fake", "fake-model");
+        async function run(name, totalCost) {
+          const before = messages.length;
+          const delta = await host.prompt("offline content test");
+          assert.equal(messages.length, before + 1);
+          assert.equal(delta.osc.osc777.length, 1);
+          const [osc] = delta.osc.osc777;
+          assert.ok(oscTitle(osc).startsWith(`${name}：已完成（`));
+          assert.ok(oscTitle(osc).endsWith(`，${totalCost}）`));
+          assert.equal(oscBody(osc), "");
+          assert.doesNotMatch(osc, /PRIVATE|上下文|final tail/);
+          return messages.at(-1);
+        }
+        const brief = await run("content", "$0.0246");
+        assert.equal(brief.text, "");
+        host.session.setSessionName("重构登录");
+        await host.drain();
+        host.writeUserConfig({ ...config, content: { mode: "full" } });
+        await reloadViaUi(host);
+        const full = await withEnv({ PROBE_TOOL_TURNS: "2" }, () => run("重构登录", "$0.0738"));
+        assert.equal(full.text, `上下文 42%\n\n最终回复\n\n${finalReply}`);
+        assert.match(full.html, /\n\tconst a = &#39;&lt;tag&gt;&#39;;\n/);
+        const empty = await withEnv({ PROBE_TOOL_TURNS: "2", PROBE_ASSISTANT_TEXT: "" }, () => run("重构登录", "$0.0738"));
+        assert.equal(empty.text, "上下文 42%\n\n没有最终回复。");
+        const log = readJsonl(host.pluginFile);
+        assert.doesNotMatch(JSON.stringify(log), /PRIVATE|final tail|重构登录/);
+        assert.deepEqual(host.runtimeErrors, []);
+      } finally { await host.dispose(); }
+    });
+  } finally {
+    dns.lookup = lookup;
+    syncBuiltinESMExports();
+    nodemailer.createTransport = createTransport;
   }
 });
-
-await step("R2 窗口标识：标题显示项目/会话名，不暴露内部 session ID，可关闭人类可读名称", async () => {
-  // This host's cwd is TMP/content, so an unnamed session title must fall back to the project basename.
-  const fallback = await runNotification();
-  assert.equal(fallback.title, `任务完成 / ${contentHost.label}`, `未命名时应标出项目名: ${fallback.title}`);
-  assert.doesNotMatch(fallback.title, /session|#[A-Z0-9]{4,}/i, "标题不得暴露 session ID");
-
-  contentHost.session.setSessionName("重构登录");
-  await contentHost.drain(); // `session_info_changed` 是 void 发出的，先等 handler 落盘
-  const named = await runNotification();
-  assert.equal(named.title, "任务完成 / 重构登录", "会话名应优先于项目目录名");
-  const changed = findBy(readJsonl(contentHost.pluginFile), (row) => row.event === "session_name_changed", "session_name_changed");
-  assert.equal(changed.hasName, true);
-  assert.ok(!JSON.stringify(changed).includes("重构登录"), "日志不得记下会话名本身");
-
-  // Turning both sources off removes the whole column.
-  contentHost.writeUserConfig({ ...CONTENT_CONFIG, content: { includeAssistantExcerpt: true, includeSessionLabel: false } });
-  await reloadViaUi(contentHost);
-  const off = await runNotification();
-  assert.doesNotMatch(off.title, /content|重构登录/, `关闭 includeSessionLabel 后不应显示项目/会话名: ${off.title}`);
-  assert.doesNotMatch(off.title, /#[A-Z0-9]+|session/i, "任何情况下都不应暴露 session ID");
-  contentHost.writeUserConfig(CONTENT_CONFIG);
-  await reloadViaUi(contentHost);
-});
-
-await step("R3 assistant 摘录：默认关闭；开启后 10 字截断 + 截断标记 + 悬空标点去除", async () => {
-  // Off by default: the folded Ctrl+R re-reads a config without that field instead of building another host.
-  contentHost.writeUserConfig({ version: 1, coalesce: { windowMs: 0, cooldownMs: 0 } });
-  await reloadViaUi(contentHost);
-  await withEnv({ PROBE_ASSISTANT_TEXT: "0123456789ABCDEF" }, async () => {
-    assert.ok(!(await runBody()).includes("0123456789"), "摘录默认关闭，绝不能因为消息里存在模型回复就带出去");
-  });
-
-  contentHost.writeUserConfig(CONTENT_CONFIG);
-  await reloadViaUi(contentHost);
-  await withEnv({ PROBE_ASSISTANT_TEXT: "0123456789ABCDEF" }, async () => {
-    const body = await runBody();
-    assert.ok(body.includes("0123456789…"), `应带出前 10 个字符并标出截断: ${body}`);
-    assert.ok(!body.includes("0123456789A"), `摘录超过 10 个字符: ${body}`);
-  });
-  // Exactly 10 characters: nothing was cut, so no ellipsis may be added; a complete short sentence
-  // must not be reported as truncated.
-  await withEnv({ PROBE_ASSISTANT_TEXT: "0123456789" }, async () => {
-    const body = await runBody();
-    assert.ok(body.includes("0123456789") && !body.includes("…"), `完整短句不该补截断标记: ${body}`);
-  });
-  // Dangling punctuation: when the tenth character is punctuation it is dropped, because a tail like
-  // "fixed login, changed" reads as if something broke.
-  await withEnv({ PROBE_ASSISTANT_TEXT: "abcdefghi。后面还有更多内容" }, async () => {
-    const body = await runBody();
-    assert.ok(body.includes("abcdefghi…"), `截断处的悬空标点应去掉: ${body}`);
-  });
-  await withEnv({ PROBE_ASSISTANT_TEXT: "a\nb" }, async () => {
-    assert.ok((await runBody()).includes("a b"), "换行应归一为空格（否则会撑破单行通知）");
-  });
-  // Injection surface: a model reply can contain sequences that forge a notification, so the excerpt
-  // is sanitized before it enters the body.
-  await withEnv({ PROBE_ASSISTANT_TEXT: "x\u001b]777;notify;evil\u0007y" }, async () => {
-    const body = await runBody();
-    assert.ok(body.includes("xy"), `转义序列应整段删除（含载荷）: ${JSON.stringify(body)}`);
-    assert.ok(!body.includes("evil"), "摘录里不得出现转义序列的载荷");
-  });
-});
-
-await step("R4 成本：本次 + 会话累计；includeCost=false 时两者一起消失", async () => {
-  await withEnv({ PROBE_COST_USD: "0.0123" }, async () => {
-    // First run: this run and the cumulative total are equal, so the value is shown once instead of
-    // repeating the same number as "cumulative".
-    const first = await runBody();
-    assert.ok(first.includes("本次成本 $0.0123"), `缺少本次成本: ${first}`);
-    assert.ok(first.includes("当前会话累计相同"), `首次运行应说明当前累计与本次相同: ${first}`);
-    assert.ok(!first.includes("当前会话已知累计"), `首次运行不应重复成本数值: ${first}`);
-    // Second run: the total accumulates across runs inside one instance.
-    const second = await runBody();
-    assert.ok(second.includes("本次成本 $0.0123"), `缺少本次成本: ${second}`);
-    assert.ok(second.includes("当前会话已知累计 $0.0246"), `累计口径不对: ${second}`);
-  });
-  // With the switch off, cost and context usage disappear together: one switch governs both fields.
-  contentHost.writeUserConfig({ ...CONTENT_CONFIG, content: { includeAssistantExcerpt: true, includeCost: false } });
-  await reloadViaUi(contentHost);
-  await withEnv({ PROBE_COST_USD: "0.0123", PROBE_CONTEXT_TOKENS: "42000" }, async () => {
-    const body = await runBody();
-    assert.ok(!body.includes("成本") && !body.includes("上下文"), `关闭 includeCost 后仍有成本信息: ${body}`);
-  });
-  contentHost.writeUserConfig(CONTENT_CONFIG);
-  await reloadViaUi(contentHost);
-});
-
-await step("R5 上下文占比：拿得到才算，低于 1% 不显示", async () => {
-  await withEnv({ PROBE_CONTEXT_TOKENS: "42000" }, async () => {
-    assert.ok((await runBody()).includes("上下文 42%"), "应显示与 model.contextWindow 换比例后的百分比");
-  });
-  const tiny = await runBody(); // 默认 input=1 token / window=100000 → 0%，属于噪声
-  assert.ok(!tiny.includes("上下文"), `低于 1% 时不该显示“上下文 0%”: ${tiny}`);
-});
-
-await contentHost.dispose();
 
 // ---------------------------------------------------------------------------
 // Host 8: coalescing window and cooldown - the defaults really take effect under a real host
@@ -1711,18 +1631,19 @@ await step("K1 聚合模式：工具失败并入运行结果，一次运行仍�
   assert.equal(delta.deliveries.length, 1, `期望 1 条投递，实际 ${delta.deliveries.length} 条`);
   assert.equal(delta.deliveries[0].kind, "run_completed");
   assert.equal(delta.notifies, 1, "工具失败不得另发一条");
-  assert.ok(delta.osc.osc777[0].includes("结果含工具失败 1 次：bash"), `结果通知应包含失败工具名: ${delta.osc.osc777[0]}`);
+  assert.equal(oscBody(delta.osc.osc777[0]), "工具执行失败 1 次");
   const settled = findBy(readJsonl(s6.pluginFile), (row) => row.event === "run_settled", "run_settled");
   assert.equal(settled.toolFailures, 1, "lifecycle 未累积工具失败");
 });
 
-await step("K2 运行结果不通知时，聚合的工具失败自己发一条（去重后按工具名列出）", async () => {
+await step("K2 运行结果不通知时，聚合的工具失败仍提醒失败次数", async () => {
   await reconfigure(s6, { ...S6_BASE, rules: { ...S6_BASE.rules, runCompleted: { enabled: false } } });
   const delta = await s6.promptWithToolFailures(["bash", "read"]);
   assert.equal(delta.deliveries.length, 1);
   assert.equal(delta.deliveries[0].kind, "tool_failed");
   assert.equal(delta.deliveries[0].level, "warning");
-  assert.ok(delta.osc.osc777[0].includes("工具失败 2 次：bash、read"), `聚合文案不对: ${delta.osc.osc777[0]}`);
+  assert.match(oscTitle(delta.osc.osc777[0]), /工具执行失败/);
+  assert.equal(oscBody(delta.osc.osc777[0]), "累计失败 2 次");
 });
 
 await step("K3 immediate 模式：工具一失败就提醒，同 run 的后续事件被合并窗口吸收", async () => {
@@ -1760,7 +1681,7 @@ await step("K4 压缩失败立即提醒（error）；用户自己取消（aborte
     }));
   assert.equal(failed.deliveries.length, 1, "压缩失败必须能发出去（手工 /compact 没有 settled 可等）");
   assert.equal(failed.deliveries[0].kind, "compact_failed");
-  assert.ok(failed.osc.osc777[0].includes("上下文压缩未完成"), "标题应说明压缩未完成");
+  assert.match(oscTitle(failed.osc.osc777[0]), /上下文压缩失败/);
   assert.equal(failed.deliveries[0].level, "error");
   assert.equal(failed.notifies, 1);
 
@@ -1780,7 +1701,7 @@ await step("K5 等待输入：真 select 触发一条；custom 永久排除；en
   const delta = await s6.command("/probe-prompt");
   assert.equal(delta.deliveries.length, 1, `等待输入未通知: ${JSON.stringify(delta.deliveries)}`);
   assert.equal(delta.deliveries[0].kind, "waiting_for_user");
-  assert.ok(delta.osc.osc777[0].includes("需要你回复"), "标题应明确表示需要用户回复");
+  assert.match(oscTitle(delta.osc.osc777[0]), /等待输入/);
   assert.equal(delta.deliveries[0].level, "info");
   assert.ok(delta.osc.osc777[0].includes("选择 A"), `标题应带过来: ${delta.osc.osc777[0]}`);
 
@@ -1946,7 +1867,7 @@ await webhookHost.dispose();
 
 // Machine API: real public hooks and real HTTP, independent of notification filtering.
 const machineConfig = {
-  version: 1, enabled: false,
+  version: 1, enabled: false, content: { mode: "full" },
   api: { enabled: true, url: `http://127.0.0.1:${hookPort}/machine`, secretEnv: "PI_NOTIFY_TEST_WEBHOOK_SECRET", maxRetries: 0 },
 };
 const machineRows = () => hookRequests.filter((row) => row.url === "/machine").map((row) => ({ ...row, message: JSON.parse(row.body) }));
@@ -1967,7 +1888,7 @@ await step("N1 通知关闭仍发送完整事实；HMAC/隐私/工具失败快�
   assert.ok(rows.some((row) => row.message.type === "session.started"));
   assert.ok(rows.some((row) => row.message.type === "run.started"));
   assert.ok(rows.some((row) => row.message.type === "tool.failed"));
-  assert.doesNotMatch(JSON.stringify(rows.map((row) => row.message)), /PRIVATE_USER_CONTENT|PRIVATE_ASSISTANT_CONTENT|labels|cwd/);
+  assert.doesNotMatch(JSON.stringify(rows.map((row) => row.message)), /PRIVATE_USER_CONTENT|PRIVATE_ASSISTANT_CONTENT|finalReply|labels|cwd/);
   for (const row of rows) assert.equal(row.headers["x-pi-message-signature"], `sha256=${createHmac("sha256", WEBHOOK_SECRET).update(row.body).digest("hex")}`);
 });
 

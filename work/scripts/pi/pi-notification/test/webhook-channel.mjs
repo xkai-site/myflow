@@ -93,7 +93,7 @@ function request(overrides = {}) {
 }
 
 const notifier = (options, deps = {}) =>
-  webhook.createWebhookNotifier("hook", options, { log: silentLog, maxChars: 300, ...deps });
+  webhook.createWebhookNotifier("hook", options, { log: silentLog, ...deps });
 
 console.log("S7 Webhook 渠道 + 装饰器回归：pi-notification");
 
@@ -134,7 +134,8 @@ await step("format：结构化载荷只含元数据（不含 prompt / 完整回�
 await step("send：真实 POST + HMAC 签名（签名对象是实际发送的字节）", async () => {
   const log = trackingLog();
   const options = { url: `http://127.0.0.1:${PORT}/hook?token=in-query`, secretEnv: "PI_NOTIFY_UNIT_SECRET" };
-  await notifier(options, { log }).send(request(), new AbortController().signal);
+  const brief = { title: "myflow：运行失败（38秒，$0.0246）", body: "失败原因：服务不可用" };
+  await notifier(options, { log }).send(request({ ...brief, details: { contextPercent: 42, finalReply: "PRIVATE FINAL REPLY" } }), new AbortController().signal);
 
   assert.equal(received.length, 1);
   const sent = received[0];
@@ -143,6 +144,10 @@ await step("send：真实 POST + HMAC 签名（签名对象是实际发送的字
   const expected = `sha256=${createHmac("sha256", SECRET).update(sent.body, "utf8").digest("hex")}`;
   assert.equal(sent.headers["x-pi-notify-signature"], expected);
   assert.ok(!sent.body.includes(SECRET), "载荷里不得出现密钥");
+  assert.doesNotMatch(sent.body, /contextPercent|finalReply|PRIVATE FINAL REPLY/);
+  const receivedPayload = JSON.parse(sent.body);
+  assert.equal(receivedPayload.title, brief.title);
+  assert.equal(receivedPayload.body, brief.body);
 
   const record = log.records.find((row) => row.event === "webhook_sent");
   assert.ok(record, "成功投递应留结构化记录");

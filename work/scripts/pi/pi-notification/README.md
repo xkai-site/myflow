@@ -98,19 +98,25 @@ pi -e ./extensions/index.ts
 | `coalesce.windowMs` | 1500 | 同一运行的通知合并窗口 |
 | `coalesce.cooldownMs` | 3000 | 同类通知的冷却时间 |
 | `quietHours.enabled` | false | 本地时间免打扰，支持跨午夜；起止相同表示全天 |
-| `content.includeSessionLabel` | true | 标题包含会话名，未命名时使用项目目录名 |
-| `content.includeAssistantExcerpt` | false | 开启后附最终回复的短摘录，可能泄露敏感内容 |
-| `content.includeCost` | true | 显示已上报成本与上下文占比；缺失时不猜测 |
-| `content.maxMessageChars` | 300 | 通知正文长度上限 |
+| `content.mode` | `brief` | 通知内容：`brief` 简要 / `full` 完整（仅邮箱附全文） |
 | `shutdownFlushMs` | 200 | 退出时通知与 API 共用的收尾预算 |
 
-希望每次运行都提醒，就把 `coalesce.windowMs` 和 `coalesce.cooldownMs` 都设为 `0`。规则开启只表示通过筛选：还需通过等级、免打扰及频率限制，并有可用渠道。其余可靠性参数（工具失败策略与阈值、等待输入类型、超时/重试/并发/队列/熔断等）只在 JSON 中调整。完整默认值见 [`src/config.ts`](src/config.ts)，配置类型见 [`src/types.ts`](src/types.ts)。成本只覆盖当前扩展实例，重载或切换会话后重新累计。
+希望每次运行都提醒，就把 `coalesce.windowMs` 和 `coalesce.cooldownMs` 都设为 `0`。规则开启只表示通过筛选：还需通过等级、免打扰及频率限制，并有可用渠道。其余可靠性参数（工具失败策略与阈值、等待输入类型、超时/重试/并发/队列/熔断等）只在 JSON 中调整。完整默认值见 [`src/config.ts`](src/config.ts)，配置类型见 [`src/types.ts`](src/types.ts)。
+
+### 通知内容
+
+在 `/notify → 更多设置 → 内容与隐私 → 通知内容` 选择模式，也可在用户配置中设置 `"content": { "mode": "brief" }`。同页「通知预览」只使用示例数据，不读取对话或发送通知。
+
+- **简要（`brief`，默认）**：标题集中显示会话、状态、用时和本次成本，例如 `myflow：已完成（2分35秒，$0.0246）`。未命名时用项目目录名；名称较长时将状态、用时、成本放在前面，必要时缩短名称。没有可靠数据就省略：例如未观察到运行开始、成本上报不完整，或独立的等待输入、压缩失败事件还没有本次运行结论。异常原因放在正文；工具失败只报次数，不罗列工具名。会话累计成本仍可在消息 API 快照中取得。
+- **完整（`full`）**：邮件另外附上 Pi 提供的上下文使用率（不可用或四舍五入为 0% 时省略）和本次逻辑运行的最终 Assistant 文本。正文保留段落、换行、列表和代码，HTML 中按原样显示 Markdown，不执行其中的 HTML 或加载资源。工具调用、工具结果和中间回复都不会被选中；失败、中止、最终回合无文本或无法确定时写明「没有最终回复」。模型因输出上限而停止时，若有最终文本则完整转发**模型实际生成的部分**，标题标明「输出已截断」。
+
+旧版六个内容字段读取时忽略，不会使配置降级，也**不会**把原先的摘录开关迁移成完整模式。下次保存或恢复用户默认值时清除旧字段，保留其它设置；历史会话覆盖在恢复时清理，新快照不再写入旧字段，不重写历史会话文件。
 
 ## 接收渠道
 
 ### 本机通知
 
-自动选择 Windows toast、kitty OSC 99 或其它终端的 OSC 777；能否显示取决于终端支持，macOS 不提供原生横幅。
+自动选择 Windows toast、kitty OSC 99 或其它终端的 OSC 777。始终发送简要内容，标题尽量保留关键字段；实际可见宽度由终端或系统决定。macOS 不提供原生横幅。
 
 非 TTY 默认不发本机通知，避免污染 print/json 的 stdout 或意外弹窗。显式指定 `PI_NOTIFY_CHANNEL=toast` 可在非 TTY 下使用系统通知，不写 stdout。
 
@@ -154,7 +160,7 @@ Linux 不使用 keyring 默认的 keyutils 内存回退，因为它不保证重�
 | 使用默认值、恢复内置默认 | 只恢复所选项；恢复邮箱内置开关为关闭 | 只在所选项是路由时修改 |
 | 配置重新加载 | 按文件及会话覆盖重新求值；新开启邮箱同样检查前置条件，缺项不启用并提示 | 仅应用显式配置，不因授权/测试失败改写 |
 
-启动或重新加载时，文件中声明开启但缺少前置条件的邮箱不会在当前实例启用，并明确提示；文件声明和路由不被改写。运行中已开启的邮箱若丢失凭据，投递前校验阻止发送并报告不可用；重新开启、使用默认和重新加载不能绕过检查。启用检查只在本地检查配置与凭据状态，不连接 SMTP 验证 QQ 端授权是否已撤销。通知规则、去重、重试、逐收件人接受记账和实际投递内容不变。
+启动或重新加载时，文件中声明开启但缺少前置条件的邮箱不会在当前实例启用，并明确提示；文件声明和路由不被改写。运行中已开启的邮箱若丢失凭据，投递前校验阻止发送并报告不可用；重新开启、使用默认和重新加载不能绕过检查。启用检查只在本地检查配置与凭据状态，不连接 SMTP 验证 QQ 端授权是否已撤销。内容模式不改变通知规则、路由、去重、重试或逐收件人接受记账。
 
 #### 模块边界
 
@@ -163,7 +169,7 @@ Linux 不使用 keyring 默认的 keyutils 内存回退，因为它不保证重�
 - `src/settings-actions.ts` / `src/channels.ts`：通用设置操作、启用检查和就绪状态，消费结构化凭据状态；浏览器能力可由宿主注入，无能力时展示可复制的官方 URL。
 - `src/ui.ts` / `src/ui-secret.ts`：Pi TUI 展示与屏蔽明文输入。`src/commands.ts` / `extensions/index.ts`：Pi 宿主适配和依赖装配；同一个凭据核心同时注入设置与 SMTP 发送器。
 
-使用 `smtp.qq.com:465` / TLS。只接收邮件时，可直接关闭首页的本机通知，逐规则例外也不会继续向本机发送；原路由仍保留。SMTP 接受不保证进入收件箱。
+使用 `smtp.qq.com:465` / TLS。邮件发送纯文本和轻量 HTML；主题与通知标题一致（可加前缀）。主题、纯文本和 HTML 合计超过 1 MiB UTF-8（MIME 编码前的资源上限）时，整封邮件不发送，投递诊断会明确显示超限，不发送截断的「全文」。SMTP 接受不保证进入收件箱。只接收邮件时，可关闭首页的本机通知，逐规则例外也不会继续向本机发送；原路由仍保留。
 
 以下字段位于配置区（不含授权码），Agent 也可直接编辑；`channels` 与规则里的 `"inherit"` 写法与界面一致：
 
@@ -181,7 +187,7 @@ Linux 不使用 keyring 默认的 keyutils 内存回退，因为它不保证重�
 
 ### Webhook v1（通知）
 
-Webhook 接收经过通知规则筛选的标题与正文，和下面的消息 API 是不同契约。
+Webhook 保留 v1 字段与投递契约，发送经过规则筛选的简要标题与正文；即使选择 `full`，也不附上下文使用率或回复原文。`title` / `body` 是展示文案，自动化请使用 `event`、`level` 等结构化字段。Webhook 与下方消息 API 是不同契约。
 
 ```json
 {
@@ -212,7 +218,7 @@ POST 载荷示例：
   "version": 1,
   "event": "run_failed",
   "level": "error",
-  "title": "任务未完成",
+  "title": "myflow：运行失败（1秒，$0.0246）",
   "body": "失败原因：provider error",
   "dedupeKey": "<sessionId>:<runId>:run_failed",
   "sessionId": "…",
@@ -288,7 +294,7 @@ POST 载荷示例：
 
 - run 结果为 `completed | failed | aborted | unknown`；`length` 表示截断，unknown 不当作成功。快照状态为 `idle | working | blocked | done | error | unknown`。
 - 未观察到开始时 `startObserved=false`，不提供开始时间或耗时；成本仅在所有已观察 assistant 消息完整上报时提供。
-- 非 agent 操作使用 `operationId` / `promptId`，不伪造 runId。不发送输入、回复摘录、工具参数/结果、压缩内容或完整 cwd；标签默认关闭，错误说明限长并脱敏。完整字段见 [`src/types.ts`](src/types.ts)。
+- 非 agent 操作使用 `operationId` / `promptId`，不伪造 runId。不发送输入、助手回复、工具参数/结果、压缩内容或完整 cwd；标签默认关闭，错误说明限长并脱敏。完整字段见 [`src/types.ts`](src/types.ts)。
 
 ### 签名、去重与顺序
 
@@ -318,7 +324,7 @@ function verify(rawBody, signature, secret) {
 
 HTTP 输出仅支持 http/https，拒绝内嵌 URL 凭据和重定向。配置指定 secretEnv 后，缺失密钥会拒绝发送，不会降级为无签名。公网推荐 HTTPS + HMAC，并限制接收端访问与留存。
 
-人类通知默认包含会话名或项目目录名；不希望外传时关闭 `content.includeSessionLabel`。回复摘录默认关闭。错误脱敏无法保证识别所有敏感文本，不要把通知接收端当作公开日志。
+人类通知包含会话名或项目目录名；不希望外传时，勿将通知路由到外部渠道。最终回复可能含文件内容、凭据或其它敏感信息，仅在明确选择 `full` 后经已启用并选中的邮箱发送；不会进入本机通知、Webhook、诊断日志或机器 API。切回简要后，尚未开始投递的通知不再发送全文；已开始发送的邮件无法撤回。错误脱敏无法保证识别所有敏感文本，请限制接收端访问与留存。
 
 | 环境变量 | 用途 |
 |---|---|
@@ -347,7 +353,8 @@ npm run test:api  # 单个专项，其余见 package.json
 | --- | --- |
 | `test:credentials` | 纯核心与原生边界模拟：跨平台、无服务、读写删失败、优先级、脱敏和状态失效 |
 | `test:routing` | 统一与独立接收方式、显式测试筛选；`test:kiss` 为兼容别名 |
-| `test:config` / `test:patch` | 配置校验、降级、单项保存与恢复 |
+| `test:config` / `test:patch` | 配置校验、旧字段兼容、单项保存与恢复 |
+| `test:content` | 内容模式、标题、事件文案和回复排版 |
 | `test:registry` / `test:lifecycle` | 渠道注册、日志清洗、运行状态 |
 | `test:terminal` / `test:service` | 本机通知、合并、冷却、队列与取消 |
 | `test:webhook` / `test:api` / `test:email` | 签名、消息序列、回环 HTTP 与模拟邮件 |

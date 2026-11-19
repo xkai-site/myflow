@@ -123,16 +123,7 @@ export function defaultConfig(): NotificationConfig {
       cooldownMs: 3000,
     },
     quietHours: { enabled: false, start: "23:00", end: "08:00", exceptLevels: ["error"] },
-    content: {
-      includeDuration: true,
-      includeToolFailureNames: true,
-      // Put the session name or project directory name in the title to disambiguate windows.
-      includeSessionLabel: true,
-      // Assistant replies are not forwarded by default: they can carry file content or secrets.
-      includeAssistantExcerpt: false,
-      includeCost: true,
-      maxMessageChars: 300,
-    },
+    content: { mode: "brief" },
     delivery: {
       timeoutMs: 30000,
       // Retry and circuit breaking are applied by the reliability decorators.
@@ -506,13 +497,10 @@ export function mergeConfig(base: NotificationConfig, raw: unknown, source: stri
   if (raw.content !== undefined) {
     if (!isPlainObject(raw.content)) {
       errors.push({ path: "content", message: "必须是对象" });
-    } else {
-      checkBoolean(raw.content, "includeDuration", config.content as unknown as Record<string, unknown>, "content.includeDuration", errors);
-      checkBoolean(raw.content, "includeToolFailureNames", config.content as unknown as Record<string, unknown>, "content.includeToolFailureNames", errors);
-      checkBoolean(raw.content, "includeSessionLabel", config.content as unknown as Record<string, unknown>, "content.includeSessionLabel", errors);
-      checkBoolean(raw.content, "includeAssistantExcerpt", config.content as unknown as Record<string, unknown>, "content.includeAssistantExcerpt", errors);
-      checkBoolean(raw.content, "includeCost", config.content as unknown as Record<string, unknown>, "content.includeCost", errors);
-      checkPositiveInt(raw.content, "maxMessageChars", config.content as unknown as Record<string, unknown>, "content.maxMessageChars", errors, { min: 20, max: 2000 });
+    } else if (raw.content.mode !== undefined) {
+      const { mode } = raw.content;
+      if (mode === "brief" || mode === "full") config.content.mode = mode;
+      else errors.push({ path: "content.mode", message: "必须是 brief 或 full" });
     }
   }
 
@@ -606,6 +594,20 @@ export function loadConfig(options: ReadConfigOptions): ConfigLoadResult {
   return { config, sources, errors, warnings, degraded: false };
 }
 
+/** Remove only retired keys, without freezing defaults or opting anyone into full mail. */
+const LEGACY_CONTENT_KEYS = new Set([
+  "includeDuration", "includeToolFailureNames", "includeSessionLabel",
+  "includeAssistantExcerpt", "includeCost", "maxMessageChars",
+]);
+export function stripLegacyContent(raw: ConfigPatch): ConfigPatch {
+  if (!isPlainObject(raw.content)) return raw;
+  const entries = Object.entries(raw.content);
+  const remaining = entries.filter(([key]) => !LEGACY_CONTENT_KEYS.has(key));
+  if (remaining.length === entries.length) return raw;
+  const { content: _content, ...rest } = raw;
+  return remaining.length ? { ...rest, content: Object.fromEntries(remaining) } : rest;
+}
+
 export type ConfigWriteResult =
   | { ok: true; config: NotificationConfig; problems: ConfigProblem[]; warnings: ConfigProblem[] }
   | { ok: false; problems: ConfigProblem[] };
@@ -649,7 +651,7 @@ function updateUserDefaults(agentDir: string, transform: (raw: ConfigPatch) => C
   if (!current.ok) return { ok: false, problems: current.problems };
   const base = current.raw ?? {};
   let sparse: ConfigPatch;
-  try { sparse = transform(structuredClone(base)); }
+  try { sparse = stripLegacyContent(transform(structuredClone(base))); }
   catch { return { ok: false, problems: [{ path: file, message: "无法构建配置事务" }] }; }
   const merged = mergeConfig(defaultConfig(), sparse, file);
   if (merged.errors.length > 0) return { ok: false, problems: merged.errors };
@@ -738,6 +740,7 @@ export function describeConfig(config: NotificationConfig): string {
   return [
     `enabled=${config.enabled}`,
     `minLevel=${config.minLevel}`,
+    `content=${config.content.mode}`,
     `channels=${config.channels.join(",") || "none"}`,
     `rules=${enabledRules.join(",") || "none"}`,
     `providers=${providers.join(",") || "none"}`,

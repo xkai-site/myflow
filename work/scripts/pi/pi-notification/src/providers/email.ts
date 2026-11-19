@@ -1,26 +1,45 @@
-import { sanitize } from "../log.ts";
+import { emailContent } from "../content.ts";
+import { singleLine } from "../log.ts";
 import type { Logger, Notifier, NotificationRequest } from "../types.ts";
 import { createMailSender, type MailSender } from "../mail/sender.ts";
 import type { QqCredentials } from "../mail/credentials.ts";
 import { createQqSmtpSender, validateQqSmtp } from "../mail/smtp.ts";
 
 const MAX_DEDUPE_KEYS = 512;
+// Bound the combined UTF-8 rendering before MIME encoding and recipient fan-out.
+export const MAX_MAIL_CONTENT_BYTES = 1024 * 1024;
+const MAIL_TOO_LARGE = "通知邮件超过 1 MiB 内容上限，未发送";
+const HTML_ENTITIES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+const escapeHtml = (text: string) => text.replace(/[&<>"']/g, (char) => HTML_ENTITIES[char]);
+
+function formatMail(req: NotificationRequest, subjectPrefix: string) {
+  const subject = singleLine(`${subjectPrefix}${req.title}`);
+  const { metadata, reply, text } = emailContent(req);
+  const bytes = Buffer.byteLength(subject) + Buffer.byteLength(text);
+  if (bytes > MAX_MAIL_CONTENT_BYTES) throw new Error(MAIL_TOO_LARGE);
+  const supplement = metadata ? `<p>${escapeHtml(metadata)}</p>` : "";
+  const final = reply === undefined ? "" : reply === null ? "<p>没有最终回复。</p>"
+    : `<p><strong>最终回复</strong></p><pre style="white-space:pre-wrap;overflow-wrap:anywhere"><code>${escapeHtml(reply)}</code></pre>`;
+  const html = `<div lang="zh-CN"><p><strong>${escapeHtml(req.title)}</strong></p>${supplement}${final}</div>`;
+  if (bytes + Buffer.byteLength(html) > MAX_MAIL_CONTENT_BYTES) throw new Error(MAIL_TOO_LARGE);
+  return { subject, text, html };
+}
 const SAFE_PRE_SEND_ERRORS = new Set(["SMTP_NOT_CONFIGURED", "SMTP_TIMEOUT", "SMTP_CANCELLED", "邮箱发送已取消", "邮箱发送器已关闭"]);
 
 export function createEmailNotifier(
   id: string,
   options: Record<string, unknown>,
-  deps: { log: Logger; maxChars: number; timeoutMs?: number } & ({ sender: MailSender; credentials?: QqCredentials } | { credentials: QqCredentials; sender?: undefined }),
+  deps: { log: Logger; timeoutMs?: number } & ({ sender: MailSender; credentials?: QqCredentials } | { credentials: QqCredentials; sender?: undefined }),
 ): Notifier {
   const sender = deps.sender ?? createMailSender(options, (value, timeoutMs) => createQqSmtpSender(value, { credentials: deps.credentials!, timeoutMs }), deps.timeoutMs);
   const acceptedByKey = new Map<string, Set<string>>();
-  const maxChars = Number.isFinite(deps.maxChars) && deps.maxChars > 0 ? deps.maxChars : 300;
   const parseOptions = (raw: Record<string, unknown>) => ({
     from: typeof raw.from === "string" ? raw.from.trim() : "",
     to: Array.isArray(raw.to) ? [...new Set(raw.to.filter((value): value is string => typeof value === "string").map((value) => value.trim()))] : [],
     subjectPrefix: typeof raw.subjectPrefix === "string" ? raw.subjectPrefix : "[Pi]",
   });
   const parsed = parseOptions(options);
+  const format = (req: NotificationRequest) => formatMail(req, parsed.subjectPrefix);
   const validation = (): string | undefined => {
     const base = validateQqSmtp({ ...parsed, transport: options.transport });
     return base ?? sender.validate();
@@ -35,26 +54,23 @@ export function createEmailNotifier(
       if (supplied.to.some((address) => !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(address))) return "收件邮箱格式无效";
       return validation();
     },
-    format(req: NotificationRequest) {
-      return { subject: `${parsed.subjectPrefix}${sanitize(req.title, maxChars)}`, text: sanitize(req.body, maxChars) };
-    },
+    format,
     async send(req, signal) {
       if (signal.aborted) throw new Error("邮箱发送已取消");
       const ready = validation();
       if (ready) throw new Error("邮箱渠道不可用，请检查地址与授权码（系统安全存储或环境注入）");
+      const content = format(req);
       const accepted = acceptedByKey.get(req.dedupeKey) ?? new Set<string>();
       acceptedByKey.delete(req.dedupeKey);
       acceptedByKey.set(req.dedupeKey, accepted); // refresh insertion order for bounded eviction
       while (acceptedByKey.size > MAX_DEDUPE_KEYS) acceptedByKey.delete(acceptedByKey.keys().next().value!);
-      const title = `${parsed.subjectPrefix}${sanitize(req.title, maxChars)}`;
-      const text = sanitize(req.body, maxChars);
       let failed = 0;
       const failureCodes = new Set<string>();
       for (const recipient of parsed.to) {
         if (accepted.has(recipient)) continue;
         if (signal.aborted) throw new Error("邮箱发送已取消");
         try {
-          await sender.send({ from: parsed.from, to: recipient, subject: title, text }, signal);
+          await sender.send({ from: parsed.from, to: recipient, ...content }, signal);
           accepted.add(recipient);
         } catch (error) {
           // Expose only our sender's bounded, allowlisted SMTP code; never propagate server text,

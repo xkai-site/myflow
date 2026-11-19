@@ -136,16 +136,16 @@ await step("S1 overlay 形状防御：空 overlay 与非法条目", () => {
 });
 
 await step("S2 hasUserDefault / userDefaultValue：按路径存在性判断，不靠与出厂默认比较", () => {
-  const boolItem = itemOf("content.includeCost");
+  const modeItem = itemOf("content.mode");
   const providerItem = itemOf("provider:terminal");
   const minLevelItem = itemOf("minLevel");
 
-  assert.equal(settingState.hasUserDefault(undefined, boolItem), false, "没有用户文件时未保存");
-  assert.equal(settingState.hasUserDefault({}, boolItem), false);
-  assert.equal(settingState.hasUserDefault({ content: {} }, boolItem), false);
-  assert.equal(settingState.hasUserDefault({ content: { includeCost: false } }, boolItem), true, "等于出厂默认的值只要被保存过也算保存过");
-  assert.equal(settingState.userDefaultValue({ content: { includeCost: false } }, boolItem), false);
-  assert.equal(settingState.userDefaultValue({ content: {} }, boolItem), undefined);
+  assert.equal(settingState.hasUserDefault(undefined, modeItem), false, "没有用户文件时未保存");
+  assert.equal(settingState.hasUserDefault({}, modeItem), false);
+  assert.equal(settingState.hasUserDefault({ content: {} }, modeItem), false);
+  assert.equal(settingState.hasUserDefault({ content: { mode: "brief" } }, modeItem), true, "等于出厂默认的值只要被保存过也算保存过");
+  assert.equal(settingState.userDefaultValue({ content: { mode: "brief" } }, modeItem), "brief");
+  assert.equal(settingState.userDefaultValue({ content: {} }, modeItem), undefined);
 
   assert.equal(settingState.hasUserDefault({ providers: "terminal" }, providerItem), false, "providers 不是数组时视为未保存");
   assert.equal(settingState.hasUserDefault({ providers: [{ id: "terminal" }] }, providerItem), false, "条目里没有 enabled 就是未保存");
@@ -159,8 +159,8 @@ await step("S2 hasUserDefault / userDefaultValue：按路径存在性判断，�
 });
 
 await step("S3 isCurrentValue / collectionValue：标量相等，集合按成员", () => {
-  assert.equal(settings.isCurrentValue("number", 5, 5), true);
-  assert.equal(settings.isCurrentValue("number", 5, 6), false);
+  assert.equal(settings.isCurrentValue("enum", "brief", "brief"), true);
+  assert.equal(settings.isCurrentValue("enum", "brief", "full"), false);
   assert.equal(settings.isCurrentValue("collection", ["a", "b"], "b"), true);
   assert.equal(settings.isCurrentValue("collection", ["a"], "b"), false);
   assert.equal(settings.isCurrentValue("collection", "b", "b"), false, "集合项要求数组，标量不算成员");
@@ -193,40 +193,38 @@ await step("S5 中文化只改展示：值/配置键不变，阈值与规则严�
   assert.ok(!defaultItems.some((item) => item.id === "rules.toolFailed.mode"));
   assert.ok(!defaultItems.some((item) => item.id === "rules.waitingForUser.kinds"));
   assert.deepEqual(labels("quietHours.exceptLevels"), ["提示", "警告", "错误"]);
-  assert.deepEqual(labels("content.includeCost"), ["开启", "关闭"], "布尔候选项不应再露出 true/false");
+  assert.deepEqual(labels("content.mode"), ["简要", "完整（邮箱附全文）"]);
+  assert.deepEqual(defaultItems.filter((item) => item.group === "内容").map((item) => item.id), ["content.mode"]);
   assert.deepEqual(labels("provider:terminal"), ["开启", "关闭"]);
 
   // format() is the single display path: parent rows, detail rows and the summary all read it.
   assert.equal(itemOf("minLevel").format("error"), "仅错误");
   assert.equal(itemOf("rules.runFailed.level").format("error"), "错误");
-  assert.equal(itemOf("content.includeCost").format(false), "关闭");
+  assert.equal(itemOf("content.mode").format("full"), "完整");
   const channels = itemOf("rules.runCompleted.channels");
   assert.equal(channels.format(["terminal", "hook"]), "本机通知、hook", "未知或自定义渠道仍保留原名");
   assert.deepEqual(channels.candidates(config.defaultConfig()).map((candidate) => candidate.value), ["terminal", "email"], "显示名变化不得改动存储 ID");
   assert.deepEqual(channels.candidates(config.defaultConfig()).map((candidate) => candidate.label), ["本机通知", "邮箱通知"]);
   assert.equal(itemOf("quietHours.exceptLevels").format(["error"]), "错误");
   assert.equal(itemOf("provider:terminal").format(false), "关闭");
-  assert.equal(itemOf("content.includeCost").format(undefined), "—");
+  assert.equal(itemOf("content.mode").format(undefined), "—");
 });
 
-await step("S6 JSON-only 参数不出现在 TUI 表；保留内容长度/时间校验", () => {
+await step("S6 JSON-only 参数不出现在 TUI 表；保留时间校验", () => {
   for (const id of ["coalesce.windowMs", "delivery.timeoutMs", "delivery.maxRetries", "shutdownFlushMs", "rules.toolFailed.threshold"]) {
     assert.ok(!defaultItems.some((item) => item.id === id));
   }
-  const length = itemOf("content.maxMessageChars");
-  assert.deepEqual(length.parseInput("432"), { ok: true, value: 432 });
-  assert.equal(length.parseInput("999999").ok, false);
   assert.equal(itemOf("quietHours.start").inputHint, "HH:MM（00:00–23:59）");
   assert.equal(itemOf("quietHours.start").parseInput("25:00").ok, false);
 });
 
 await step("S7 来源按 overlay 存在性判定：false / 空集合 / 与默认同值都算“已覆盖”", () => {
-  const boolItem = itemOf("content.includeCost");
+  const boolItem = itemOf("quietHours.enabled");
   const channelsItem = itemOf("rules.runCompleted.channels");
   const minLevelItem = itemOf("minLevel");
 
   // false is a value, not “no override”: comparing values would misreport it as inherited.
-  assert.equal(settingState.sessionOverrideValue({ patch: { content: { includeCost: false } }, providers: {} }, boolItem), false);
+  assert.equal(settingState.sessionOverrideValue({ patch: { quietHours: { enabled: false } }, providers: {} }, boolItem), false);
   assert.equal(settingState.sessionOverrideValue({ patch: {}, providers: {} }, boolItem), undefined);
   // An empty collection is still an explicit choice.
   assert.deepEqual(
@@ -249,7 +247,7 @@ await step("S8 渠道内置缺省：开关缺省为开启；定义来源看用�
   const terminal = itemOf("provider:terminal");
   assert.equal(settingState.builtinDefaultValue(terminal), true, "渠道开关的内置缺省是开启");
   assert.equal(settingState.builtinDefaultValue(itemOf("minLevel")), "info");
-  assert.equal(settingState.builtinDefaultValue(itemOf("content.includeCost")), true);
+  assert.equal(settingState.builtinDefaultValue(itemOf("content.mode")), "brief");
   // Definition origin: the user file is the only layer that can provide a definition besides the
   // factory defaults, so a same-named user entry still means “user-provided”.
   assert.equal(settingState.providerDefinitionSource(terminal, undefined), "default");
@@ -342,27 +340,34 @@ await step("S10 恢复清空最后一个 overlay：空快照仍然被认作有�
   );
 });
 
+await step("历史会话覆盖仅清理废弃内容字段，保留明确选择和其它覆盖", () => {
+  const legacy = { sessionId: "s", patch: { content: { includeAssistantExcerpt: true, maxMessageChars: "bad" },
+    channels: ["email"], rules: { runFailed: { channels: [] } } }, providers: { terminal: false } };
+  const entry = { type: "custom", customType: settingState.SESSION_OVERLAY_ENTRY, data: legacy };
+  const overlay = settingState.restoreOverlayFromEntries([entry], "s");
+  assert.deepEqual(overlay.patch, { channels: ["email"], rules: { runFailed: { channels: [] } } });
+  assert.deepEqual(overlay.providers, { terminal: false });
+  assert.equal(settingState.applyOverlay(config.defaultConfig(), overlay).config.content.mode, "brief");
+
+  const item = itemOf("content.mode");
+  const updated = settingState.applySettingPatch(overlay, item, item.patch("full"));
+  const saved = settingState.overlayEntryData("s", updated, 1);
+  assert.deepEqual(saved.patch, { ...overlay.patch, content: { mode: "full" } });
+  assert.deepEqual(settingState.overlayFromEntry(saved), updated);
+  assert.deepEqual(settingState.clearItemOverride(updated, item), overlay);
+});
+
 await step("S11 removePath：删除单项并剪空祖先，保留旁支，缺失即幂等零变化", () => {
-  assert.deepEqual(
-    patch.removePath({ content: { includeCost: false, includeDuration: true } }, "content.includeCost"),
-    { content: { includeDuration: true } },
-    "应删除单项并保留兄弟字段",
-  );
-  assert.deepEqual(
-    patch.removePath({ content: { includeCost: false } }, "content.includeCost"),
-    {},
-    "删空祖先对象，但不动其它分支",
-  );
-  assert.deepEqual(
-    patch.removePath({ content: { includeCost: false }, coalesce: { windowMs: 0 } }, "content.includeCost"),
-    { coalesce: { windowMs: 0 } },
-    "旁支必须保留",
-  );
-  assert.deepEqual(patch.removePath({}, "content.includeCost"), {}, "缺失路径是零变化");
+  assert.deepEqual(patch.removePath({ quietHours: { enabled: true, start: "22:00" } }, "quietHours.enabled"),
+    { quietHours: { start: "22:00" } }, "应删除单项并保留兄弟字段");
+  assert.deepEqual(patch.removePath({ content: { mode: "full" } }, "content.mode"), {}, "删空祖先对象");
+  assert.deepEqual(patch.removePath({ content: { mode: "full" }, coalesce: { windowMs: 0 } }, "content.mode"),
+    { coalesce: { windowMs: 0 } }, "旁支必须保留");
+  assert.deepEqual(patch.removePath({}, "content.mode"), {}, "缺失路径是零变化");
   assert.deepEqual(patch.removePath(undefined, "enabled"), {}, "没有用户文件时结果是空对象");
-  const source = { content: { includeCost: false } };
-  patch.removePath(source, "content.includeCost");
-  assert.deepEqual(source, { content: { includeCost: false } }, "入参不得被修改");
+  const source = { content: { mode: "full" } };
+  patch.removePath(source, "content.mode");
+  assert.deepEqual(source, { content: { mode: "full" } }, "入参不得被修改");
 });
 
 await step("S12 removeArrayEntryField：按 provider id 删一个字段，保留定义/options/未知字段/其它渠道", () => {
@@ -399,7 +404,7 @@ await step("S13 clearItemOverride：只清目标项的本对话覆盖（普通�
 await step("S14 复合项保存有效混合状态，不统一、不泄漏其他会话字段", () => {
   const current = config.defaultConfig();
   current.rules.compactFailed.enabled = false;
-  current.content.includeAssistantExcerpt = true;
+  current.content.mode = "full";
   const item = itemOf("reminders.failed");
   assert.equal(item.read(current), "mixed");
   const saved = settingState.settingUserFilePatch({}, current, settingState.settingSnapshot(item, current));

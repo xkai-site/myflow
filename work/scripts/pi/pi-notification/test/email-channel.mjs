@@ -13,7 +13,7 @@ const { createQqCredentials } = await mail("mail/credentials.ts");
 let stored;
 const vault = { status: () => ({ available: true }), get: () => stored, set: (value) => { stored = value; }, delete: () => { stored = undefined; } };
 const credentials = createQqCredentials(vault, () => process.env[QQ_AUTH_ENV]);
-const { createEmailNotifier } = await mail("providers/email.ts");
+const { createEmailNotifier, MAX_MAIL_CONTENT_BYTES } = await mail("providers/email.ts");
 const logLines = [];
 const logger = { log: (_level, text, meta) => logLines.push({ text, meta }), record() {} };
 
@@ -122,7 +122,7 @@ try {
   const email = createEmailNotifier("email", {
     transport: { type: "smtp", profile: "qq" },
     from: "sender@qq.com", to: ["good@example.org", "bad@example.org"], subjectPrefix: "[Pi]",
-  }, { log: logger, maxChars: 300, sender: fake });
+  }, { log: logger, sender: fake });
   assert.equal(email.validate({ from: "sender@qq.com", to: ["good@example.org", "bad@example.org"] }), undefined);
   const request = { dedupeKey: "same", title: "title", body: "body", kind: "run_completed", level: "info", channels: ["email"], meta: { sessionId: "s", runId: "r", level: "info" } };
   await assert.rejects(email.send(request, new AbortController().signal), /1 个收件人.*EAUTH/);
@@ -131,11 +131,16 @@ try {
   assert.deepEqual(attempts, ["good@example.org", "bad@example.org", "bad@example.org"], "只重试未接受目标");
   assert.ok(logLines.every((entry) => !JSON.stringify(entry).includes("example.org")), "日志不得出现地址");
   assert.ok(logLines.some((entry) => JSON.stringify(entry).includes("EAUTH")), "日志应包含安全的 SMTP 错误代码");
+  const beforeOversize = attempts.length;
+  for (const finalReply of ["私".repeat(MAX_MAIL_CONTENT_BYTES / 2), "<".repeat(MAX_MAIL_CONTENT_BYTES / 4)]) {
+    await assert.rejects(email.send({ ...request, details: { finalReply } }, new AbortController().signal), /超过 1 MiB 内容上限，未发送/);
+    assert.equal(attempts.length, beforeOversize, "超限必须在任何收件人投递前明确失败");
+  }
   await email.dispose();
 
   const dnsFailureNotifier = createEmailNotifier("email", {
     transport: { type: "smtp", profile: "qq" }, from: "sender@qq.com", to: ["one@example.org"], subjectPrefix: "[Pi]",
-  }, { log: logger, maxChars: 300, sender: {
+  }, { log: logger, sender: {
     validate: () => undefined,
     async send() { throw new Error("QQ SMTP 发送失败 (SMTP_DNS_ERROR)"); },
     async dispose() {},
@@ -150,7 +155,7 @@ try {
 
   const missingCredential = createEmailNotifier("email", {
     transport: { type: "smtp", profile: "qq" }, from: "sender@qq.com", to: ["one@example.org"], subjectPrefix: "[Pi]",
-  }, { log: logger, maxChars: 300, sender: {
+  }, { log: logger, sender: {
     validate: () => undefined,
     async send() { throw new Error("SMTP_NOT_CONFIGURED"); },
     async dispose() {},
@@ -169,6 +174,7 @@ try {
   const merged = mergeConfig(defaultConfig(), {
     providers: [{ id: "email", type: "email", enabled: true, options }],
     rules: { runCompleted: { channels: ["terminal", "email"] } },
+    coalesce: { cooldownMs: 0 },
   }, "normal-email-notification-test");
   assert.deepEqual(merged.errors, []);
   const notificationConfig = merged.config;
@@ -176,7 +182,7 @@ try {
   const messages = [];
   const registry = createRegistry({ log: logger });
   registry.register("terminal", (id) => createTerminalNotifier(id, {
-    log: logger, maxChars: notificationConfig.content.maxMessageChars,
+    log: logger,
     io: {
       environment: () => ({ platform: "win32", env: {}, stdoutIsTTY: true }),
       write() { assert.fail("Windows notification must use the toast path"); },
@@ -184,7 +190,7 @@ try {
     },
   }));
   registry.register("email", (id, providerOptions) => createEmailNotifier(id, providerOptions, {
-    log: logger, maxChars: notificationConfig.content.maxMessageChars,
+    log: logger,
     sender: { validate: () => undefined, async send(message) { messages.push(message); }, async dispose() {} },
   }));
   let now = 1000;
@@ -192,34 +198,45 @@ try {
   const service = createService({ config: notificationConfig, registry, log: logger, now: () => now });
   try {
     lifecycle.onSessionStart({ sessionId: "normal-session", reason: "startup" });
-    lifecycle.onAgentStart({ sessionId: "normal-session" });
-    lifecycle.onAssistantMessage({ sessionId: "normal-session", stopReason: "stop", text: "Do not email the full AI response", usageCostUsd: 0.0123 });
-    now = 3500;
-    const outcome = lifecycle.onSettled({ sessionId: "normal-session", isIdle: true });
-    assert.ok(outcome);
-    const notification = evaluateSettlement({ outcome, summary: { projectName: "myflow", contextPercent: 12 } }, notificationConfig);
-    assert.ok(notification);
-    assert.deepEqual(notification.channels, ["terminal", "email"]);
-    service.submit(notification);
+    const finalReply = `\n# PRIVATE FINAL\n\n- 列表\n  - 缩进\n\n\`\`\`js\n\tconst tag = "<img src=x> &";\n\`\`\`\n\n${"长回复段落。\n".repeat(1000)}回复完整结尾\n`;
+    const run = (replyCandidate) => {
+      lifecycle.onAgentStart({ sessionId: "normal-session" });
+      lifecycle.onAssistantMessage({ sessionId: "normal-session", stopReason: "stop", usageCostUsd: 0.0123 });
+      lifecycle.observe({ kind: "turn_finished", sessionId: "normal-session", at: now, replyCandidate });
+      now += 38000;
+      const outcome = lifecycle.onSettled({ sessionId: "normal-session", isIdle: true });
+      return evaluateSettlement({ outcome, summary: { projectName: "myflow", contextPercent: 12 } }, notificationConfig);
+    };
+    const brief = run(finalReply);
+    assert.equal(service.submit(brief).accepted, true);
     await service.flush(1000);
-    assert.equal(toasts.length, 1, "正常 AI 完成必须产生本机通知");
-    assert.equal(messages.length, 1, "正常 AI 完成必须产生邮件");
-    const toastTitle = Buffer.from(toasts[0].env.PI_NOTIFY_TOAST_TITLE, "base64").toString("utf8");
-    const toastBody = Buffer.from(toasts[0].env.PI_NOTIFY_TOAST_BODY, "base64").toString("utf8");
-    assert.equal(toastTitle, "任务完成 / myflow");
-    assert.equal(messages[0].subject, `[Pi]${toastTitle}`);
-    assert.equal(messages[0].text, toastBody, "邮件正文与本机通知正文完全一致");
-    assert.match(toastBody, /2\.5s.*0\.0123.*12%/);
-    assert.doesNotMatch(messages[0].text, /Do not email/);
+    assert.equal(messages[0].text, "");
+    assert.doesNotMatch(messages[0].html, /PRIVATE FINAL|上下文/);
+
+    notificationConfig.content.mode = "full";
+    const full = run(finalReply);
+    assert.deepEqual(full.channels, ["terminal", "email"]);
+    assert.equal(service.submit(full).accepted, true);
+    await service.flush(1000);
+    assert.equal(service.submit(full).reason, "duplicate", "双渠道仍保持同事件去重");
+    for (const toast of toasts) {
+      assert.equal(Buffer.from(toast.env.PI_NOTIFY_TOAST_TITLE, "base64").toString("utf8"), "myflow：已完成（38秒，$0.0123）");
+      assert.equal(Buffer.from(toast.env.PI_NOTIFY_TOAST_BODY, "base64").toString("utf8"), "");
+    }
+    const fullMail = messages[1];
+    assert.equal(fullMail.subject, "[Pi]myflow：已完成（38秒，$0.0123）");
+    assert.equal(fullMail.text, `上下文 12%\n\n最终回复\n\n${finalReply}`);
+    assert.match(fullMail.html, /white-space:pre-wrap[\s\S]*\n- 列表\n  - 缩进[\s\S]*\n\tconst tag = &quot;&lt;img src=x&gt; &amp;&quot;;[\s\S]*回复完整结尾/);
+    assert.doesNotMatch(fullMail.html, /<img/);
+    assert.equal(service.submit(run(undefined)).accepted, true);
+    await service.flush(1000);
+    assert.equal(messages[2].text, "上下文 12%\n\n没有最终回复。");
     const snapshot = service.snapshot();
-    assert.equal(snapshot.byProvider.terminal.delivered, 1);
-    assert.equal(snapshot.byProvider.email.delivered, 1);
+    assert.equal(snapshot.byProvider.terminal.delivered, 3);
+    assert.equal(snapshot.byProvider.email.delivered, 3);
     assert.equal(snapshot.failed, 0);
     assert.equal(snapshot.skipped, 0);
-    service.submit(notification);
-    await service.flush(1000);
-    assert.equal(toasts.length, 1);
-    assert.equal(messages.length, 1, "双渠道仍保持同事件去重");
+    assert.doesNotMatch(JSON.stringify([snapshot, logLines]), /PRIVATE FINAL|回复完整结尾/);
   } finally { await service.dispose(); }
 
   const noCred = createQqSmtpSender(options, { credentials: createQqCredentials(vault, () => undefined) });

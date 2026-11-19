@@ -94,7 +94,7 @@ function assistantText() {
 }
 
 /** mode: "ok" | "error" */
-function buildStream(model, mode) {
+function buildStream(model, mode, toolTurn?: number) {
   const stream = createAssistantMessageEventStream();
   const delay = Number(process.env.PROBE_DELAY_MS ?? 0);
   const schedule = Number.isFinite(delay) && delay > 0
@@ -112,6 +112,18 @@ function buildStream(model, mode) {
             : "Mock provider failure: invalid_request_error (probe-fail)",
         }),
       });
+      return;
+    }
+    if (toolTurn !== undefined) {
+      const message = assistantMessage(model, {
+        stopReason: "toolUse",
+        content: [
+          { type: "text", text: `PRIVATE INTERMEDIATE ${toolTurn}` },
+          { type: "toolCall", id: `probe-${Date.now()}-${toolTurn}`, name: "probe_content_tool", arguments: {} },
+        ],
+      });
+      stream.push({ type: "start", partial: { ...message, content: [], stopReason: "pending" } });
+      stream.push({ type: "done", reason: "toolUse", message });
       return;
     }
     const message = assistantMessage(model, {});
@@ -132,8 +144,14 @@ function providerConfig(modelId, mode) {
     apiKey: "dummy-not-a-secret",
     api: "openai-completions",
     models: [mockModel(modelId)],
-    streamSimple(model) {
-      return buildStream(model, mode === "retry" ? (++calls === 1 ? "retry-error" : "ok") : mode);
+    streamSimple(model, context) {
+      const turns = Number(process.env.PROBE_TOOL_TURNS ?? 0);
+      const priorTools = turns > 0
+        ? context.messages.slice(context.messages.findLastIndex((message) => message.role === "user") + 1)
+          .filter((message) => message.role === "toolResult" && message.toolName === "probe_content_tool").length
+        : 0;
+      return buildStream(model, mode === "retry" ? (++calls === 1 ? "retry-error" : "ok") : mode,
+        priorTools < turns ? priorTools : undefined);
     },
   };
 }
@@ -142,6 +160,13 @@ export default function probeExtension(pi) {
   pi.registerProvider("probe-fake", providerConfig("fake-model", "ok"));
   pi.registerProvider("probe-fail", providerConfig("fail-model", "error"));
   pi.registerProvider("probe-retry", providerConfig("retry-model", "retry"));
+  pi.registerTool({
+    name: "probe_content_tool",
+    label: "Offline probe tool",
+    description: "Returns fixed text without IO",
+    parameters: { type: "object", properties: {} },
+    async execute() { return { content: [{ type: "text", text: "PRIVATE TOOL RESULT" }], details: {} }; },
+  });
 
   pi.registerCommand("probe-cmd", {
     description: "probe: 纯命令，不进入 agent 生命周期",

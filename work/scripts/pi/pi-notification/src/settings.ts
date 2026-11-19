@@ -5,7 +5,7 @@ import { getPathValue } from "./patch.ts";
 import { resolveChannels } from "./rules.ts";
 import type { NotificationConfig, NotifyLevel } from "./types.ts";
 
-export type SettingKind = "boolean" | "enum" | "number" | "time" | "collection";
+export type SettingKind = "boolean" | "enum" | "time" | "collection";
 export type SettingValue = string | number | boolean;
 export type SimpleSettingPatch =
   | { kind: "path"; path: string; value: unknown }
@@ -40,6 +40,7 @@ export interface SettingItem {
 const LEVELS: NotifyLevel[] = ["info", "warning", "error"];
 const LEVEL_LABELS = { info: "提示", warning: "警告", error: "错误" };
 const THRESHOLD_LABELS = { info: "所有等级", warning: "警告及错误", error: "仅错误" };
+const CONTENT_LABELS = { brief: "简要", full: "完整" };
 const CHANNEL_LABELS: Record<string, string> = {
   terminal: "本机通知",
   email: "邮箱通知",
@@ -82,9 +83,6 @@ interface ItemSpec {
   path: string;
   kind: SettingKind;
   candidates?: (config: NotificationConfig) => SettingCandidate[];
-  presets?: number[];
-  min?: number;
-  max?: number;
   emptyLabel?: string;
   labels?: Record<string, string>;
 }
@@ -111,22 +109,8 @@ function makeItem(spec: ItemSpec): SettingItem {
       spec.candidates ??
       (spec.kind === "boolean"
         ? () => BOOLEAN_CANDIDATES.map((entry) => ({ ...entry }))
-        : () => (spec.presets ?? []).map((value) => ({ value, label: format(value) }))),
+        : () => []),
   };
-  if (spec.kind === "number") {
-    const min = spec.min!,
-      max = spec.max!,
-      range = `${min}..${max}`;
-    item.inputHint = `整数 ${range}`;
-    item.parseInput = (text) => {
-      const trimmed = text.trim();
-      if (!/^\d+$/.test(trimmed)) return { ok: false, message: "必须是整数" };
-      const value = Number(trimmed);
-      return Number.isInteger(value) && value >= min && value <= max
-        ? { ok: true, value }
-        : { ok: false, message: `必须是 ${range} 的整数` };
-    };
-  }
   if (spec.kind === "time") {
     item.inputHint = "HH:MM（00:00–23:59）";
     item.parseInput = (text) =>
@@ -264,22 +248,13 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
     });
     for (const item of items.slice(-3)) item.rule = rule;
   }
-  for (const [path, label] of [
-    ["includeDuration", "包含耗时"],
-    ["includeToolFailureNames", "包含失败工具名"],
-    ["includeSessionLabel", "标题包含窗口标识"],
-    ["includeAssistantExcerpt", "包含助手摘录"],
-    ["includeCost", "包含成本与上下文"],
-  ])
-    add({ group: "内容", label, path: `content.${path}`, kind: "boolean" });
   add({
     group: "内容",
-    label: "正文最大长度",
-    path: "content.maxMessageChars",
-    kind: "number",
-    presets: [100, 300, 600, 1200],
-    min: 20,
-    max: 2000,
+    label: "通知内容",
+    path: "content.mode",
+    kind: "enum",
+    labels: CONTENT_LABELS,
+    candidates: () => [{ value: "brief", label: "简要" }, { value: "full", label: "完整（邮箱附全文）" }],
   });
   add({ group: "免打扰", label: "启用免打扰", path: "quietHours.enabled", kind: "boolean" });
   for (const [path, label] of [
@@ -464,7 +439,7 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
     label: "内容与隐私",
     kind: "fields",
     group: "内容",
-    summary: () => "",
+    summary: (config) => CONTENT_LABELS[config.content.mode],
     actions: [{ key: "action:preview", action: "preview" }],
   },
   {

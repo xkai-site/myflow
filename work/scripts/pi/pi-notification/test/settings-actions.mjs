@@ -200,7 +200,7 @@ try {
     const raw = { channels: [], providers: [{ id: "email", type: "email", enabled: true,
       options: { from: "fake@qq.com", to: ["reader@example.com"] } }], rules: { runFailed: { channels: ["email"], enabled: false } } };
     const h = harness(raw, credentials), item = h.item("provider:email");
-    h.host.setValue(h.item("content.includeCost"), false);
+    h.host.setValue(h.item("content.mode"), "full");
     h.host.setValue(item, false);
     const before = h.overlay(), file = fs.readFileSync(h.file, "utf8");
     assert.equal(h.host.channelActivation("email").kind, "ready");
@@ -238,22 +238,23 @@ try {
     // The host guard only closes the runtime copy when the credential is missing; the file keeps declaring it on.
     const guard = (config) => ({ ...config, providers: config.providers.map((provider) =>
       provider.id === "email" ? { ...provider, enabled: false } : provider) });
-    const raw = { channels: [], providers: [{ id: "email", type: "email", enabled: true, options }], content: { includeCost: false } };
+    const raw = { channels: [], providers: [{ id: "email", type: "email", enabled: true, options }], content: { mode: "full" } };
     const h = harness(raw, credentials, undefined, guard);
     const emailEnabled = () => h.current().providers.find((provider) => provider.id === "email").enabled;
     assert.equal(emailEnabled(), false, "runtime email must start closed");
     assert.equal(h.host.reload().ok, true, "reloading the same declaration must not look like an activation");
     // Enter on an unrelated field, then “a”: drop only this conversation's value.
-    assert.equal(h.host.setValue(h.item("content.includeCost"), true).ok, true);
-    assert.equal(h.host.followUserDefault(h.item("content.includeCost")).ok, true);
-    assert.equal(h.current().content.includeCost, false);
+    assert.equal(h.host.setValue(h.item("content.mode"), "brief").ok, true);
+    assert.equal(h.host.followUserDefault(h.item("content.mode")).ok, true);
+    assert.equal(h.current().content.mode, "full");
     assert.equal(emailEnabled(), false, "email must stay unavailable after following an unrelated default");
     // “d”: restore the built-in default of another unrelated field.
-    assert.equal(h.host.setValue(h.item("content.includeCost"), true).ok, true);
-    assert.equal(h.host.setValue(h.item("content.includeDuration"), true).ok, true);
-    assert.equal(h.host.restoreBuiltinDefault(h.item("content.includeCost")).ok, true);
-    assert.equal(h.host.userRaw().content?.includeCost, undefined);
-    assert.equal(h.current().content.includeCost, true);
+    assert.equal(h.host.setValue(h.item("content.mode"), "brief").ok, true);
+    assert.equal(h.host.setValue(h.item("quietHours.enabled"), true).ok, true);
+    assert.equal(h.host.restoreBuiltinDefault(h.item("content.mode")).ok, true);
+    assert.equal(h.host.userRaw().content?.mode, undefined);
+    assert.equal(h.current().content.mode, "brief");
+    assert.equal(h.current().quietHours.enabled, true);
     assert.equal(emailEnabled(), false, "email must stay unavailable after restoring an unrelated built-in default");
     // A real activation still asks for the credential, and a changed declaration still guards a reload.
     assert.equal(h.host.setValue(h.item("provider:email"), false).ok, true);
@@ -267,15 +268,16 @@ try {
   });
   step("d validates the real post-delete gate and keeps sparse persistence and unrelated overlay semantics", () => {
     const h = harness({ channels: [], providers: [{ id: "custom", type: "debug", enabled: false, options: { label: "keep" } }],
-      content: { includeCost: false }, rules: { runFailed: { channels: [], enabled: false } } });
+      content: { mode: "full" }, rules: { runFailed: { channels: [], enabled: false } } });
     const item = h.item("provider:custom");
-    h.host.setValue(item, false); h.host.setValue(h.item("content.includeDuration"), false);
+    h.host.setValue(item, false);
+    h.host.setValue(h.item("content.mode"), "brief");
     const before = h.overlay();
     assert.equal(h.host.restoreBuiltinDefault(item).ok, true);
     const expected = structuredClone(before); delete expected.providers.custom;
     assert.deepEqual(h.overlay(), expected);
     assert.deepEqual(h.host.userRaw(), { channels: [], providers: [{ id: "custom", type: "debug", options: { label: "keep" } }],
-      content: { includeCost: false }, rules: { runFailed: { channels: [], enabled: false } } });
+      content: { mode: "full" }, rules: { runFailed: { channels: [], enabled: false } } });
     assert.equal(h.current().providers[0].enabled, true);
     assert.deepEqual(h.current().channels, []); assert.deepEqual(h.current().rules.runFailed.channels, []);
     const silenced = harness({ providers: [{ id: "terminal", type: "terminal", enabled: false }] });
@@ -312,7 +314,7 @@ try {
     const credentials = createQqCredentials({ status: () => ({ available: true }), get: () => "fake-save-only", set() {}, delete() {} }, () => undefined);
     const h = harness({}, credentials);
     for (const [id, value] of [["provider:email:from", "fake@qq.com"], ["provider:email:to", ["reader@example.com"]],
-      ["provider:email", true], ["channels", ["email"]], ["rules.runFailed.channels", []], ["content.includeCost", false]]) {
+      ["provider:email", true], ["channels", ["email"]], ["rules.runFailed.channels", []], ["content.mode", "full"]]) {
       assert.equal(h.host.setValue(h.item(id), value).ok, true);
     }
     const overlay = h.overlay();
@@ -320,6 +322,21 @@ try {
     assert.deepEqual(h.host.userRaw(), { providers: [{ id: "email", type: "email", enabled: true }] });
     assert.deepEqual(h.overlay(), overlay);
     assert.doesNotMatch(fs.readFileSync(h.file, "utf8"), /fake-save-only|fake@qq|reader|channels|content/);
+  });
+  step("Content preview follows the active mode; saving full is explicit and reversible", () => {
+    const h = harness({ content: { includeAssistantExcerpt: true } });
+    const item = h.item("content.mode");
+    const brief = h.host.preview().lines.join("\n");
+    assert.match(brief, /示例会话：已完成（2分35秒，\$0\.0246）/);
+    assert.doesNotMatch(brief, /已添加回归测试|上下文 42%/);
+    assert.equal(h.host.setValue(item, "full").ok, true);
+    assert.equal(h.host.userRaw().content.mode, undefined);
+    const full = h.host.preview().lines.join("\n");
+    assert.match(full, /仅邮箱追加以下内容：\n上下文 42%\n\n最终回复\n\n已修复登录问题。\n\n- 已添加回归测试。/);
+    assert.equal(h.host.saveDefault(item).ok, true);
+    assert.deepEqual(h.host.userRaw().content, { mode: "full" });
+    assert.equal(h.host.restoreBuiltinDefault(item).ok, true);
+    assert.equal(h.current().content.mode, "brief");
   });
   step("The same credential core serves a settings host and a plain non-Pi host", () => {
     let value;

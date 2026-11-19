@@ -24,19 +24,21 @@ function observer(options = {}) {
 }
 
 step("Candidate derivation includes non-preset current/default values exactly once, with independent markers", () => {
-  const config = defaultConfig(); config.content.maxMessageChars = 417;
-  const field = item(config, "content.maxMessageChars");
-  const rows = settingCandidates(field, config, 619);
-  assert.equal(rows.filter((row) => row.value === 417).length, 1);
-  assert.equal(rows.filter((row) => row.value === 619).length, 1);
+  const config = defaultConfig();
+  const current = config.quietHours.start = "21:43";
+  const saved = "18:19";
+  const field = item(config, "quietHours.start");
+  const rows = settingCandidates(field, config, saved);
+  assert.equal(rows.filter((row) => row.value === current).length, 1);
+  assert.equal(rows.filter((row) => row.value === saved).length, 1);
   assert.equal(rows.at(-1).custom, true);
-  assert.equal(rows[initialCandidateFocus(field, rows, 417)].value, 417);
+  assert.equal(rows[initialCandidateFocus(field, rows, current)].value, current);
   for (const row of rows) {
-    assert.equal(candidateIsCurrent(field, row, 417), row.value === 417);
-    assert.equal(candidateIsDefault(field, row, 417, 619, true), row.value === 619);
-    assert.equal(candidateIsDefault(field, row, 417, 619, false), false);
+    assert.equal(candidateIsCurrent(field, row, current), row.value === current);
+    assert.equal(candidateIsDefault(field, row, current, saved, true), row.value === saved);
+    assert.equal(candidateIsDefault(field, row, current, saved, false), false);
   }
-  assert.equal(settingCandidates(field, config, 417).filter((row) => row.value === 417).length, 1);
+  assert.equal(settingCandidates(field, config, current).filter((row) => row.value === current).length, 1);
 });
 step("Collections distinguish inherit, membership and empty selection; synthetic rows have no markers", () => {
   const config = defaultConfig(), field = item(config, "rules.runCompleted.channels");

@@ -73,14 +73,34 @@ await step("C2 未知规则名只给警告（前向兼容）且不生效；rules
   assert.deepEqual(inherited.config.rules.runCompleted, { enabled: false, level: "warning", channels: ["debug"] });
 });
 
+await step("内容模式严格校验；旧字段读取时忽略、写入时清理，不扩大外发范围", () => {
+  assert.deepEqual(config.defaultConfig().content, { mode: "brief" });
+  for (const mode of ["brief", "full"]) assert.deepEqual(merge({ content: { mode } }).config.content, { mode });
+  for (const mode of [null, true, "FULL", "", []]) assert.deepEqual(errorPaths({ content: { mode } }), ["content.mode"]);
+  assert.deepEqual(errorPaths({ content: false }), ["content"]);
+
+  const agentDir = cleanAgentDir("legacy-content");
+  const legacy = { includeDuration: false, includeToolFailureNames: "bad", includeSessionLabel: false,
+    includeAssistantExcerpt: true, includeCost: false, maxMessageChars: -1 };
+  const rest = { channels: ["terminal"], rules: { runFailed: { channels: [] } } };
+  writeRawFile(agentDir, JSON.stringify({ ...rest, content: legacy }));
+  const load = config.loadConfig({ agentDir });
+  assert.equal(load.degraded, false);
+  assert.deepEqual(load.config.content, { mode: "brief" });
+  assert.deepEqual(load.config.rules.runFailed.channels, []);
+  assert.equal(config.writeUserDefault(agentDir, { minLevel: "warning" }).ok, true);
+  assert.deepEqual(config.readUserConfigRaw(agentDir).raw, { ...rest, minLevel: "warning" });
+
+  writeRawFile(agentDir, JSON.stringify({ ...rest, content: { ...legacy, futureField: "keep" } }));
+  assert.equal(config.writeUserDefault(agentDir, { content: { mode: "full" } }).ok, true);
+  assert.deepEqual(config.readUserConfigRaw(agentDir).raw, { ...rest, content: { mode: "full", futureField: "keep" } });
+  assert.equal(config.loadConfig({ agentDir }).config.content.mode, "full");
+  assert.equal(config.deleteUserDefault(agentDir, { kind: "path", path: "content.mode" }).ok, true);
+  assert.equal(config.loadConfig({ agentDir }).config.content.mode, "brief");
+});
+
 await step("C3 数值字段边界：边界值通过，越界/非整数/字符串数字一律报错", async () => {
   const cases = [
-    ["content.maxMessageChars", 20, true],
-    ["content.maxMessageChars", 2000, true],
-    ["content.maxMessageChars", 19, false],
-    ["content.maxMessageChars", 2001, false],
-    ["content.maxMessageChars", 1.5, false],
-    ["content.maxMessageChars", "300", false],
     ["coalesce.windowMs", 0, true],
     ["coalesce.windowMs", 600000, true],
     ["coalesce.windowMs", -1, false],
@@ -328,13 +348,13 @@ await step("C10 readUserConfigRaw：缺文件返回空、根不是对象与损�
 
 await step("C11 writeUserDefault：稀疏写盘只动这一项，保留其它原文；拒绝损坏文件与非法值", () => {
   const agentDir = cleanAgentDir("sparse");
-  writeRawFile(agentDir, JSON.stringify({ content: { includeCost: false }, futureTop: 7 }, null, 2));
+  writeRawFile(agentDir, JSON.stringify({ content: { mode: "full" }, futureTop: 7 }, null, 2));
 
   const result = config.writeUserDefault(agentDir, { coalesce: { windowMs: 0 } });
   assert.equal(result.ok, true, `写盘应成功: ${JSON.stringify(result.problems)}`);
   assert.deepEqual(
     config.readUserConfigRaw(agentDir).raw,
-    { content: { includeCost: false }, futureTop: 7, coalesce: { windowMs: 0 } },
+    { content: { mode: "full" }, futureTop: 7, coalesce: { windowMs: 0 } },
     "只应新增这一项并保留原文其它字段",
   );
   assert.equal(result.config.coalesce.windowMs, 0, "返回值必须带上合并后的生效配置");

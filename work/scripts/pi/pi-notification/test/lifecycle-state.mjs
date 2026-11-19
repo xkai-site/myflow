@@ -224,17 +224,28 @@ await step("L7 等待输入计数：custom 不计、多余的 end 不会变负�
   assert.equal(harness.lifecycle.isWaitingForUser(), false, "强杀可能不发 end，shutdown 必须复位");
 });
 
-await step("L8 摘录与错误消息：只保留最后一条非空文本，失败说明在观察时脱敏", () => {
-  const harness = makeLifecycle();
-  startRun(harness);
-  harness.lifecycle.onAssistantMessage({ sessionId: "s1", stopReason: "stop", text: "第一条" });
-  harness.lifecycle.onAssistantMessage({ sessionId: "s1", stopReason: "stop", text: "" });
-  harness.lifecycle.onAssistantMessage({ sessionId: "s1", stopReason: "stop", text: "最后一条" });
-  harness.lifecycle.onAssistantMessage({ sessionId: "s1", stopReason: "error", errorMessage: "provider 500" });
-  const outcome = harness.lifecycle.onSettled({ sessionId: "s1", isIdle: true });
-  assert.equal(outcome.assistantExcerpt, "最后一条", "空文本不得覆盖已有摘录");
-  assert.equal(outcome.errorMessage, "provider 500");
-  assert.equal(outcome.status, "failed");
+await step("L8 只在 settle 采用最后一轮回复，继续执行、错误或取消不回退到中间文本", () => {
+  const reply = "\n\nPRIVATE 回复\n\n- 列表\n\n```js\n\tlet value = 1;\n```\n";
+  for (const [ending, expected] of [["stop", reply], ["length", reply], ["empty", undefined],
+    ["toolUse", undefined], ["error", undefined], ["aborted", undefined], ["nextTurn", undefined], ["continue", undefined]]) {
+    const h = makeLifecycle();
+    startRun(h);
+    const observe = (kind, extra = {}) => h.lifecycle.observe({ kind, sessionId: "s1", at: h.now(), ...extra });
+    observe("assistant_message", { assistant: { stopReason: "stop" } });
+    observe("turn_finished", { replyCandidate: "PRIVATE 中间消息" });
+    assert.equal(observe("run_settled", { settled: { isIdle: false } }).outcome, undefined);
+    if (ending === "continue") observe("run_started");
+    else observe("turn_started");
+    if (ending !== "nextTurn" && ending !== "continue") {
+      observe("assistant_message", { assistant: { stopReason: ending === "empty" || ending === "aborted" ? "stop" : ending,
+        ...(ending === "error" ? { errorMessage: "provider 500 token=hidden-value" } : {}) } });
+      observe("turn_finished", { replyCandidate: ["stop", "length", "aborted"].includes(ending) ? reply : undefined });
+    }
+    const { outcome, facts } = observe("run_settled", { settled: { isIdle: true, aborted: ending === "aborted" } });
+    assert.equal(outcome.finalReply, expected, ending);
+    if (ending === "error") assert.equal(outcome.errorMessage, "provider 500 token=***");
+    assert.doesNotMatch(JSON.stringify([facts, h.lifecycle.snapshot(), h.records, h.logs]), /PRIVATE/);
+  }
 });
 
 await step("L9 多 start 同一逻辑 run：保留工具失败、成本、开始时间；aborted 优先", () => {
@@ -269,7 +280,8 @@ await step("L10 事实/快照：压缩与 prompt 独立，关闭 prompt 恢复 w
   assert.equal(observe("run_settled", { settled: { isIdle: true } }).facts.length, 0);
   assert.equal(observe("ui_prompt_start", { uiPrompt: { kind: "custom" } }).facts.length, 0);
   assert.equal(observe("ui_prompt_end", { uiPrompt: { kind: "custom" } }).facts.length, 0);
-  observe("assistant_message", { assistant: { stopReason: "stop", text: "private reply" } });
+  observe("assistant_message", { assistant: { stopReason: "stop" } });
+  observe("turn_finished", { replyCandidate: "private reply" });
   const implicit = observe("run_settled", { settled: { isIdle: true } }).facts[0];
   assert.equal(implicit.data.startObserved, false); assert.equal(implicit.data.startedAt, undefined);
   assert.equal(implicit.data.durationMs, undefined);

@@ -755,6 +755,10 @@ export class NotifySettingsComponent {
     if (item.destinations) lines.push(`自定义例外：${routingExceptions(this.host.config()).join("、") || "无"}；取消统一选择不会关闭例外使用的渠道。`);
     if (item.id === "reminders.completed") lines.push("执行完成只表示 Pi 停止自动执行，不保证业务目标成功。");
     if (item.id === "reminders.failed") lines.push("包含运行失败和上下文压缩失败，不包括每次可恢复工具失败。");
+    if (item.id === "content.mode") {
+      lines.push("简要：会话、运行状态、用时和本次成本；异常时补充原因。",
+        "完整：仅邮箱另附上下文使用率和最终回复全文，可能含敏感内容。本机和 Webhook 仍是简要。");
+    }
     if (item.inputHint) lines.push(`输入：${item.inputHint}`);
     // “Not effective right now” is spelled out instead of hiding the field: search and the restored
     // pages must be able to reach a parameter a disabled feature currently ignores.

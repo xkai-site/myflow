@@ -27,11 +27,13 @@ export function createRuntime(options: RuntimeOptions) {
 
   function publish(signal: SignalEvent) {
     const update = lifecycle.observe(signal);
-    const snapshot = lifecycle.snapshot();
-    for (const fact of update.facts) {
-      seq += 1; // Observation sequence, including facts skipped while external output is disabled.
-      publisher?.publish(createEnvelope({ streamId: instanceToken, seq, sessionId: signal.sessionId,
-        fact, snapshot, labels, includeLabels: config.api.includeLabels }));
+    if (update.facts.length > 0) {
+      const snapshot = publisher && lifecycle.snapshot();
+      for (const fact of update.facts) {
+        seq += 1; // Observation sequence, including facts skipped while external output is disabled.
+        if (snapshot) publisher?.publish(createEnvelope({ streamId: instanceToken, seq, sessionId: signal.sessionId,
+          fact, snapshot, labels, includeLabels: config.api.includeLabels }));
+      }
     }
     return update;
   }
@@ -61,25 +63,22 @@ export function createRuntime(options: RuntimeOptions) {
       if (isSilenced() || !config.enabled) return;
       if (update.outcome) {
         const outcome = update.outcome;
-        const summary: RunSummary = {
-          runStatus: outcome.status, durationMs: outcome.durationMs, toolFailures: outcome.toolFailures,
-          ...labels, cumulativeCostUsd: lifecycle.sessionCostUsd(), contextPercent: signal.contextPercent,
-        };
+        const summary: RunSummary = { ...labels, contextPercent: signal.contextPercent };
         const request = evaluateSettlement({ outcome, summary }, config);
         if (request) service.submit(request);
       }
       const failure = update.toolFailure;
       if (failure && config.rules.toolFailed.mode === "immediate" && failure.count >= config.rules.toolFailed.threshold) {
-        const request = evaluateToolFailure({ ...failure, toolFailures: [{ toolName: failure.toolName, count: failure.count }] }, config);
+        const request = evaluateToolFailure({ ...failure, labels, toolFailures: [{ toolName: failure.toolName, count: failure.count }] }, config);
         if (request) service.submit(request);
       }
       if (update.compactFailure && signal.compact) {
-        const request = evaluateCompactFailure({ ...update.compactFailure, ...signal.compact, seq: ++compactSeq }, config);
+        const request = evaluateCompactFailure({ ...update.compactFailure, ...signal.compact, labels, seq: ++compactSeq }, config);
         if (request) service.submit(request);
       }
       if (update.prompt) {
         const request = evaluateWaitingForUser({ sessionId: signal.sessionId, runId: update.prompt.promptId,
-          kind: update.prompt.kind, title: signal.uiPrompt?.title, seq: ++promptSeq }, config);
+          labels, kind: update.prompt.kind, title: signal.uiPrompt?.title, seq: ++promptSeq }, config);
         if (request) service.submit(request);
       }
     },

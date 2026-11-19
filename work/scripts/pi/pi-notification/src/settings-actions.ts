@@ -14,6 +14,7 @@ import {
   deleteUserDefault,
   type ConfigLoadResult,
 } from "./config.ts";
+import { emailContent } from "./content.ts";
 import { sanitize, sanitizeError } from "./log.ts";
 import { QQ_MAIL_URL, type QqCredentials, type CredentialStatus } from "./mail/credentials.ts";
 import { createDefaultTerminalIo, selectTerminalChannel } from "./providers/terminal.ts";
@@ -433,22 +434,19 @@ export function createSettingsHost(deps: SettingsDeps): SettingsHost {
     preview() {
       const config: NotificationConfig = structuredClone(deps.config());
       config.rules.runCompleted = { ...config.rules.runCompleted, enabled: true };
-      const failures = [{ toolName: "bash", count: 1 }];
       const outcome: RunOutcome = {
         sessionId: "preview", runId: "preview", status: "completed", startedAt: 0,
-        durationMs: 42300, stopReason: "stop", toolFailures: failures,
-        costUsd: 0.0123, assistantExcerpt: "已修复登录 bug",
+        durationMs: 155000, stopReason: "stop", toolFailures: [],
+        costUsd: 0.0246, finalReply: "已修复登录问题。\n\n- 已添加回归测试。",
       };
-      const summary: RunSummary = {
-        runStatus: "completed", durationMs: 42300, toolFailures: failures,
-        sessionName: "示例会话", projectName: "myflow", cumulativeCostUsd: 0.0456, contextPercent: 42,
-      };
+      const summary: RunSummary = { sessionName: "示例会话", contextPercent: 42 };
       const request = evaluateRunOutcome({ outcome, summary }, config);
-      const lines = [
-        "固定数据示例，不读取当前对话，不发送通知。",
-        request ? `标题：${request.title}` : "无法生成示例。",
-        request ? `正文：${request.body}` : "",
-      ].filter((line) => line !== "");
+      const lines = ["固定数据示例，不读取当前对话，不发送通知。"];
+      if (request) {
+        lines.push(`标题：${request.title}`);
+        if (request.details) lines.push("", "仅邮箱追加以下内容：", ...emailContent(request).text.split("\n"));
+        else lines.push("正常完成时无额外正文；异常原因会放在正文。");
+      }
       deps.log.record({ event: "notify_preview" });
       return { ok: true, message: "通知预览（内容示意，不会发送）", lines };
     },

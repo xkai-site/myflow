@@ -1,8 +1,8 @@
 /**
  * Logging, sanitizing and redaction.
  *
- *  - `sanitize()` is the single exit for text leaving this plugin: escape sequences
- *    and invisible control characters are stripped before truncation.
+ *  - `sanitize()` strips escape sequences and invisible controls before bounding diagnostics.
+ *  - `singleLine()` cleans notification metadata without a length limit.
  *  - `redact()` masks secrets and home-directory paths in error text.
  *  - `createLogger()` writes human-readable lines to stderr plus optional JSONL
  *    records; the JSONL sink only opens when `PI_NOTIFY_LOG_FILE` is set.
@@ -95,16 +95,18 @@ function stripInvisible(input: string): string {
   return out;
 }
 
-/**
- * The single sanitizing entry point for text leaving this plugin.
- * Normalises CRLF, collapses whitespace, then truncates by code point so
- * surrogate pairs are never split.
- */
+function visibleText(input: string): string {
+  return stripInvisible(stripEscapeSequences(input.replace(/\r\n?/g, "\n")));
+}
+
+export function singleLine(input: string): string {
+  return visibleText(input).replace(/\s+/g, " ").trim();
+}
+
+/** Normalises whitespace and bounds diagnostic text without splitting surrogate pairs. */
 export function sanitize(input: unknown, maxChars: number = DEFAULT_MAX_CHARS): string {
   const raw = typeof input === "string" ? input : String(input ?? "");
-  const normalized = raw.replace(/\r\n?/g, "\n");
-  const visible = stripInvisible(stripEscapeSequences(normalized));
-  const collapsed = visible
+  const collapsed = visibleText(raw)
     .replace(/[^\S\n]+/g, " ")
     .replace(/ ?\n ?/g, "\n")
     .replace(/\n{2,}/g, "\n")

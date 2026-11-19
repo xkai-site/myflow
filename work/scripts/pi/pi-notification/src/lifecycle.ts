@@ -1,5 +1,5 @@
 /** Single plain-data state machine. Only agent_settled concludes a logical run. */
-import { sanitizeError } from "./log.ts";
+import { redact, sanitizeError } from "./log.ts";
 import { projectRun } from "./messages.ts";
 import type {
   AssistantStopReason, BlockingPromptKind, CompactionReason, LifecycleUpdate, Logger,
@@ -18,7 +18,7 @@ export interface Lifecycle {
   snapshot(): RuntimeSnapshot;
   onSessionStart(input: { sessionId: string; reason: string }): void;
   onAgentStart(input: { sessionId: string }): void;
-  onAssistantMessage(input: { sessionId: string; stopReason: AssistantStopReason | undefined; errorMessage?: string; usageCostUsd?: number; text?: string }): void;
+  onAssistantMessage(input: { sessionId: string; stopReason: AssistantStopReason | undefined; errorMessage?: string; usageCostUsd?: number }): void;
   onToolExecutionEnd(input: { sessionId: string; toolName: string; isError: boolean; toolCallId?: string }): ToolFailureEvent | null;
   onCompactFailed(input: { sessionId: string; reason: string; errorMessage?: string; aborted: boolean }): { sessionId: string; runId: string; operationId: string } | null;
   onUiPromptStart(input: { sessionId: string; kind: string; title?: string }): void;
@@ -56,8 +56,8 @@ export function createLifecycle({ log, now, instanceToken }: LifecycleOptions): 
   let activeRun: {
     runId: string; startedAt: number; startObserved: boolean; sawAssistant: boolean;
     stopReason?: AssistantStopReason; errorMessage?: string; costUsd?: number;
-    assistantMessageCount: number; costReportCount: number; assistantText?: string;
-    toolFailures: Map<string, number>; toolCalls: Set<string>; compactFailed: boolean;
+    assistantMessageCount: number; costReportCount: number; replyCandidate?: string;
+    toolFailures: Map<string, number>; toolCalls: Set<string>; compactFailed: boolean; compactionError: boolean;
     overflowRecoveryFailed: boolean;
   } | undefined;
   let lastRun: MachineRun | undefined;
@@ -76,7 +76,7 @@ export function createLifecycle({ log, now, instanceToken }: LifecycleOptions): 
     return {
       runId: `${instanceToken}-${++counter}`, startedAt: clock(), startObserved, sawAssistant: false,
       assistantMessageCount: 0, costReportCount: 0, toolFailures: new Map(), toolCalls: new Set(),
-      compactFailed: false, overflowRecoveryFailed: false,
+      compactFailed: false, compactionError: false, overflowRecoveryFailed: false,
     };
   }
   function ignored(status: string, reason?: string): null {
@@ -100,11 +100,14 @@ export function createLifecycle({ log, now, instanceToken }: LifecycleOptions): 
     onAgentStart({ sessionId }) {
       if (!accept(sessionId)) return;
       // agent.continue() starts again before the same final settle. Do not reset its facts.
-      if (activeRun) return;
+      if (activeRun) {
+        activeRun.replyCandidate = undefined;
+        return;
+      }
       activeRun = newRun(true);
       log.record({ event: "lifecycle_run_start", sessionId, runId: activeRun.runId });
     },
-    onAssistantMessage({ sessionId, stopReason, errorMessage, usageCostUsd, text }) {
+    onAssistantMessage({ sessionId, stopReason, errorMessage, usageCostUsd }) {
       if (!accept(sessionId)) return;
       if (!activeRun) {
         activeRun = newRun(false);
@@ -112,15 +115,15 @@ export function createLifecycle({ log, now, instanceToken }: LifecycleOptions): 
       }
       const run = activeRun;
       run.sawAssistant = true; run.assistantMessageCount += 1; run.stopReason = stopReason;
+      run.replyCandidate = undefined;
       // A successful retry replaces an earlier error, including its error text.
-      run.errorMessage = errorMessage ? sanitizeError(errorMessage, 200) : undefined;
+      run.errorMessage = errorMessage ? redact(errorMessage) : undefined;
       if (classify(stopReason) === "completed") run.overflowRecoveryFailed = false;
       if (typeof usageCostUsd === "number" && Number.isFinite(usageCostUsd) && usageCostUsd >= 0) {
         run.costReportCount += 1;
         run.costUsd = (run.costUsd ?? 0) + usageCostUsd;
         sessionCostUsd = (sessionCostUsd ?? 0) + usageCostUsd;
       } else sessionCostComplete = false;
-      if (text) run.assistantText = [...text].slice(0, 200).join("");
     },
     onToolExecutionEnd({ sessionId, toolName, isError, toolCallId }) {
       if (!accept(sessionId) || !isError) return null;
@@ -140,9 +143,10 @@ export function createLifecycle({ log, now, instanceToken }: LifecycleOptions): 
       const op = compaction ?? startCompaction(compactionReason(reason));
       if (activeRun) {
         activeRun.compactFailed = true;
+        if (!aborted) activeRun.compactionError = true;
         if (reason === "overflow" && !aborted) {
           activeRun.overflowRecoveryFailed = true;
-          activeRun.errorMessage = errorMessage ? sanitizeError(errorMessage, 200) : activeRun.errorMessage;
+          activeRun.errorMessage = errorMessage ? redact(errorMessage) : activeRun.errorMessage;
         }
       }
       lastOperation = { operationId: op.operationId, reason: op.reason, status: aborted ? "aborted" : "failed" };
@@ -178,8 +182,9 @@ export function createLifecycle({ log, now, instanceToken }: LifecycleOptions): 
         ...(status === "failed" && run.errorMessage ? { errorMessage: run.errorMessage } : {}),
         toolFailures: [...run.toolFailures].map(([toolName, count]) => ({ toolName, count })),
         ...(run.compactFailed ? { compactFailed: true } : {}),
+        ...(run.compactionError ? { compactionError: true } : {}),
         ...(run.costUsd !== undefined && run.costReportCount === run.assistantMessageCount ? { costUsd: run.costUsd } : {}),
-        ...(run.assistantText ? { assistantExcerpt: run.assistantText } : {}),
+        ...(status === "completed" && run.replyCandidate !== undefined ? { finalReply: run.replyCandidate } : {}),
       };
       lastRun = projectRun(outcome);
       restingState = status === "completed" ? "done" : status === "failed" ? "error" : status === "aborted" ? "idle" : "unknown";
@@ -233,6 +238,12 @@ export function createLifecycle({ log, now, instanceToken }: LifecycleOptions): 
           case "assistant_message":
             if (signal.assistant) lifecycle.onAssistantMessage({ sessionId, ...signal.assistant });
             if (!previousRunId && activeRun) emit({ type: "run.started", runId: activeRun.runId, data: { startObserved: false } });
+            break;
+          case "turn_started":
+            if (activeRun) activeRun.replyCandidate = undefined;
+            break;
+          case "turn_finished":
+            if (activeRun) activeRun.replyCandidate = signal.replyCandidate;
             break;
           case "tool_finished": {
             if (!signal.tool) break;

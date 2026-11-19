@@ -191,6 +191,7 @@ export function createService(options: ServiceOptions): NotificationService {
     const startedAt = now();
     try {
       const maxParallel = Math.max(1, Math.min(8, Math.floor(config.delivery.channelConcurrency || 4)));
+      const { details, ...brief } = req;
       // Bounded concurrent fan-out per notification: one slow channel cannot hold up the others.
       for (let offset = 0; offset < req.channels.length; offset += maxParallel) {
         const batch = req.channels.slice(offset, offset + maxParallel);
@@ -202,7 +203,10 @@ export function createService(options: ServiceOptions): NotificationService {
             const notifier = notifierFor(providerId);
             const unavailable = notifier.skipped ?? (testRequests.has(req) ? notifier.validate(providersById().get(providerId)?.options ?? {}) : undefined);
             if (unavailable) return { providerId, ok: false, skipped: true, attempts: 0, error: sanitizeError(unavailable), durationMs: 0 };
-            await notifier.send(req, signal);
+            // Project at delivery time: queued full content cannot reach other providers,
+            // or email if the user has since switched back to brief.
+            const content = !details || (notifier.type === "email" && config.content.mode === "full") ? req : brief;
+            await notifier.send(content, signal);
             return { providerId, ok: true, attempts: 1, durationMs: now() - channelStarted };
           } catch (error) {
             return {

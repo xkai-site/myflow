@@ -111,6 +111,39 @@ await step("精确去重：同一个 dedupeKey 只投递一次", async () => {
   assert.ok(h.events().includes("dedupe_drop"));
 });
 
+await step("全文仅交给邮箱；排队后切回简要时不再发送全文", async () => {
+  const pending = Promise.withResolvers();
+  const seen = [];
+  const h = makeHarness({
+    mutateConfig(config) {
+      config.content.mode = "full";
+      config.coalesce.windowMs = 0;
+      config.coalesce.cooldownMs = 0;
+      config.providers.find((provider) => provider.id === "email").enabled = true;
+    },
+    send(req, _signal, _count, id) {
+      seen.push([id, req.dedupeKey, req.details]);
+      if (req.dedupeKey === "first-full" && id === "email") return pending.promise;
+    },
+  });
+  const details = { contextPercent: 42, finalReply: "PRIVATE QUEUED REPLY" };
+  const first = request({ channels: ["terminal", "email"], dedupeKey: "first-full", details });
+  try {
+    assert.equal(h.service.submit(first).accepted, true);
+    assert.equal(h.service.submit({ ...first, dedupeKey: "queued-full" }).accepted, true);
+    assert.equal(h.service.snapshot().queued, 1);
+    h.config.content.mode = "brief";
+    pending.resolve();
+    await h.settle();
+    assert.deepEqual(seen, [["terminal", "first-full", undefined], ["email", "first-full", details],
+      ["terminal", "queued-full", undefined], ["email", "queued-full", undefined]]);
+    assert.doesNotMatch(JSON.stringify(h.records), /PRIVATE QUEUED REPLY/);
+  } finally {
+    pending.resolve();
+    await h.service.dispose();
+  }
+});
+
 await step("门槛：enabled=false / minLevel / 空渠道列表都不投递", async () => {
   const disabled = makeHarness({ mutateConfig: (c) => { c.enabled = false; } });
   disabled.service.submit(request());

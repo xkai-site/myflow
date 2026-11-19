@@ -137,13 +137,14 @@ await step("L2 Noop 渠道：validate 回显原因、send 无副作用、dispose
   assert.equal(anonymous.validate({}), undefined, "没有原因时 validate 视为可用（它本来就不做任何事）");
 });
 
-await step("L3 Debug 渠道：按 maxChars 截断、换行归一、已取消的投递要抛错", async () => {
+await step("L3 Debug 渠道：单行简要，不记录最终回复；取消应失败", async () => {
   const harness = makeLog();
-  const notifier = createDebugNotifier("d", { log: harness.log, maxChars: 5 });
-  await notifier.send(request({ title: "1234567890", body: "a\nb" }), new AbortController().signal);
+  const notifier = createDebugNotifier("d", { log: harness.log });
+  await notifier.send(request({ title: "myflow：已完成（2分35秒，$0.0246）", body: "a\nb",
+    details: { contextPercent: 42, finalReply: "PRIVATE FINAL REPLY" } }), new AbortController().signal);
   assert.equal(harness.logs.length, 1);
   assert.deepEqual(harness.logs[0].meta, { kind: "run_completed", dedupeKey: "k" }, "结构化元数据只带 kind 与去重键");
-  assert.match(harness.logs[0].message, /\[run_completed\] 1234… — a b/, "标题截断、正文换行归一为空格");
+  assert.equal(harness.logs[0].message, "[run_completed] myflow：已完成（2分35秒，$0.0246） — a b");
 
   const cancelled = new AbortController();
   cancelled.abort();
