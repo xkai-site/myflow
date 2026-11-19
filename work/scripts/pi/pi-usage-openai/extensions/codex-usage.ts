@@ -7,6 +7,19 @@ export interface CodexUsageResponse {
 
 export type UsageFetch = typeof fetch;
 
+type UnauthorizedReason = "expired" | "revoked" | "unknown";
+
+export class CodexUsageUnauthorizedError extends Error {
+  readonly reason: UnauthorizedReason;
+
+  constructor(reason: UnauthorizedReason) {
+    super(reason === "expired" ? "OpenAI 用量接口报告 access token 已过期（401）。"
+      : reason === "revoked" ? "OpenAI 用量接口报告登录凭据已撤销或失效（401）。请重新登录 Codex 后重试。"
+      : "OpenAI 用量接口拒绝了登录凭据（401），未返回可识别的认证原因。");
+    this.reason = reason;
+  }
+}
+
 export interface UsageWindow {
   label: string;
   usedPercent?: number;
@@ -149,6 +162,28 @@ export function formatCodexUsage(summary: UsageSummary, now: number = Date.now()
   return lines.join("\n");
 }
 
+function unauthorizedReason(payload: unknown): UnauthorizedReason {
+  if (!isRecord(payload) || !isRecord(payload.error)) return "unknown";
+  const codes = [payload.error.code, payload.error.type];
+  if (codes.includes("token_revoked") || codes.includes("token_invalidated")) return "revoked";
+  return codes.includes("token_expired") ? "expired" : "unknown";
+}
+
+async function readUnauthorizedReason(response: Response): Promise<UnauthorizedReason> {
+  const encoded = response.headers.get("x-error-json");
+  let fromHeader: UnauthorizedReason = "unknown";
+  if (encoded) {
+    try {
+      fromHeader = unauthorizedReason(JSON.parse(Buffer.from(encoded, "base64").toString("utf8")));
+    } catch {
+      // A malformed diagnostic header does not explain the 401.
+    }
+  }
+  if (fromHeader === "revoked") return fromHeader;
+  const fromBody = unauthorizedReason(await response.json().catch(() => undefined));
+  return fromBody === "unknown" ? fromHeader : fromBody;
+}
+
 /** Fetch usage for accountId with the supplied access token; credentials are sent only in request headers. */
 export async function fetchCodexUsage(
   accessToken: string,
@@ -169,18 +204,19 @@ export async function fetchCodexUsage(
         Authorization: `Bearer ${token}`,
         "ChatGPT-Account-Id": account,
       },
+      redirect: "error",
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
     if (error instanceof Error && error.name === "TimeoutError") {
-      throw new Error("查询 OpenAI 用量超时，请稍后重试。", { cause: error });
+      throw new Error("查询 OpenAI 用量超时，请稍后重试。");
     }
-    throw new Error("无法连接 OpenAI 用量接口，请检查网络后重试。", { cause: error });
+    throw new Error("无法连接 OpenAI 用量接口，请检查网络后重试。");
   }
 
   if (!response.ok) {
     if (response.status === 401) {
-      throw new Error("OpenAI 用量接口拒绝了登录凭据（401）。请通过 Codex 更新登录后重试。");
+      throw new CodexUsageUnauthorizedError(await readUnauthorizedReason(response));
     }
     if (response.status === 403) {
       throw new Error("当前账号无权查询此用量接口（403）。");
@@ -194,8 +230,8 @@ export async function fetchCodexUsage(
   let data: unknown;
   try {
     data = await response.json();
-  } catch (error) {
-    throw new Error("OpenAI 用量接口返回了无效 JSON。", { cause: error });
+  } catch {
+    throw new Error("OpenAI 用量接口返回了无效 JSON。");
   }
   if (typeof data !== "object" || data === null || Array.isArray(data)) {
     throw new Error("OpenAI 用量接口返回格式不是 JSON 对象。");

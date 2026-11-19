@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  CodexUsageUnauthorizedError,
   fetchCodexUsage,
   formatCodexUsage,
   parseCodexUsage,
@@ -170,8 +171,9 @@ test("rejects empty or non-string credentials before making a request", async ()
 test("reports unauthorized and malformed JSON without leaking response bodies", async () => {
   const unauthorized: UsageFetch = async () => new Response("private response", { status: 401 });
   await assert.rejects(fetchCodexUsage("secret-token", "account-123", unauthorized), (error: unknown) => {
-    assert.ok(error instanceof Error);
-    assert.match(error.message, /更新登录/);
+    assert.ok(error instanceof CodexUsageUnauthorizedError);
+    assert.equal(error.reason, "unknown");
+    assert.match(error.message, /401.*未返回可识别/);
     assert.doesNotMatch(error.message, /secret-token|private response/);
     return true;
   });
@@ -181,6 +183,20 @@ test("reports unauthorized and malformed JSON without leaking response bodies", 
 
   const invalidRoot: UsageFetch = async () => new Response("[]", { status: 200 });
   await assert.rejects(fetchCodexUsage("secret-token", "account-123", invalidRoot), /不是 JSON 对象/);
+});
+
+test("recognizes a revoked session from the base64 x-error-json header", async () => {
+  const header = Buffer.from(JSON.stringify({ error: { code: "token_invalidated", message: "secret-token" } })).toString("base64");
+  const fakeFetch: UsageFetch = async () => new Response("private response", {
+    status: 401, headers: { "x-error-json": header },
+  });
+  await assert.rejects(fetchCodexUsage("secret-token", "account-123", fakeFetch), (error: unknown) => {
+    assert.ok(error instanceof CodexUsageUnauthorizedError);
+    assert.equal(error.reason, "revoked");
+    assert.match(error.message, /凭据已撤销或失效/);
+    assert.doesNotMatch(error.message, /secret-token|private response/);
+    return true;
+  });
 });
 
 test("reports other HTTP failures generically and handles request timeouts", async () => {

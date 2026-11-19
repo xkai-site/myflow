@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readCodexUsageCredential } from "./codex-auth.ts";
-import { fetchCodexUsage, formatCodexUsage, parseCodexUsage } from "./codex-usage.ts";
+import { queryCodexUsage } from "./codex-auth.ts";
+import { formatCodexUsage, parseCodexUsage } from "./codex-usage.ts";
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("usage-openai", {
@@ -19,8 +19,7 @@ export default function (pi: ExtensionAPI) {
           updateProgress();
           animation = setInterval(updateProgress, 180);
         }
-        const credential = readCodexUsageCredential();
-        const response = await fetchCodexUsage(credential.access, credential.accountId);
+        const response = await queryCodexUsage();
         ctx.ui.notify(formatCodexUsage(parseCodexUsage(response)), "info");
       } catch (error) {
         const message = error instanceof Error ? error.message : "查询 OpenAI 用量失败。";
