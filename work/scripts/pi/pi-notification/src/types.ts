@@ -114,7 +114,7 @@ export interface RunOutcome {
   durationMs: number;
   /** Final assistant stopReason; undefined when it cannot be determined. */
   stopReason?: AssistantStopReason;
-  /** Already redacted. */
+  /** Bounded, redacted diagnostic summary from the lifecycle. */
   errorMessage?: string;
   toolFailures: ToolFailure[];
   compactFailed?: boolean;
@@ -429,7 +429,8 @@ export interface LifecycleUpdate {
   facts: RuntimeFact[];
   outcome?: RunOutcome;
   toolFailure?: ToolFailureEvent;
-  compactFailure?: { sessionId: string; runId: string; operationId: string };
+  /** Like RunOutcome, carries only the lifecycle's diagnostic summary. */
+  compactFailure?: { sessionId: string; runId: string; operationId: string; errorMessage?: string };
   prompt?: { promptId: string; kind: BlockingPromptKind };
 }
 

@@ -254,7 +254,10 @@ export function buildSettingItems(config: NotificationConfig): SettingItem[] {
     path: "content.mode",
     kind: "enum",
     labels: CONTENT_LABELS,
-    candidates: () => [{ value: "brief", label: "简要" }, { value: "full", label: "完整（邮箱附全文）" }],
+    candidates: () => [
+      { value: "brief", label: "简要  会话、状态、用时与成本，异常时附原因" },
+      { value: "full", label: "完整  邮箱另附上下文使用率和 Agent 回复全文" },
+    ],
   });
   add({ group: "免打扰", label: "启用免打扰", path: "quietHours.enabled", kind: "boolean" });
   for (const [path, label] of [
@@ -435,14 +438,6 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
         .join("、") || "全部关闭",
   },
   {
-    id: "content",
-    label: "内容与隐私",
-    kind: "fields",
-    group: "内容",
-    summary: (config) => CONTENT_LABELS[config.content.mode],
-    actions: [{ key: "action:preview", action: "preview" }],
-  },
-  {
     id: "quietHours",
     label: "免打扰时段",
     kind: "fields",
@@ -481,9 +476,10 @@ export const SETTING_CATEGORIES: readonly SettingCategory[] = [
     id: "more",
     label: "更多设置",
     kind: "sections",
-    sections: ["content", "quietHours", "professional"],
+    sections: ["quietHours", "professional"],
     summary: () => "",
     actions: [
+      { key: "action:preview", action: "preview" },
       { key: "action:status", action: "status" },
       { key: "action:reload", action: "reload" },
       { key: "action:search", action: "search" },

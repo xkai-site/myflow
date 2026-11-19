@@ -131,8 +131,39 @@ try {
   assert.deepEqual(attempts, ["good@example.org", "bad@example.org", "bad@example.org"], "只重试未接受目标");
   assert.ok(logLines.every((entry) => !JSON.stringify(entry).includes("example.org")), "日志不得出现地址");
   assert.ok(logLines.some((entry) => JSON.stringify(entry).includes("EAUTH")), "日志应包含安全的 SMTP 错误代码");
+  const briefFailure = email.format({ ...request, title: "运行失败 - myflow", body: "失败原因：服务不可用 <500>" });
+  assert.equal(briefFailure.subject, "[Pi]运行失败 - myflow");
+  assert.equal(briefFailure.text, "失败原因：服务不可用 <500>");
+  assert.match(briefFailure.html, /<p>失败原因：服务不可用 &lt;500&gt;<\/p>/);
+  assert.doesNotMatch(briefFailure.html, /运行失败 - myflow|Agent回复|当前上下文/);
+
+  const untrusted = [
+    "普通段落 <script>text & more</script> 结束",
+    '<img src="https://example.org/raw" onerror="handler()">',
+    "![图片](https://example.org/remote) [链接](javascript:example()) [参考][ref]",
+    '[ref]: https://example.org/reference "描述"',
+    "<https://example.org/autolink> &lt;style&gt;",
+  ].join("\n\n");
+  const safe = email.format({ ...request, details: { finalReply: untrusted } });
+  assert.equal(safe.text, `body\n\nAgent回复\n\n${untrusted}`);
+  assert.match(safe.html, /&lt;script&gt;text &amp; more&lt;\/script&gt;/);
+  assert.match(safe.html, /&lt;img src=&quot;https:\/\/example\.org\/raw&quot; onerror=&quot;handler\(\)&quot;&gt;/);
+  assert.match(safe.html, /!\[图片\]\(https:\/\/example\.org\/remote\) \[链接\]\(javascript:example\(\)\) \[参考\]\[ref\]/);
+  assert.match(safe.html, /\[ref\]: https:\/\/example\.org\/reference &quot;描述&quot;/);
+  assert.match(safe.html, /&lt;https:\/\/example\.org\/autolink&gt; &lt;style&gt;/);
+  assert.doesNotMatch(safe.html, /<(?:img|script|a|style)\b|<[^>]+(?:src|href|onerror)=/i);
+
+  const tableSource = "| a | b |\n| --- | --- |\n| c |";
+  const tableMail = email.format({ ...request, details: { finalReply: tableSource } });
+  assert.match(tableMail.html, /\| a \| b \|<br>\| --- \| --- \|<br>\| c \|/);
+  assert.doesNotMatch(tableMail.html, /<table>/);
+  const deep = ">".repeat(4000) + "a <img src=x> 尾部";
+  const deepMail = email.format({ ...request, body: "", details: { finalReply: deep } });
+  assert.equal(deepMail.text, `Agent回复\n\n${deep}`);
+  assert.ok(deepMail.html.includes(`${"&gt;".repeat(4000)}a &lt;img src=x&gt; 尾部`), "深度超限时安全回退且不丢尾部");
+
   const beforeOversize = attempts.length;
-  for (const finalReply of ["私".repeat(MAX_MAIL_CONTENT_BYTES / 2), "<".repeat(MAX_MAIL_CONTENT_BYTES / 4)]) {
+  for (const finalReply of ["私".repeat(MAX_MAIL_CONTENT_BYTES / 2), "```\n" + "&".repeat(MAX_MAIL_CONTENT_BYTES / 4) + "\n```"]) {
     await assert.rejects(email.send({ ...request, details: { finalReply } }, new AbortController().signal), /超过 1 MiB 内容上限，未发送/);
     assert.equal(attempts.length, beforeOversize, "超限必须在任何收件人投递前明确失败");
   }
@@ -171,6 +202,7 @@ try {
   const { createService } = await mail("service.ts");
   const { createRegistry } = await mail("providers/registry.ts");
   const { createTerminalNotifier } = await mail("providers/terminal.ts");
+  const { buildWebhookPayload } = await mail("providers/webhook.ts");
   const merged = mergeConfig(defaultConfig(), {
     providers: [{ id: "email", type: "email", enabled: true, options }],
     rules: { runCompleted: { channels: ["terminal", "email"] } },
@@ -198,7 +230,7 @@ try {
   const service = createService({ config: notificationConfig, registry, log: logger, now: () => now });
   try {
     lifecycle.onSessionStart({ sessionId: "normal-session", reason: "startup" });
-    const finalReply = `\n# PRIVATE FINAL\n\n- 列表\n  - 缩进\n\n\`\`\`js\n\tconst tag = "<img src=x> &";\n\`\`\`\n\n${"长回复段落。\n".repeat(1000)}回复完整结尾\n`;
+    const finalReply = `\n# PRIVATE FINAL\n\n普通段落第一行\n第二行\n\n第二段 **加粗**\n\n- 列表\n  - 缩进\n\n3. 有序项\n\n\`\`\`js\n\tconst tag = "<img src=x> &";\n\`\`\`\n\n${"长回复段落。\n".repeat(1000)}回复完整结尾\n`;
     const run = (replyCandidate) => {
       lifecycle.onAgentStart({ sessionId: "normal-session" });
       lifecycle.onAssistantMessage({ sessionId: "normal-session", stopReason: "stop", usageCostUsd: 0.0123 });
@@ -211,7 +243,7 @@ try {
     assert.equal(service.submit(brief).accepted, true);
     await service.flush(1000);
     assert.equal(messages[0].text, "");
-    assert.doesNotMatch(messages[0].html, /PRIVATE FINAL|上下文/);
+    assert.equal(messages[0].html, "");
 
     notificationConfig.content.mode = "full";
     const full = run(finalReply);
@@ -219,18 +251,29 @@ try {
     assert.equal(service.submit(full).accepted, true);
     await service.flush(1000);
     assert.equal(service.submit(full).reason, "duplicate", "双渠道仍保持同事件去重");
+    const title = "已完成 [38秒，$0.0123] - myflow";
     for (const toast of toasts) {
-      assert.equal(Buffer.from(toast.env.PI_NOTIFY_TOAST_TITLE, "base64").toString("utf8"), "myflow：已完成（38秒，$0.0123）");
+      assert.equal(Buffer.from(toast.env.PI_NOTIFY_TOAST_TITLE, "base64").toString("utf8"), title);
       assert.equal(Buffer.from(toast.env.PI_NOTIFY_TOAST_BODY, "base64").toString("utf8"), "");
     }
+    const webhook = buildWebhookPayload(full);
+    assert.equal(webhook.title, title);
+    assert.doesNotMatch(JSON.stringify(webhook), /PRIVATE FINAL|上下文/);
     const fullMail = messages[1];
-    assert.equal(fullMail.subject, "[Pi]myflow：已完成（38秒，$0.0123）");
-    assert.equal(fullMail.text, `上下文 12%\n\n最终回复\n\n${finalReply}`);
-    assert.match(fullMail.html, /white-space:pre-wrap[\s\S]*\n- 列表\n  - 缩进[\s\S]*\n\tconst tag = &quot;&lt;img src=x&gt; &amp;&quot;;[\s\S]*回复完整结尾/);
+    assert.equal(fullMail.subject, `[Pi]${title}`);
+    assert.equal(fullMail.text, `当前上下文已使用 12%\n\nAgent回复\n\n${finalReply}`);
+    assert.ok(!fullMail.html.includes(title), "正文不重复主题");
+    assert.match(fullMail.html, /<p>当前上下文已使用 12%<\/p><p><strong>Agent回复<\/strong><\/p><h1>PRIVATE FINAL<\/h1>/);
+    assert.match(fullMail.html, /<p>普通段落第一行<br>第二行<\/p>\s*<p>第二段 <strong>加粗<\/strong><\/p>/);
+    assert.match(fullMail.html, /<ul>\s*<li>列表<ul>\s*<li>缩进<\/li>\s*<\/ul>\s*<\/li>\s*<\/ul>/);
+    assert.match(fullMail.html, /<ol start="3">\s*<li>有序项<\/li>\s*<\/ol>/);
+    assert.equal(fullMail.html.match(/<pre\b/g)?.length, 1);
+    assert.match(fullMail.html, /<pre style="white-space:pre-wrap[^>]+><code>\tconst tag = &quot;&lt;img src=x&gt; &amp;&quot;;<\/code><\/pre>[\s\S]*回复完整结尾/);
     assert.doesNotMatch(fullMail.html, /<img/);
     assert.equal(service.submit(run(undefined)).accepted, true);
     await service.flush(1000);
-    assert.equal(messages[2].text, "上下文 12%\n\n没有最终回复。");
+    assert.equal(messages[2].text, "当前上下文已使用 12%\n\nAgent回复\n\n没有最终回复。");
+    assert.match(messages[2].html, /<strong>Agent回复<\/strong><\/p><p>没有最终回复。<\/p>/);
     const snapshot = service.snapshot();
     assert.equal(snapshot.byProvider.terminal.delivered, 3);
     assert.equal(snapshot.byProvider.email.delivered, 3);

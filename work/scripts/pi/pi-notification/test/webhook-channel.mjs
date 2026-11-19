@@ -134,7 +134,7 @@ await step("format：结构化载荷只含元数据（不含 prompt / 完整回�
 await step("send：真实 POST + HMAC 签名（签名对象是实际发送的字节）", async () => {
   const log = trackingLog();
   const options = { url: `http://127.0.0.1:${PORT}/hook?token=in-query`, secretEnv: "PI_NOTIFY_UNIT_SECRET" };
-  const brief = { title: "myflow：运行失败（38秒，$0.0246）", body: "失败原因：服务不可用" };
+  const brief = { title: "运行失败 [38秒，$0.0246] - myflow", body: "失败原因：服务不可用" };
   await notifier(options, { log }).send(request({ ...brief, details: { contextPercent: 42, finalReply: "PRIVATE FINAL REPLY" } }), new AbortController().signal);
 
   assert.equal(received.length, 1);

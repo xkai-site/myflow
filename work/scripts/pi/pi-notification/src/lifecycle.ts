@@ -1,5 +1,5 @@
 /** Single plain-data state machine. Only agent_settled concludes a logical run. */
-import { redact, sanitizeError } from "./log.ts";
+import { sanitizeError, summarizeError } from "./log.ts";
 import { projectRun } from "./messages.ts";
 import type {
   AssistantStopReason, BlockingPromptKind, CompactionReason, LifecycleUpdate, Logger,
@@ -20,7 +20,7 @@ export interface Lifecycle {
   onAgentStart(input: { sessionId: string }): void;
   onAssistantMessage(input: { sessionId: string; stopReason: AssistantStopReason | undefined; errorMessage?: string; usageCostUsd?: number }): void;
   onToolExecutionEnd(input: { sessionId: string; toolName: string; isError: boolean; toolCallId?: string }): ToolFailureEvent | null;
-  onCompactFailed(input: { sessionId: string; reason: string; errorMessage?: string; aborted: boolean }): { sessionId: string; runId: string; operationId: string } | null;
+  onCompactFailed(input: { sessionId: string; reason: string; errorMessage?: string; aborted: boolean }): NonNullable<LifecycleUpdate["compactFailure"]> | null;
   onUiPromptStart(input: { sessionId: string; kind: string; title?: string }): void;
   onUiPromptEnd(input: { sessionId: string; kind: string }): void;
   onSettled(input: { sessionId: string; isIdle: boolean; aborted?: boolean }): RunOutcome | null;
@@ -117,7 +117,7 @@ export function createLifecycle({ log, now, instanceToken }: LifecycleOptions): 
       run.sawAssistant = true; run.assistantMessageCount += 1; run.stopReason = stopReason;
       run.replyCandidate = undefined;
       // A successful retry replaces an earlier error, including its error text.
-      run.errorMessage = errorMessage ? redact(errorMessage) : undefined;
+      run.errorMessage = summarizeError(errorMessage);
       if (classify(stopReason) === "completed") run.overflowRecoveryFailed = false;
       if (typeof usageCostUsd === "number" && Number.isFinite(usageCostUsd) && usageCostUsd >= 0) {
         run.costReportCount += 1;
@@ -141,12 +141,13 @@ export function createLifecycle({ log, now, instanceToken }: LifecycleOptions): 
     onCompactFailed({ sessionId, reason, errorMessage, aborted }) {
       if (!accept(sessionId)) return null;
       const op = compaction ?? startCompaction(compactionReason(reason));
+      const error = summarizeError(errorMessage);
       if (activeRun) {
         activeRun.compactFailed = true;
         if (!aborted) activeRun.compactionError = true;
         if (reason === "overflow" && !aborted) {
           activeRun.overflowRecoveryFailed = true;
-          activeRun.errorMessage = errorMessage ? redact(errorMessage) : activeRun.errorMessage;
+          if (error) activeRun.errorMessage = error;
         }
       }
       lastOperation = { operationId: op.operationId, reason: op.reason, status: aborted ? "aborted" : "failed" };
@@ -154,9 +155,9 @@ export function createLifecycle({ log, now, instanceToken }: LifecycleOptions): 
       if (!activeRun) restingState = aborted ? "idle" : "error";
       log.record({ event: "lifecycle_compact_failed", sessionId, operationId: op.operationId,
         ...(activeRun ? { runId: activeRun.runId } : {}), reason, aborted,
-        ...(errorMessage ? { error: sanitizeError(errorMessage, 200) } : {}) });
+        ...(error ? { error } : {}) });
       // v1 notification scope remains a string; it is not an agent run in the API.
-      return { sessionId, runId: activeRun?.runId ?? op.operationId, operationId: op.operationId };
+      return { sessionId, runId: activeRun?.runId ?? op.operationId, operationId: op.operationId, ...(error ? { errorMessage: error } : {}) };
     },
     onUiPromptStart({ sessionId, kind }) {
       if (!accept(sessionId) || !blockingKind(kind)) return;
@@ -281,7 +282,7 @@ export function createLifecycle({ log, now, instanceToken }: LifecycleOptions): 
               update.compactFailure = info;
               emit({ type: "compaction.settled", operationId: info.operationId, ...(activeRun ? { runId: activeRun.runId } : {}),
                 data: { reason: compact.reason, status: compact.aborted ? "aborted" : "failed",
-                  ...(!compact.aborted && compact.errorMessage ? { errorMessage: sanitizeError(compact.errorMessage, 200) } : {}) } });
+                  ...(!compact.aborted && info.errorMessage ? { errorMessage: info.errorMessage } : {}) } });
             }
             break;
           }

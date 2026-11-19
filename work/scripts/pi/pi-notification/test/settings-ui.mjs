@@ -94,7 +94,7 @@ function harness(raw, options = {}) {
     testEmail(onProgress) { return host.test(["email"], onProgress); },
     reload() { calls.reload++; return { ok: true, message: "已重读，保留本对话修改" }; },
     statusLines: () => ["状态与诊断", ...Array.from({ length: 24 }, (_, i) => `诊断行 ${i}`)],
-    preview: () => ({ ok: true, message: "示例，不会发送", lines: ["示例会话：已完成（2分35秒，$0.0246）", "固定数据，不读取真实回复"] }),
+    preview: () => ({ ok: true, message: "示例，不会发送", lines: ["已完成 [2分35秒，$0.0246] - 示例会话", "固定数据，不读取真实回复"] }),
   };
   if (options.credentials) Object.assign(host, {
     credentialState: () => options.credentials.status(), credentialStatus: () => options.credentials.status().message,
@@ -107,7 +107,7 @@ function harness(raw, options = {}) {
       agentDir: () => dir, log: { log() {}, record() {} }, sessionId: () => "fake-ui", isSilenced: () => false,
       service() { throw new Error("Settings interactions must not access delivery service"); }, reload() {},
       overlay: () => overlay, setOverlay(next) { overlay = next; }, userRaw: host.userRaw });
-    for (const name of ["channelActivation", "enableChannel", "setValue", "saveDefault", "saveChanges", "followUserDefault", "restoreBuiltinDefault"]) host[name] = application[name];
+    for (const name of ["channelActivation", "enableChannel", "setValue", "saveDefault", "saveChanges", "followUserDefault", "restoreBuiltinDefault", "preview"]) host[name] = application[name];
   }
   const bindings = { "tui.select.up": K.up, "tui.select.down": K.down, "tui.select.confirm": K.enter, "tui.select.cancel": K.esc, "tui.select.pageUp": "\x1b[5~", "tui.select.pageDown": "\x1b[6~" };
   const component = new NotifySettingsComponent({ host, theme: options.theme ?? { fg: (_, text) => text, bold: (text) => text },
@@ -150,7 +150,9 @@ try {
     assert.ok(h.frame().length < 12);
     assert.doesNotMatch(h.frame().join(""), /未保存|Ctrl\+|Enter|仅本对话/);
     assert.doesNotMatch(h.frame().join(""), /provider|inherit|minLevel|coalesce|overlay/);
-    row(h, "更多设置", true); assert.match(h.frame().join(""), /内容与隐私.*免打扰时段.*专业设置/);
+    row(h, "更多设置", true);
+    assert.match(h.frame().join(""), /通知内容.*免打扰时段.*专业设置.*通知预览/);
+    assert.doesNotMatch(h.frame().join(""), /内容与隐私/);
   });
   await step("常用提醒时机仅完成/失败/等待输入，默认不改变", () => {
     const h = harness(); row(h, "提醒时机", true);
@@ -226,13 +228,41 @@ try {
     reception(h); row(h, "邮箱配置", true); row(h, "邮箱通知", true);
     assert.equal(h.host.config().providers.find((p) => p.id === "email").enabled, true);
   });
-  await step("通知内容只有两个模式，选择完整仅改变当前对话；时间输入仍校验", () => {
-    const h = harness(); searchItem(h, "content.mode");
-    assert.match(h.frame().join(""), /简要.*完整/);
-    choose(h, "完整（邮箱附全文）");
+  await step("更多设置直达通知内容：预览、当前对话覆盖、保存和恢复", () => {
+    const h = harness({ content: { includeAssistantExcerpt: true } }, { realActions: true });
+    row(h, "更多设置", true);
+    row(h, "通知预览", true);
+    assert.match(h.frame().join("\n"), /已完成 \[2分35秒，\$0\.0246\] - 示例会话/);
+    assert.doesNotMatch(h.frame().join("\n"), /当前上下文|Agent回复/);
+    h.press(K.esc);
+    row(h, "通知内容", true);
+    assert.equal(h.frame()[0], "通知内容");
+    assert.match(h.frame().join("\n"), /简要  会话、状态、用时与成本，异常时附原因 +（默认）/);
+    assert.match(h.frame().join("\n"), /完整  邮箱另附上下文使用率和 Agent 回复全文/);
+    assert.equal(h.frame().filter((line) => /(?:简要|完整)  /.test(line)).length, 2);
+    choose(h, "完整");
     assert.equal(h.host.config().content.mode, "full");
-    assert.equal(h.raw(), undefined);
-    home(h); searchItem(h, "quietHours.start"); choose(h, "自定义…");
+    assert.equal(h.raw().content.mode, undefined);
+    h.press(K.esc);
+    row(h, "通知预览", true);
+    assert.match(h.frame().join("\n"), /当前上下文已使用 42%\s+Agent回复/);
+    assert.equal(h.calls.test.length, 0);
+    h.press(K.esc);
+    row(h, "通知内容", true);
+    h.press(K.save);
+    assert.deepEqual(h.raw().content, { mode: "full" });
+    choose(h, "简要");
+    assert.equal(h.host.config().content.mode, "brief");
+    h.press("?");
+    h.press("a");
+    assert.equal(h.host.config().content.mode, "full");
+    h.press("d");
+    confirm(h);
+    assert.equal(h.raw().content?.mode, undefined);
+    assert.equal(h.host.config().content.mode, "brief");
+  });
+  await step("免打扰时间输入仍校验", () => {
+    const h = harness(); searchItem(h, "quietHours.start"); choose(h, "自定义…");
     for (let i = 0; i < 5; i++) h.press("\x7f"); h.press("25:00"); h.press(K.enter); assert.match(h.frame().join(""), /Enter 应用.*Esc 取消/);
     assert.equal(h.host.config().quietHours.start, "23:00");
   });
@@ -247,11 +277,9 @@ try {
     h.press("?"); for (let i = 0; i < 10; i++) { for (const line of h.frame(20)) assert.ok(tui.visibleWidth(line) <= 20); h.press(K.down); }
     h.press(K.esc); assert.equal(h.frame()[0], "统一接收选择");
   });
-  await step("免打扰折叠与提醒预览不发送", () => {
+  await step("免打扰折叠可打开时间和例外参数", () => {
     const h = harness(); row(h, "更多设置", true); row(h, "免打扰时段", true);
     row(h, "静默时间与例外", true); assert.match(h.frame().join(""), /开始时间/);
-    home(h); row(h, "更多设置", true); row(h, "内容与隐私", true); row(h, "通知预览", true);
-    assert.equal(h.frame()[0], "通知预览"); assert.equal(h.calls.test.length, 0);
   });
   await step("强制静默是额外限制；关闭组件不写盘", () => {
     const h = harness(undefined, { restrictions: [{ label: "强制静默", reason: "--no-notify" }] });
@@ -431,7 +459,7 @@ try {
   await step("批量保存默认取消、Esc 原焦点返回；确认原子写入所有修改", () => {
     const h = harness({ api: { enabled: false }, future: "keep" });
     row(h, "通知总开关"); h.press(K.space);
-    searchItem(h, "content.mode"); choose(h, "完整（邮箱附全文）"); home(h);
+    searchItem(h, "content.mode"); choose(h, "完整"); home(h);
     row(h, "保存为默认设置", true);
     assert.match(h.frame().join(""), /将保存以下修改.*其他已打开对话不变/);
     assert.doesNotMatch(h.frame().join(""), /JSON|API|授权码/);
@@ -571,7 +599,7 @@ try {
   });
   await step("范围确认超过五项可分页，未查看项目也不重复或遗漏保存", () => {
     const h = harness();
-    for (const [id, label] of [["content.mode", "完整（邮箱附全文）"], ["quietHours.enabled", "开启"], ["rules.runAborted.enabled", "开启"],
+    for (const [id, label] of [["content.mode", "完整"], ["quietHours.enabled", "开启"], ["rules.runAborted.enabled", "开启"],
       ["rules.runCompleted.enabled", "关闭"], ["rules.toolFailed.enabled", "关闭"], ["rules.waitingForUser.enabled", "开启"]]) {
       searchItem(h, id); choose(h, label);
     }
@@ -822,7 +850,10 @@ try {
       row(h, "通知总开关", true); assert.doesNotMatch(h.frame(width).join(""), /已应用|仅本对话/);
       assert.match(h.frame(width).join(""), /当前对话.*未保存修改/);
       h.press(K.enter); assert.doesNotMatch(h.frame().join(""), /保存为默认设置/);
-      row(h, "更多设置", true); h.press("?");
+      row(h, "更多设置", true);
+      h.press("?");
+      assert.match(h.frame(width).join(""), /设置详情：通知内容/);
+      h.press("?");
       assert.match(h.frame(width).join(""), /Ctrl\+S/);
     }
   });

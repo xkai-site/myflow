@@ -73,7 +73,8 @@ export function createRuntime(options: RuntimeOptions) {
         if (request) service.submit(request);
       }
       if (update.compactFailure && signal.compact) {
-        const request = evaluateCompactFailure({ ...update.compactFailure, ...signal.compact, labels, seq: ++compactSeq }, config);
+        const { reason, aborted } = signal.compact;
+        const request = evaluateCompactFailure({ ...update.compactFailure, reason, aborted, labels, seq: ++compactSeq }, config);
         if (request) service.submit(request);
       }
       if (update.prompt) {

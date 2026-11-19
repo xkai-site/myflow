@@ -193,7 +193,7 @@ await step("S5 中文化只改展示：值/配置键不变，阈值与规则严�
   assert.ok(!defaultItems.some((item) => item.id === "rules.toolFailed.mode"));
   assert.ok(!defaultItems.some((item) => item.id === "rules.waitingForUser.kinds"));
   assert.deepEqual(labels("quietHours.exceptLevels"), ["提示", "警告", "错误"]);
-  assert.deepEqual(labels("content.mode"), ["简要", "完整（邮箱附全文）"]);
+  assert.deepEqual(itemOf("content.mode").candidates(config.defaultConfig()).map(({ value }) => value), ["brief", "full"]);
   assert.deepEqual(defaultItems.filter((item) => item.group === "内容").map((item) => item.id), ["content.mode"]);
   assert.deepEqual(labels("provider:terminal"), ["开启", "关闭"]);
 

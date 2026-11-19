@@ -1521,11 +1521,15 @@ await step("R 实际宿主：旧配置简要，显式完整仅邮件发送多轮
           assert.equal(messages.length, before + 1);
           assert.equal(delta.osc.osc777.length, 1);
           const [osc] = delta.osc.osc777;
-          assert.ok(oscTitle(osc).startsWith(`${name}：已完成（`));
-          assert.ok(oscTitle(osc).endsWith(`，${totalCost}）`));
+          const title = oscTitle(osc);
+          assert.ok(title.startsWith("已完成 ["));
+          assert.ok(title.endsWith(`，${totalCost}] - ${name}`));
           assert.equal(oscBody(osc), "");
           assert.doesNotMatch(osc, /PRIVATE|上下文|final tail/);
-          return messages.at(-1);
+          const message = messages.at(-1);
+          assert.equal(message.subject, `[Pi]${title}`);
+          assert.ok(!message.html?.includes(title));
+          return message;
         }
         const brief = await run("content", "$0.0246");
         assert.equal(brief.text, "");
@@ -1534,10 +1538,10 @@ await step("R 实际宿主：旧配置简要，显式完整仅邮件发送多轮
         host.writeUserConfig({ ...config, content: { mode: "full" } });
         await reloadViaUi(host);
         const full = await withEnv({ PROBE_TOOL_TURNS: "2" }, () => run("重构登录", "$0.0738"));
-        assert.equal(full.text, `上下文 42%\n\n最终回复\n\n${finalReply}`);
-        assert.match(full.html, /\n\tconst a = &#39;&lt;tag&gt;&#39;;\n/);
+        assert.equal(full.text, `当前上下文已使用 42%\n\nAgent回复\n\n${finalReply}`);
+        assert.match(full.html, /<h1>PRIVATE FINAL<\/h1>[\s\S]*<code>\tconst a = &#39;&lt;tag&gt;&#39;;<\/code>/);
         const empty = await withEnv({ PROBE_TOOL_TURNS: "2", PROBE_ASSISTANT_TEXT: "" }, () => run("重构登录", "$0.0738"));
-        assert.equal(empty.text, "上下文 42%\n\n没有最终回复。");
+        assert.equal(empty.text, "当前上下文已使用 42%\n\nAgent回复\n\n没有最终回复。");
         const log = readJsonl(host.pluginFile);
         assert.doesNotMatch(JSON.stringify(log), /PRIVATE|final tail|重构登录/);
         assert.deepEqual(host.runtimeErrors, []);

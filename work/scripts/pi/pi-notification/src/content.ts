@@ -1,12 +1,11 @@
 /** Human presentation shared by rule evaluation, email and the settings preview. */
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { singleLine } from "./log.ts";
 import type { NotificationRequest, SessionLabels } from "./types.ts";
 
-// A compact title target, not a transport limit. Only the name gives up space;
-// status, duration and cost are never cut. Clients still control the visible width.
-const TITLE_GRAPHEMES = 40;
-const LEADING_LABEL_GRAPHEMES = 10;
-const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+// A shared presentation target, not a transport limit. Only the name gives up space.
+const TITLE_COLUMNS = 48;
+const NAME_SEPARATOR = " - ";
 
 function formatDuration(ms: number | undefined): string | undefined {
   if (ms === undefined || !Number.isFinite(ms) || ms < 0) return undefined;
@@ -25,24 +24,19 @@ function formatUsd(value: number | undefined): string | undefined {
 
 export function notificationTitle(status: string, labels?: SessionLabels, durationMs?: number, costUsd?: number): string {
   const metrics = [formatDuration(durationMs), formatUsd(costUsd)].filter((value) => value !== undefined);
-  const core = metrics.length ? `${status}（${metrics.join("，")}）` : status;
+  const core = metrics.length ? `${status} [${metrics.join("，")}]` : status;
   const name = singleLine(labels?.sessionName ?? "") || singleLine(labels?.projectName ?? "");
   if (!name) return core;
 
-  const budget = TITLE_GRAPHEMES - [...graphemes.segment(core)].length - 3;
-  if (budget < 2) return core;
-  const parts: string[] = [];
-  for (const { segment } of graphemes.segment(name)) {
-    // Put the important fields first when a name already risks filling the visible title.
-    if (parts.length === budget) return `${core} · ${parts.slice(0, -1).join("")}…`;
-    parts.push(segment);
-  }
-  return parts.length <= LEADING_LABEL_GRAPHEMES ? `${name}：${core}` : `${core} · ${name}`;
+  const budget = TITLE_COLUMNS - visibleWidth(core + NAME_SEPARATOR);
+  // The TUI adds ANSI resets around the ellipsis; the shared title is plain text.
+  const clipped = singleLine(truncateToWidth(name, budget, "…"));
+  return clipped && (clipped !== "…" || name === clipped) ? `${core}${NAME_SEPARATOR}${clipped}` : core;
 }
 
 export function emailContent({ body, details }: Pick<NotificationRequest, "body" | "details">) {
-  const metadata = [body, details?.contextPercent === undefined ? "" : `上下文 ${details.contextPercent}%`].filter(Boolean).join("；");
-  const reply = details?.finalReply;
-  const final = reply === undefined ? "" : reply === null ? "没有最终回复。" : `最终回复\n\n${reply}`;
-  return { metadata, reply, text: [metadata, final].filter(Boolean).join("\n\n") };
+  const supplements = [body, details?.contextPercent === undefined ? "" : `当前上下文已使用 ${details.contextPercent}%`].filter(Boolean);
+  const reply = details ? { heading: "Agent回复", text: details.finalReply ?? "没有最终回复。" } : undefined;
+  const text = [...supplements, ...(reply ? [reply.heading, reply.text] : [])].join("\n\n");
+  return { supplements, reply, text };
 }

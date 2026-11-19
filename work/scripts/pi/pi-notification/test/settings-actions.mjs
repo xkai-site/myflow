@@ -327,12 +327,12 @@ try {
     const h = harness({ content: { includeAssistantExcerpt: true } });
     const item = h.item("content.mode");
     const brief = h.host.preview().lines.join("\n");
-    assert.match(brief, /示例会话：已完成（2分35秒，\$0\.0246）/);
-    assert.doesNotMatch(brief, /已添加回归测试|上下文 42%/);
+    assert.match(brief, /已完成 \[2分35秒，\$0\.0246\] - 示例会话/);
+    assert.doesNotMatch(brief, /已添加回归测试|当前上下文|Agent回复/);
     assert.equal(h.host.setValue(item, "full").ok, true);
     assert.equal(h.host.userRaw().content.mode, undefined);
     const full = h.host.preview().lines.join("\n");
-    assert.match(full, /仅邮箱追加以下内容：\n上下文 42%\n\n最终回复\n\n已修复登录问题。\n\n- 已添加回归测试。/);
+    assert.match(full, /仅邮箱追加以下内容：\n当前上下文已使用 42%\n\nAgent回复\n\n已修复登录问题。\n\n- 已添加回归测试。/);
     assert.equal(h.host.saveDefault(item).ok, true);
     assert.deepEqual(h.host.userRaw().content, { mode: "full" });
     assert.equal(h.host.restoreBuiltinDefault(item).ok, true);

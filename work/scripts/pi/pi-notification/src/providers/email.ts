@@ -3,24 +3,22 @@ import { singleLine } from "../log.ts";
 import type { Logger, Notifier, NotificationRequest } from "../types.ts";
 import { createMailSender, type MailSender } from "../mail/sender.ts";
 import type { QqCredentials } from "../mail/credentials.ts";
+import { escapeHtml, renderMailMarkdown } from "../mail/markdown.ts";
 import { createQqSmtpSender, validateQqSmtp } from "../mail/smtp.ts";
 
 const MAX_DEDUPE_KEYS = 512;
 // Bound the combined UTF-8 rendering before MIME encoding and recipient fan-out.
 export const MAX_MAIL_CONTENT_BYTES = 1024 * 1024;
 const MAIL_TOO_LARGE = "通知邮件超过 1 MiB 内容上限，未发送";
-const HTML_ENTITIES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
-const escapeHtml = (text: string) => text.replace(/[&<>"']/g, (char) => HTML_ENTITIES[char]);
 
 function formatMail(req: NotificationRequest, subjectPrefix: string) {
   const subject = singleLine(`${subjectPrefix}${req.title}`);
-  const { metadata, reply, text } = emailContent(req);
+  const { supplements, reply, text } = emailContent(req);
   const bytes = Buffer.byteLength(subject) + Buffer.byteLength(text);
   if (bytes > MAX_MAIL_CONTENT_BYTES) throw new Error(MAIL_TOO_LARGE);
-  const supplement = metadata ? `<p>${escapeHtml(metadata)}</p>` : "";
-  const final = reply === undefined ? "" : reply === null ? "<p>没有最终回复。</p>"
-    : `<p><strong>最终回复</strong></p><pre style="white-space:pre-wrap;overflow-wrap:anywhere"><code>${escapeHtml(reply)}</code></pre>`;
-  const html = `<div lang="zh-CN"><p><strong>${escapeHtml(req.title)}</strong></p>${supplement}${final}</div>`;
+  const supplement = supplements.map((part) => `<p>${escapeHtml(part)}</p>`).join("");
+  const final = reply ? `<p><strong>${escapeHtml(reply.heading)}</strong></p>${renderMailMarkdown(reply.text)}` : "";
+  const html = text ? `<div lang="zh-CN" style="font:16px/1.6 system-ui,sans-serif;overflow-wrap:anywhere">${supplement}${final}</div>` : "";
   if (bytes + Buffer.byteLength(html) > MAX_MAIL_CONTENT_BYTES) throw new Error(MAIL_TOO_LARGE);
   return { subject, text, html };
 }

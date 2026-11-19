@@ -210,11 +210,11 @@ await step("取消信号：已 abort 时不得写出任何字节", async () => {
 
 await step("本机始终只发送简要内容；OSC 标题分隔符和 Windows 传输上限单独处理", async () => {
   const { io, log, writes } = withIo({});
-  const title = "proj;name：已完成（38秒，$0.0246）";
+  const title = "已完成 [38秒，$0.0246] - proj;name";
   await terminal.createTerminalNotifier("terminal", { log, io }).send({
     ...request("run_completed"), title, body: "", details: { contextPercent: 42, finalReply: "PRIVATE REPLY" },
   }, new AbortController().signal);
-  assert.equal(writes[0], "\u001b]777;notify;proj；name：已完成（38秒，$0.0246）\u0007");
+  assert.equal(writes[0], "\u001b]777;notify;已完成 [38秒，$0.0246] - proj；name\u0007");
   const { env: payload } = terminal.buildToastInvocation(title, "😀".repeat(32767));
   assert.equal(Buffer.from(payload.PI_NOTIFY_TOAST_TITLE, "base64").toString("utf8"), title);
   assert.equal(Buffer.from(payload.PI_NOTIFY_TOAST_BODY, "base64").toString("utf8"), "详细信息请在 Pi 中查看");

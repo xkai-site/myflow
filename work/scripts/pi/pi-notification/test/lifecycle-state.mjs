@@ -248,6 +248,23 @@ await step("L8 只在 settle 采用最后一轮回复，继续执行、错误或
   }
 });
 
+await step("L8b 运行异常与溢出恢复异常只保留脱敏后的有界摘要", () => {
+  const errorMessage = `provider 500 token=hidden-value ${"错误详情 ".repeat(1000)}`;
+  for (const source of ["assistant", "overflow"]) {
+    const h = makeLifecycle();
+    startRun(h);
+    if (source === "assistant") {
+      h.lifecycle.onAssistantMessage({ sessionId: "s1", stopReason: "error", errorMessage });
+    } else {
+      h.lifecycle.onCompactFailed({ sessionId: "s1", reason: "overflow", errorMessage, aborted: false });
+    }
+    const outcome = h.lifecycle.onSettled({ sessionId: "s1", isIdle: true });
+    assert.equal(outcome.status, "failed", source);
+    assert.equal([...outcome.errorMessage].length, 200, source);
+    assert.match(outcome.errorMessage, /^provider 500 token=\*\*\* 错误详情 .*…$/u, source);
+  }
+});
+
 await step("L9 多 start 同一逻辑 run：保留工具失败、成本、开始时间；aborted 优先", () => {
   const h = makeLifecycle(); startRun(h);
   h.lifecycle.onToolExecutionEnd({ sessionId: "s1", toolName: "bash", isError: true, toolCallId: "tool-1" });

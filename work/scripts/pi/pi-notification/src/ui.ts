@@ -307,6 +307,8 @@ export class NotifySettingsComponent {
       const rows: MenuRow[] = [];
       const threshold = this.itemById("minLevel");
       if (threshold && category.id === "professional") rows.push({ key: `item:${threshold.id}`, kind: "field", item: threshold, label: "提醒级别" });
+      const content = this.itemById("content.mode");
+      if (content && category.id === "more") rows.push({ key: `item:${content.id}`, kind: "field", item: content, label: content.label });
       for (const id of category.sections ?? []) {
         const child = SETTING_CATEGORIES.find((candidate) => candidate.id === id);
         if (child) rows.push({ key: `category:${child.id}`, kind: "category", category: child });
@@ -757,7 +759,7 @@ export class NotifySettingsComponent {
     if (item.id === "reminders.failed") lines.push("包含运行失败和上下文压缩失败，不包括每次可恢复工具失败。");
     if (item.id === "content.mode") {
       lines.push("简要：会话、运行状态、用时和本次成本；异常时补充原因。",
-        "完整：仅邮箱另附上下文使用率和最终回复全文，可能含敏感内容。本机和 Webhook 仍是简要。");
+        "完整：仅邮箱另附上下文使用率和 Agent 回复全文，可能含敏感内容。本机和 Webhook 仍是简要。");
     }
     if (item.inputHint) lines.push(`输入：${item.inputHint}`);
     // “Not effective right now” is spelled out instead of hiding the field: search and the restored
@@ -1071,7 +1073,10 @@ export class NotifySettingsComponent {
   private candidateRow(item: SettingItem, candidate: Candidate, index: number, focusIndex: number, width: number): string {
     const current = this.value(item);
     const isCurrent = candidateIsCurrent(item, candidate, current);
-    const isDefault = candidateIsDefault(item, candidate, current, this.defaultValue(item), this.hasDefault(item));
+    const hasDefault = this.hasDefault(item);
+    const showBuiltin = !hasDefault && item.id === "content.mode";
+    const fallback = showBuiltin ? builtinDefaultValue(item) : this.defaultValue(item);
+    const isDefault = candidateIsDefault(item, candidate, current, fallback, hasDefault || showBuiltin);
     const suffix = isDefault && width >= DEFAULT_SUFFIX_MIN_WIDTH ? "（默认）" : "";
     const reserved = visibleWidth(suffix);
     let label = candidate.label;

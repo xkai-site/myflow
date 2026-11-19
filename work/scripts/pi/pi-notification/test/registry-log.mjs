@@ -140,11 +140,11 @@ await step("L2 Noop 渠道：validate 回显原因、send 无副作用、dispose
 await step("L3 Debug 渠道：单行简要，不记录最终回复；取消应失败", async () => {
   const harness = makeLog();
   const notifier = createDebugNotifier("d", { log: harness.log });
-  await notifier.send(request({ title: "myflow：已完成（2分35秒，$0.0246）", body: "a\nb",
+  await notifier.send(request({ title: "已完成 [2分35秒，$0.0246] - myflow", body: "a\nb",
     details: { contextPercent: 42, finalReply: "PRIVATE FINAL REPLY" } }), new AbortController().signal);
   assert.equal(harness.logs.length, 1);
   assert.deepEqual(harness.logs[0].meta, { kind: "run_completed", dedupeKey: "k" }, "结构化元数据只带 kind 与去重键");
-  assert.equal(harness.logs[0].message, "[run_completed] myflow：已完成（2分35秒，$0.0246） — a b");
+  assert.equal(harness.logs[0].message, "[run_completed] 已完成 [2分35秒，$0.0246] - myflow — a b");
 
   const cancelled = new AbortController();
   cancelled.abort();

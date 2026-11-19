@@ -1,6 +1,6 @@
 /** Rule selection and human notification content. The service owns delivery and filters. */
 import { notificationTitle } from "./content.ts";
-import { redact, singleLine } from "./log.ts";
+import { singleLine } from "./log.ts";
 import { LEVEL_RANK } from "./types.ts";
 import type {
   CompactionReason, NotificationConfig, NotificationRequest, NotifyLevel, RuleConfig,
@@ -78,8 +78,9 @@ export function evaluateRunOutcome(
       : { kind: "run_aborted", status: "已中止", rule: config.rules.runAborted } as const;
   if (!rule.enabled) return null;
 
+  const error = outcome.status === "failed" ? singleLine(outcome.errorMessage ?? "") : "";
   const body = [
-    outcome.errorMessage && outcome.status === "failed" ? `失败原因：${singleLine(outcome.errorMessage)}` : "",
+    error ? `失败原因：${error}` : "",
     truncated ? "已达到模型输出上限" : "",
     outcome.compactionError ? "上下文压缩失败" : "",
     describeToolFailures(toolFailureCount(outcome.toolFailures)),
@@ -153,7 +154,7 @@ const COMPACTION_TRIGGERS: Record<CompactionReason, string> = {
   manual: "手动压缩", threshold: "达到压缩阈值", overflow: "上下文溢出",
 };
 
-/** Standalone compaction failures have no agent settlement; user-cancelled compaction stays silent. */
+/** Compaction uses the lifecycle's bounded error summary; user-cancelled compaction stays silent. */
 export function evaluateCompactFailure(
   input: { sessionId: string; runId: string; labels?: SessionLabels; reason: CompactionReason; errorMessage?: string; aborted: boolean; seq: number },
   config: NotificationConfig,
@@ -161,7 +162,7 @@ export function evaluateCompactFailure(
   const rule = config.rules.compactFailed;
   if (!rule.enabled || input.aborted) return null;
 
-  const error = singleLine(redact(input.errorMessage ?? ""));
+  const error = singleLine(input.errorMessage ?? "");
   const trigger = COMPACTION_TRIGGERS[input.reason];
   return request({
     kind: "compact_failed",

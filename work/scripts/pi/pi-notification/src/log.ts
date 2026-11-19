@@ -106,15 +106,26 @@ export function singleLine(input: string): string {
 /** Normalises whitespace and bounds diagnostic text without splitting surrogate pairs. */
 export function sanitize(input: unknown, maxChars: number = DEFAULT_MAX_CHARS): string {
   const raw = typeof input === "string" ? input : String(input ?? "");
-  const collapsed = visibleText(raw)
+  return boundDiagnostic(visibleText(raw), maxChars);
+}
+
+function boundDiagnostic(text: string, maxChars: number): string {
+  const collapsed = text
     .replace(/[^\S\n]+/g, " ")
     .replace(/ ?\n ?/g, "\n")
     .replace(/\n{2,}/g, "\n")
     .trim();
   const limit = Number.isFinite(maxChars) && maxChars > 0 ? Math.floor(maxChars) : DEFAULT_MAX_CHARS;
-  const points = [...collapsed];
-  if (points.length <= limit) return collapsed;
-  return `${points.slice(0, Math.max(1, limit - 1)).join("")}…`;
+  if (collapsed.length <= limit) return collapsed;
+  const prefixEnd = Math.max(1, limit - 1);
+  let prefix = "";
+  let count = 0;
+  for (const point of collapsed) {
+    count += 1;
+    if (count <= prefixEnd) prefix += point;
+    if (count > limit) return `${prefix}…`;
+  }
+  return collapsed;
 }
 
 const HOME_POSIX = homedir().replace(/\\/g, "/");
@@ -163,6 +174,12 @@ export function redact(input: unknown): string {
 /** Redacts first and then sanitizes; used for every error message shown to users. */
 export function sanitizeError(input: unknown, maxChars: number = DEFAULT_MAX_CHARS): string {
   return sanitize(redact(input), maxChars);
+}
+
+/** Bounds upstream error summaries independently of notification content mode. */
+export function summarizeError(input: string | undefined): string | undefined {
+  // Strip controls before redaction so terminal escapes cannot disguise a credential key.
+  return input ? boundDiagnostic(redact(visibleText(input)), 200) || undefined : undefined;
 }
 
 function sinkPath(): string | undefined {
